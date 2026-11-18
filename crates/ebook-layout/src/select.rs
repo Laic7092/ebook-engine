@@ -126,8 +126,18 @@ pub(crate) fn selection_text(reader: &Reader<'_>, doc: &StyledDoc, sel: &Selecti
         if hi <= lo {
             continue;
         }
-        let start = (line.src.start + lo) as usize;
-        let end = (line.src.start + hi) as usize;
+        let mut start = (line.src.start + lo) as usize;
+        let mut end = (line.src.start + hi) as usize;
+        // 行内偏移通常是字形簇首（UTF-8 边界）；手搓的 Location 落在字符中间时
+        // 向外扩到最近的边界，和"半选字形整体计入"的矩形保持同一粒度。
+        let line_start = line.src.start as usize;
+        let line_end = (line.src.start + line.src.len) as usize;
+        while start > line_start && !doc.text.is_char_boundary(start) {
+            start -= 1;
+        }
+        while end < line_end && !doc.text.is_char_boundary(end) {
+            end += 1;
+        }
         let Some(fragment) = doc.text.get(start..end) else {
             continue;
         };

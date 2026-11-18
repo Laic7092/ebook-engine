@@ -551,6 +551,20 @@ fn selection_text_is_logical_bytes() {
 }
 
 #[test]
+fn selection_text_snaps_to_char_boundaries() {
+    // "中文" 各 3 字节：Location.byte 落在字符中间时向外扩，别丢字。
+    let doc = doc_one("中文", Dir::Ltr, None);
+    let ir = build(&doc);
+    let reader = Reader::new(&ir);
+    let sel = reader.selection(loc(0, 0, 1), loc(0, 0, 4));
+    assert_eq!(reader.selection_text(&doc, &sel), "中文");
+    assert_rects(
+        &reader.selection_rects(&sel),
+        &[(0, RectF::new(0.0, 0.0, 10.4, 20.0))],
+    );
+}
+
+#[test]
 fn selection_gap_and_rtl_visual_order() {
     // "axax" + 不覆盖 'x' 的度量：字形在 x=0 与 x=10.4，中间是洞。
     let doc = doc_one("axax", Dir::Ltr, None);
