@@ -239,6 +239,9 @@ pub fn property_supported(name: &str) -> bool {
             | "white-space"
             | "word-break"
             | "hyphens"
+            | "text-spacing-trim"
+            | "hanging-punctuation"
+            | "text-autospace"
             | "text-transform"
             | "vertical-align"
             | "writing-mode"
@@ -311,6 +314,15 @@ pub fn value_supported(name: &str, value: &str) -> bool {
         }
         "word-break" => matches!(v.as_str(), "normal" | "break-all" | "keep-all"),
         "hyphens" => matches!(v.as_str(), "auto" | "manual" | "none"),
+        // CSS Text 4 的标点政策。只认我们真正实现的取值，其余（space-all /
+        // trim-start / force-end 组合等）留给 issue 报告，而不是静默当成关闭。
+        "text-spacing-trim" => matches!(v.as_str(), "normal" | "none"),
+        // 布局只实现 allow-end（行末标点悬挂）。其余取值要报不支持，
+        // 不能让 "first"/"last" 静默变成关闭。
+        "hanging-punctuation" => {
+            v == "none" || v.split_whitespace().any(|part| part == "allow-end")
+        }
+        "text-autospace" => matches!(v.as_str(), "normal" | "none"),
         "text-transform" => matches!(
             v.as_str(),
             "none" | "uppercase" | "lowercase" | "capitalize"
@@ -652,6 +664,12 @@ fn apply(style: &mut ebook_ir::ComputedStyle, decl: &Decl, parent_size: f32, par
             }
         }
         "hyphens" => style.text.hyphens = value == "auto",
+        "text-spacing-trim" => style.text.rules.spacing_trim = value != "none",
+        "hanging-punctuation" => {
+            style.text.rules.hanging_punctuation =
+                value.split_whitespace().any(|part| part == "allow-end");
+        }
+        "text-autospace" => style.text.rules.autospacing = value != "none",
         "text-transform" => {
             style.text.transform = match value {
                 "uppercase" => TextTransform::Uppercase,
@@ -1201,5 +1219,66 @@ fn skip_space_and_comments(bytes: &[u8], mut i: usize) -> usize {
             continue;
         }
         return i;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn styled(css: &str) -> ebook_ir::ComputedStyle {
+        let mut style = ebook_ir::ComputedStyle::default();
+        for decl in parse_decls(css) {
+            apply(&mut style, &decl, 16.0, 400);
+        }
+        style
+    }
+
+    #[test]
+    fn text_rules_default_off() {
+        let style = styled("");
+        assert!(!style.text.rules.spacing_trim);
+        assert!(!style.text.rules.hanging_punctuation);
+        assert!(!style.text.rules.autospacing);
+    }
+
+    #[test]
+    fn text_rules_parse_css_text_4() {
+        let style = styled(
+            "text-spacing-trim: normal; hanging-punctuation: allow-end; text-autospace: normal;",
+        );
+        assert!(style.text.rules.spacing_trim);
+        assert!(style.text.rules.hanging_punctuation);
+        assert!(style.text.rules.autospacing);
+
+        let off =
+            styled("text-spacing-trim: none; hanging-punctuation: none; text-autospace: none;");
+        assert!(!off.text.rules.spacing_trim);
+        assert!(!off.text.rules.hanging_punctuation);
+        assert!(!off.text.rules.autospacing);
+    }
+
+    #[test]
+    fn text_rules_reject_unimplemented_values() {
+        // 我们只实现可判定的部分：其它取值要报 UnsupportedCss，而不是静默变开关。
+        for (name, value) in [
+            ("text-spacing-trim", "space-all"),
+            ("text-spacing-trim", "trim-start"),
+            ("hanging-punctuation", "force-end first"),
+            ("text-autospace", "ideograph-alpha"),
+        ] {
+            let decl = Decl {
+                name: name.to_string(),
+                value: value.to_string(),
+                important: false,
+            };
+            assert!(!decl_supported(&decl), "{name}: {value} 应当被报为不支持");
+        }
+    }
+
+    #[test]
+    fn hanging_punctuation_accepts_lists() {
+        let style = styled("hanging-punctuation: first allow-end;");
+        assert!(style.text.rules.hanging_punctuation);
     }
 }
