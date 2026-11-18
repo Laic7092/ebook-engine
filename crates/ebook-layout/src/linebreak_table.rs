@@ -1,4 +1,4 @@
-pub(crate) const RANGE_COUNT: usize = 2046;
+pub(crate) const RANGE_COUNT: usize = 2045;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Lb {
@@ -40,7 +40,6 @@ pub(crate) enum Lb {
     Qf,
     Qi,
     Qu,
-    Ri,
     Sp,
     Sy,
     Vf,
@@ -1984,7 +1983,6 @@ pub(crate) static RANGES: &[(u32, u32, Lb)] = &[
     (0x1ECB0, 0x1ECB0, Lb::Po),
     (0x1F000, 0x1F0FF, Lb::Id),
     (0x1F1AE, 0x1F1E5, Lb::Id),
-    (0x1F1E6, 0x1F1FF, Lb::Ri),
     (0x1F200, 0x1F384, Lb::Id),
     (0x1F385, 0x1F385, Lb::Eb),
     (0x1F386, 0x1F39B, Lb::Id),
