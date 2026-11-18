@@ -6,3 +6,8 @@ publish.workspace = true
 
 [dependencies]
 ebook-ir.workspace = true
+ebook-render.workspace = true
+
+[dev-dependencies]
+ebook-format.workspace = true
+ebook-layout.workspace = true
