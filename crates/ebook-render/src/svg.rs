@@ -5,6 +5,8 @@ use ebook_ir::{
     Renderer, Resources, Rgba8, SizeF, Surface, Unresolved,
 };
 
+pub use crate::paint::paint;
+
 pub struct SvgRenderer;
 
 impl Renderer for SvgRenderer {
@@ -15,38 +17,7 @@ impl Renderer for SvgRenderer {
         surface: &mut dyn Surface,
         res: &mut dyn Resources,
     ) -> Result<(), RenderError> {
-        let page = ir.page(page).ok_or(RenderError::NoSuchPage(page))?;
-        let origin = page.origin;
-        for op in ir.display.op_slice(page.ops) {
-            match op {
-                ebook_ir::Op::GlyphRun(run) => {
-                    let glyphs = ir.display.glyph_slice(run.glyphs);
-                    let mut moved = run.clone();
-                    moved.origin = run.origin.shifted(-origin.x, -origin.y);
-                    surface.glyph_run(&moved, glyphs, res);
-                }
-                ebook_ir::Op::Rect { rect, color } => {
-                    surface.rect(rect.shifted(-origin.x, -origin.y), *color)
-                }
-                ebook_ir::Op::Border(border) => {
-                    let mut moved = border.clone();
-                    moved.rect = border.rect.shifted(-origin.x, -origin.y);
-                    surface.border(&moved);
-                }
-                ebook_ir::Op::Image { id, rect, fit } => {
-                    surface.image(*id, rect.shifted(-origin.x, -origin.y), *fit, res)
-                }
-                ebook_ir::Op::Unresolved(u) => {
-                    let mut moved = u.clone();
-                    moved.rect = u.rect.shifted(-origin.x, -origin.y);
-                    surface.unresolved(&moved);
-                }
-                ebook_ir::Op::Link { rect, target } => {
-                    surface.link(rect.shifted(-origin.x, -origin.y), target)
-                }
-            }
-        }
-        Ok(())
+        crate::paint(ir, page, surface, res)
     }
 }
 
@@ -57,7 +28,10 @@ pub struct SvgSurface {
 
 impl SvgSurface {
     pub fn new(size: SizeF) -> Self {
-        Self { out: alloc::string::String::new(), size }
+        Self {
+            out: alloc::string::String::new(),
+            size,
+        }
     }
 
     pub fn finish(self) -> alloc::string::String {
