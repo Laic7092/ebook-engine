@@ -5,3 +5,4 @@ Cargo.lock.bak
 /web/pkg
 /web/en.epub
 /web/test.ttf
+!tests/golden/*.ir
