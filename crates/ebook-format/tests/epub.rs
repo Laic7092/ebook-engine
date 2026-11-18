@@ -98,3 +98,35 @@ fn broken_or_missing_input_is_an_error() {
     src.insert("nothing.epub", b"not a zip".to_vec());
     assert!(open(&src).is_err());
 }
+
+fn entity_source() -> MemorySource {
+    let mut src = MemorySource::new();
+    src.insert(
+        "entity.epub",
+        include_bytes!("../../../fixtures/entity.epub").to_vec(),
+    );
+    src
+}
+
+#[test]
+fn reads_chapters_with_named_and_numeric_entities() {
+    let src = entity_source();
+    let opened = open(&src).expect("open");
+    let doc = opened.chapter(&src, 0).expect("chapter");
+    let text = doc.text.as_str();
+    assert!(text.contains('\u{a0}'), "missing nbsp: {text:?}");
+    assert!(text.contains('\u{2014}'), "missing mdash: {text:?}");
+    assert!(text.contains('\u{2026}'), "missing hellip: {text:?}");
+    assert!(text.contains('\u{2019}'), "missing rsquo: {text:?}");
+    assert!(text.contains('&'), "missing ampersand: {text:?}");
+    assert!(text.contains("&bogus;"), "unknown entity should survive as text: {text:?}");
+}
+
+#[test]
+fn unknown_entities_do_not_break_the_chapter() {
+    let src = entity_source();
+    let opened = open(&src).expect("open");
+    assert_eq!(opened.len(), 1);
+    let doc = opened.chapter(&src, 0).expect("chapter");
+    assert!(!doc.nodes.is_empty());
+}

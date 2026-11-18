@@ -23,10 +23,12 @@ fn main() -> ExitCode {
         "pixel" => pixel(false),
         "pixel-bless" => pixel(true),
         "contract" => contract(),
+        "app" => app(),
         "all" => {
             let ok = [
                 golden(false),
                 contract(),
+                app(),
                 pixel(false),
                 size(),
                 parity(),
@@ -41,7 +43,7 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: xtask [all|golden|bless|contract|pixel|pixel-bless|size|parity]"
+                "usage: xtask [all|golden|bless|contract|app|pixel|pixel-bless|size|parity]"
             );
             ExitCode::from(2)
         }
@@ -209,6 +211,29 @@ fn contract() -> ExitCode {
             eprintln!("bun: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+fn app() -> ExitCode {
+    match run_script("tests/app.mjs") {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("{message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_script(path: &str) -> Result<(), String> {
+    let out = Command::new("bun")
+        .arg(path)
+        .output()
+        .map_err(|e| format!("bun: {e}"))?;
+    print!("{}", String::from_utf8_lossy(&out.stdout));
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).into_owned())
     }
 }
 

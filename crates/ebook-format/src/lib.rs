@@ -2,6 +2,7 @@
 extern crate alloc;
 
 pub mod css;
+mod entities;
 pub mod epub;
 pub mod txt;
 pub mod xhtml;

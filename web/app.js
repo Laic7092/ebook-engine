@@ -24,6 +24,7 @@ const fileEl = document.getElementById("file");
 const fontFileEl = document.getElementById("font-file");
 const builtinEl = document.getElementById("builtin-font");
 const fitEl = document.getElementById("fit");
+const bannerEl = document.getElementById("banner");
 
 let book = null;
 let layout = null;
@@ -237,6 +238,22 @@ function setStatus(text) {
   statusEl.textContent = text;
 }
 
+function showError(message) {
+  setStatus(message);
+  if (!bannerEl) {
+    return;
+  }
+  bannerEl.textContent = message;
+  bannerEl.hidden = false;
+}
+
+function clearError() {
+  if (bannerEl) {
+    bannerEl.hidden = true;
+    bannerEl.textContent = "";
+  }
+}
+
 function fillChapters() {
   chapterEl.replaceChildren();
   book.spine.forEach((item, index) => {
@@ -258,7 +275,7 @@ function layoutChapter(index, targetPage) {
   chapter = Math.max(0, Math.min(index, book.spine.length - 1));
   const bytes = eb_layout(chapter, PAGE_W, PAGE_H, MARGIN);
   if (!bytes.length) {
-    throw new Error("empty layout");
+    throw new Error(`chapter ${chapter + 1} 排版失败`);
   }
   layout = decodeLayout(bytes);
   page = targetPage === "last" ? layout.pages.length - 1 : Number(targetPage || 0);
@@ -271,6 +288,7 @@ function openBook(bytes) {
   if (info.error) {
     throw new Error(info.error);
   }
+  clearError();
   book = info;
   chapter = 0;
   updateBook();
@@ -347,12 +365,28 @@ async function relayout() {
 
 async function boot() {
   busy = true;
+  clearError();
+  if (window.location.protocol === "file:") {
+    busy = false;
+    showError(
+      "index.html 被直接打开了。ES 模块和 wasm 不能从 file:// 加载：在仓库根目录执行 python3 -m http.server 8765，再打开 http://localhost:8765/web/",
+    );
+    return;
+  }
   try {
     setStatus("loading wasm");
-    await init();
+    try {
+      await init();
+    } catch (error) {
+      showError(`wasm 加载失败：${error.message || error}。请确认 web/pkg/ 已构建（./web/build.sh），并且是通过 http 访问。`);
+      return;
+    }
+    const query = new URLSearchParams(window.location.search);
+    const requested = query.get("book");
+    const urls = requested ? [requested, resolveBookUrl(requested)] : BOOK_URLS;
     setStatus("loading book");
     try {
-      const bookBytes = await fetchFirst(BOOK_URLS);
+      const bookBytes = await fetchFirst(urls);
       openBook(bookBytes);
       setStatus("ready");
     } catch (error) {
@@ -361,6 +395,11 @@ async function boot() {
   } finally {
     busy = false;
   }
+}
+
+function resolveBookUrl(path) {
+  const base = new URL("./", window.location.href);
+  return new URL(path, base).href;
 }
 
 prevEl.addEventListener("click", prevPage);
@@ -375,7 +414,7 @@ async function loadBookFile(file) {
     openBook(new Uint8Array(await file.arrayBuffer()));
     setStatus(`${book.spine.length} chapters`);
   } catch (error) {
-    setStatus(String(error.message || error));
+    showError(`打不开 ${file.name}：${error.message || error}`);
   } finally {
     busy = false;
   }
@@ -469,6 +508,6 @@ window.addEventListener("keydown", (event) => {
   }
 });
 boot().catch((error) => {
-  setStatus(String(error.message || error));
+  showError(String(error.message || error));
   console.error(error);
 });

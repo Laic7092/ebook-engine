@@ -159,7 +159,8 @@ pub fn build(
     spine: u32,
     resolver: &mut dyn AssetResolver,
 ) -> Result<StyledDoc, FormatError> {
-    let tree = roxmltree::Document::parse(xml).map_err(|_| FormatError::Malformed("xhtml"))?;
+    let xml = super::entities::expand(xml);
+    let tree = roxmltree::Document::parse(&xml).map_err(|_| FormatError::Malformed("xhtml"))?;
     let mut builder = Builder {
         doc: StyledDoc::default(),
         keys: Vec::new(),

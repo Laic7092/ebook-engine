@@ -106,6 +106,7 @@ impl AssetResolver for ZipAssets<'_, '_> {
 
 fn container_opf(zip: &ZipArchive<'_>) -> Option<String> {
     let text = zip.read_text("META-INF/container.xml")?;
+    let text = super::entities::expand(&text);
     let doc = roxmltree::Document::parse(&text).ok()?;
     doc.descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "rootfile")
@@ -114,7 +115,8 @@ fn container_opf(zip: &ZipArchive<'_>) -> Option<String> {
 }
 
 fn parse_opf(text: &str, opf_path: &str) -> Result<Book, FormatError> {
-    let doc = roxmltree::Document::parse(text).map_err(|_| FormatError::Malformed("opf"))?;
+    let text = super::entities::expand(text);
+    let doc = roxmltree::Document::parse(&text).map_err(|_| FormatError::Malformed("opf"))?;
     let base = dirname(opf_path);
 
     let mut manifest: Vec<(String, String, String)> = Vec::new();
