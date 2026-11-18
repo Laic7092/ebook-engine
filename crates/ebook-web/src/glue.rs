@@ -24,6 +24,12 @@ pub fn eb_font(bytes: &[u8]) -> u32 {
 }
 
 #[cfg(feature = "epub")]
+#[wasm_bindgen]
+pub fn eb_font_desc(id: u32) -> String {
+    crate::font_desc(id)
+}
+
+#[cfg(feature = "epub")]
 #[wasm_bindgen(js_name = "eb_layout")]
 pub fn eb_layout_book(spine: u32, width: f32, height: f32, margin: f32) -> Vec<u8> {
     crate::layout_cached(spine, width, height, margin)

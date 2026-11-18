@@ -43,6 +43,51 @@ pub fn register_font(bytes: &[u8]) -> u32 {
     }
 }
 
+pub fn font_desc(id: u32) -> String {
+    let fonts = FONT.lock().unwrap();
+    let Some(book) = fonts.as_ref() else {
+        return String::from("{\"family\":null}");
+    };
+    let font = ebook_ir::FontId(id as u16);
+    match book.desc(font) {
+        Some(desc) => {
+            let mut out = String::from("{\"family\":");
+            push_json_str(&mut out, &desc.family);
+            out.push_str(",\"weight\":");
+            let _ = write!(out, "{}", desc.weight);
+            out.push_str(",\"style\":");
+            push_json_str(&mut out, font_style_name(desc.style));
+            out.push_str(",\"bold\":");
+            out.push_str(if desc.weight >= 600 || book.is_synthetic_bold(font) {
+                "true"
+            } else {
+                "false"
+            });
+            out.push_str(",\"italic\":");
+            out.push_str(
+                if !matches!(desc.style, ebook_ir::FontStyle::Normal)
+                    || book.is_synthetic_italic(font)
+                {
+                    "true"
+                } else {
+                    "false"
+                },
+            );
+            out.push('}');
+            out
+        }
+        None => String::from("{\"family\":null}"),
+    }
+}
+
+fn font_style_name(style: ebook_ir::FontStyle) -> &'static str {
+    match style {
+        ebook_ir::FontStyle::Normal => "normal",
+        ebook_ir::FontStyle::Italic => "italic",
+        ebook_ir::FontStyle::Oblique => "oblique",
+    }
+}
+
 pub fn layout_cached(spine: u32, width: f32, height: f32, margin: f32) -> Vec<u8> {
     let books = BOOK.lock().unwrap();
     let Some(reader) = books.as_ref() else {

@@ -1,4 +1,4 @@
-import init, { eb_open, eb_font, eb_layout } from "./pkg/ebook_web.js";
+import init, { eb_open, eb_font, eb_font_desc, eb_layout } from "./pkg/ebook_web.js";
 import { decodeLayout } from "./decode.js";
 
 const PAGE_W = 720;
@@ -29,8 +29,32 @@ function colorOf(color) {
   return `rgba(${color.r},${color.g},${color.b},${color.a / 255})`;
 }
 
-function fontOf(size) {
-  return `${size}px "${FONT_FAMILY}"`;
+const fontDescs = new Map();
+
+function fontDesc(id) {
+  if (!fontDescs.has(id)) {
+    let parsed = { bold: false, italic: false };
+    try {
+      parsed = JSON.parse(eb_font_desc(id));
+    } catch (error) {
+      parsed = { bold: false, italic: false };
+    }
+    fontDescs.set(id, parsed);
+  }
+  return fontDescs.get(id);
+}
+
+function fontOf(size, id) {
+  const desc = id === undefined ? { bold: false, italic: false } : fontDesc(id);
+  const parts = [];
+  if (desc.italic) {
+    parts.push("italic");
+  }
+  if (desc.bold) {
+    parts.push("bold");
+  }
+  parts.push(`${size}px "${FONT_FAMILY}"`);
+  return parts.join(" ");
 }
 
 function shifted(rect, ox, oy) {
@@ -106,7 +130,7 @@ function drawRun(run, ox, oy) {
     return;
   }
   ctx.save();
-  ctx.font = fontOf(run.size);
+  ctx.font = fontOf(run.size, run.font);
   ctx.fillStyle = colorOf(run.color);
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
