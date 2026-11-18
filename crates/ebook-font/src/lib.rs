@@ -271,7 +271,7 @@ impl FontBook {
         dx: f32,
         dy: f32,
     ) -> Option<GlyphBitmap> {
-        if !px.is_finite() || px <= 0.0 {
+        if !px.is_finite() || px <= 0.0 || !dx.is_finite() || !dy.is_finite() {
             return None;
         }
         let index = self.real_index(id)?;
@@ -470,25 +470,73 @@ impl ttf_parser::OutlineBuilder for RasterOutline<'_> {
     }
 
     fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        let start = self.current;
         let control = self.map(x1, y1);
-        let p = self.map(x, y);
-        self.rasterizer.draw_quad(self.current, control, p);
-        self.current = p;
+        let end = self.map(x, y);
+        // 在设备空间自己细分，而不是交给栅格器的固定容差：`ab_glyph_rasterizer`
+        // 的四边形细分只有 3 段起步，24px 的圆环会因此少约 2% 的墨。
+        let excess = distance(start, control) + distance(control, end) - distance(start, end);
+        let steps = curve_steps(excess);
+        let mut previous = start;
+        for i in 1..=steps {
+            let t = i as f32 / steps as f32;
+            let p = quad_at(start, control, end, t);
+            self.rasterizer.draw_line(previous, p);
+            previous = p;
+        }
+        self.current = end;
     }
 
     fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        let start = self.current;
         let control1 = self.map(x1, y1);
         let control2 = self.map(x2, y2);
-        let p = self.map(x, y);
-        self.rasterizer
-            .draw_cubic(self.current, control1, control2, p);
-        self.current = p;
+        let end = self.map(x, y);
+        let excess = distance(start, control1) + distance(control1, control2)
+            + distance(control2, end) - distance(start, end);
+        let steps = curve_steps(excess);
+        let mut previous = start;
+        for i in 1..=steps {
+            let t = i as f32 / steps as f32;
+            let p = cubic_at(start, control1, control2, end, t);
+            self.rasterizer.draw_line(previous, p);
+            previous = p;
+        }
+        self.current = end;
     }
 
     fn close(&mut self) {
         self.rasterizer.draw_line(self.current, self.start);
         self.current = self.start;
     }
+}
+
+fn distance(a: Point, b: Point) -> f32 {
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// 按弦高误差选折线段数：四边形在参数 1/2 处离弦最远，约为控制多边形
+/// 超出量的四分之一；取 0.01 像素的目标误差，再夹到 [1, 64]。
+fn curve_steps(excess: f32) -> usize {
+    if !(excess > 0.0) {
+        return 1;
+    }
+    let steps = (excess * 200.0).sqrt().ceil() as usize;
+    steps.clamp(1, 64)
+}
+
+fn quad_at(a: Point, b: Point, c: Point, t: f32) -> Point {
+    let u = 1.0 - t;
+    point(u * u * a.x + 2.0 * u * t * b.x + t * t * c.x,
+          u * u * a.y + 2.0 * u * t * b.y + t * t * c.y)
+}
+
+fn cubic_at(a: Point, b: Point, c: Point, d: Point, t: f32) -> Point {
+    let u = 1.0 - t;
+    point(u * u * u * a.x + 3.0 * u * u * t * b.x + 3.0 * u * t * t * c.x + t * t * t * d.x,
+          u * u * u * a.y + 3.0 * u * u * t * b.y + 3.0 * u * t * t * c.y + t * t * t * d.y)
 }
 
 impl TextMeasurer for FontBook {
