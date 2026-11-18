@@ -1,8 +1,14 @@
 # ebook-engine
 
+[![CI](https://github.com/OWNER/ebook-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/ebook-engine/actions/workflows/ci.yml)
+<!-- 发布到 GitHub 时把 OWNER 换成实际组织/用户名。 -->
+
 电子书渲染引擎。Web 优先，跨平台，可 Worker 并行。
 
 **只有排版是核心。** 格式层与渲染层是适配器，可拆、可替换、可 mock。
+
+接口契约见 [docs/api.md](docs/api.md)，设计论证与不变量见
+[docs/design.md](docs/design.md)，限额与默认值见 [docs/limits.md](docs/limits.md)。
 
 ```
 format  ──>  StyledDoc  ──>  layout  ──>  LayoutResult  ──>  render
@@ -94,13 +100,19 @@ op 坐标是**排版流坐标**，不是页面内坐标。`Page.origin` 表示�
 
 | 手段 | 命令 | 失守时说明什么 |
 |---|---|---|
+| 一键闸门 | `scripts/check.sh` | fmt、clippy（只报告 warning）、test、`xtask all` 任一失败。 |
 | golden IR | `xtask golden` | 排版结果变了。字节 diff 直接指出变化面。 |
 | ABI 契约 | `xtask contract` | JS 解码器与 Rust 结构体字段不再一致。做法是把 golden IR 解出来再编回去，要求逐字节还原。 |
 | 像素基线 | `xtask pixel` | 渲染结果变了。逐页 FNV 摘要，`pixel-bless` 显式更新。 |
 | 跨目标比对 | `xtask parity` | native 与 wasm 不再逐字节相同。 |
+| 浏览器应用 | `xtask app` | 读者 App 的翻页/打开/字体路径坏了。用 bun + DOM stub 跑端到端。 |
+| 体积预算 | `xtask size` | core 或 core+epub 的 wasm gzip 超过 512 KiB。 |
+| 性能回归 | `scripts/bench.sh` | layout / raster / IR codec 的中位耗时超过基线 1.15×。 |
 | 不变量 fuzz | `cargo test` | 60 个随机文档 × 3 种页面尺寸：页覆盖、行不越界、y 单调、页序单调、重复排版幂等、编解码往返不变。 |
 
 `DisplayList` 里禁止 `HashMap` / `HashSet`。遍历顺序决定字节流，序列化必须确定。
+
+`tests/golden/*.ir` 是本地快照（`.gitignore` 排除 `*.ir`）。`scripts/check.sh` 与 CI 只在缺失时生成，已有快照仍然逐字节比较；不要用 `bless` 覆盖回归。
 
 IR 是 wasm 与 JS 之间唯一的接口，而 JS 侧的解码器是手写的，所以 `contract` 这项不是锦上添花：它把「改了 Rust 结构体，忘了改 JS」从静默错位变成一条带字节偏移的失败。
 
@@ -108,18 +120,21 @@ IR 是 wasm 与 JS 之间唯一的接口，而 JS 侧的解码器是手写的，
 
 ## 不做
 
-PDF；DRM；flex / grid；浏览器级 CSS 兼容；把 HTML 直接塞进 DOM 当渲染方案。
+PDF；DRM；flex / grid；浏览器级 CSS 兼容；把 HTML 直接塞进 DOM 当渲染方案；滚动 / 瓦片模式（scroll / tile）。
 
-最后一条尤其重要：DOM 方案的排版由浏览器决定，跨端一致、分页控制、增量重排全部不受控，也拿不到可测试的中间表示。
+DOM 方案尤其不能做：排版由浏览器决定，跨端一致、分页控制、增量重排全部不受控，也拿不到可测试的中间表示。滚动 / 瓦片模式会把分页从唯一模型降级成可选视图，`Page.origin` 与页切片契约随之失效，所以本轮明确不做。
 
 ---
 
 ## 跑
 
 ```
+scripts/check.sh                 # fmt + clippy(报告) + test + xtask all
+scripts/bench.sh                 # 对比 scripts/bench_baseline.txt，超 1.15× 退出 1
+scripts/bench.sh --update        # 在目标机器上重新取基线
 cargo test --workspace
 cargo run -p xtask -- all
-cargo run -p xtask -- golden | bless | contract | pixel | pixel-bless | size | parity
+cargo run -p xtask -- golden | bless | contract | pixel | pixel-bless | size | parity | app | bench
 cargo run -p ebook-cli -- layout fixtures/demo.epub --spine 0 --stats --svg page.svg
 cargo run -p ebook-raster --example page
 ./web/build.sh && python3 -m http.server
@@ -127,4 +142,4 @@ cargo run -p ebook-raster --example page
 
 最后一条打开 `http://localhost:8000/web/` 就是阅读器：选 EPUB、翻页、换章。`fixtures/en.epub` 是自带的英文样书，字体用 `fixtures/font/test.ttf`，浏览器侧用同一份字体做绘制，量出来的和画出来的不该有漂移。中日韩书需要自带一个覆盖 CJK 的字体，仓库里那个只覆盖拉丁。
 
-`golden` 比字节；`size` 卡预算；`parity` 用同一份输入分别跑 native 与 wasm，逐字节比对 IR。
+`golden` 比字节；`size` 卡预算；`parity` 用同一份输入分别跑 native 与 wasm，逐字节比对 IR。`bench` 输出 `name<TAB>median_ns`，可直接 diff；CI 跑 fmt、clippy（warning 只作为指标打印，不加 `-D warnings`）、test、`xtask all` 与 `xtask size`。
