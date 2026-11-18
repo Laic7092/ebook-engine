@@ -265,7 +265,9 @@ pub(crate) fn expand(text: &str) -> alloc::borrow::Cow<'_, str> {
     while let Some(offset) = text[cursor..].find('&') {
         let start = cursor + offset;
         out.push_str(&text[cursor..start]);
-        let resolved = text[start + 1..].find(';').and_then(|end| {
+        // 实体名很短：只在有限窗口里找分号，避免一整章没有分号时退化成 O(n²)。
+        let window_end = (start + 1 + 64).min(text.len());
+        let resolved = text[start + 1..window_end].find(';').and_then(|end| {
             let name = &text[start + 1..start + 1 + end];
             if name.starts_with('#') || is_xml_builtin(name) {
                 return Some((end, None));

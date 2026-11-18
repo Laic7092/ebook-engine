@@ -1,5 +1,9 @@
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+
+/// 单个条目解压后的上限。压缩炸弹要么在这里被拒绝，要么变成一个可报告的缺失，
+/// 而不是把进程内存吃干。
+const MAX_ENTRY_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ZipError {
@@ -18,6 +22,8 @@ pub struct Entry {
 pub struct ZipArchive<'a> {
     data: &'a [u8],
     entries: Vec<Entry>,
+    /// 名字试图越出包根目录（`..`、绝对路径、NUL）而被拒绝的条目。
+    rejected: Vec<String>,
 }
 
 impl<'a> ZipArchive<'a> {
@@ -25,7 +31,11 @@ impl<'a> ZipArchive<'a> {
         let eocd = find_eocd(data).ok_or(ZipError::BadSignature)?;
         let count = read_u16(data, eocd + 10)? as usize;
         let cd = read_u32(data, eocd + 16)? as usize;
-        let mut entries = Vec::with_capacity(count);
+        if cd >= data.len() {
+            return Err(ZipError::Truncated);
+        }
+        let mut entries = Vec::with_capacity(count.min(4096));
+        let mut rejected = Vec::new();
         let mut p = cd;
         for _ in 0..count {
             if read_u32(data, p)? != 0x0201_4b50 {
@@ -40,42 +50,67 @@ impl<'a> ZipArchive<'a> {
             let raw_name = data
                 .get(p + 46..p + 46 + name_len)
                 .ok_or(ZipError::Truncated)?;
-            let name = core::str::from_utf8(raw_name)
+            let raw_name = core::str::from_utf8(raw_name)
                 .map_err(|_| ZipError::Unsupported)?
-                .into();
-            entries.push(Entry {
-                name,
-                method,
-                compressed,
-                offset,
-            });
-            p += 46 + name_len + extra_len + comment_len;
+                .to_string();
+            if let Some(name) = normalize(&raw_name) {
+                entries.push(Entry {
+                    name,
+                    method,
+                    compressed,
+                    offset,
+                });
+            } else {
+                rejected.push(raw_name);
+            }
+            p = p
+                .checked_add(46 + name_len + extra_len + comment_len)
+                .ok_or(ZipError::Truncated)?;
+            if p > data.len() {
+                return Err(ZipError::Truncated);
+            }
         }
-        Ok(Self { data, entries })
+        Ok(Self {
+            data,
+            entries,
+            rejected,
+        })
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.entries.iter().map(|e| e.name.as_str())
     }
 
+    /// 被拒绝的路径（zip path traversal 防护的痕迹）。
+    pub fn rejected(&self) -> &[String] {
+        &self.rejected
+    }
+
     pub fn has(&self, name: &str) -> bool {
-        find(&self.entries, name).is_some()
+        lookup(&self.entries, name).is_some()
     }
 
     pub fn read(&self, name: &str) -> Option<Vec<u8>> {
-        let entry = find(&self.entries, name)?;
+        let name = normalize(name)?;
+        let entry = lookup(&self.entries, &name)?;
+        if entry.compressed as usize > MAX_ENTRY_BYTES {
+            return None;
+        }
         let local = entry.offset as usize;
         if read_u32(self.data, local).ok()? != 0x0403_4b50 {
             return None;
         }
         let name_len = read_u16(self.data, local + 26).ok()? as usize;
         let extra_len = read_u16(self.data, local + 28).ok()? as usize;
-        let start = local + 30 + name_len + extra_len;
-        let end = start + entry.compressed as usize;
+        let start = local
+            .checked_add(30)?
+            .checked_add(name_len)?
+            .checked_add(extra_len)?;
+        let end = start.checked_add(entry.compressed as usize)?;
         let raw = self.data.get(start..end)?;
         match entry.method {
             0 => Some(raw.to_vec()),
-            8 => miniz_oxide::inflate::decompress_to_vec(raw).ok(),
+            8 => miniz_oxide::inflate::decompress_to_vec_with_limit(raw, MAX_ENTRY_BYTES).ok(),
             _ => None,
         }
     }
@@ -86,7 +121,30 @@ impl<'a> ZipArchive<'a> {
     }
 }
 
-fn find<'e>(entries: &'e [Entry], name: &str) -> Option<&'e Entry> {
+/// 规范化归档内路径：反斜杠当分隔符，去掉 `.`，`..` 只能退到包根为止，
+/// 越过根目录、绝对路径和含 NUL 的名字一律拒绝。
+fn normalize(name: &str) -> Option<String> {
+    if name.contains('\0') {
+        return None;
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    for segment in name.split(['/', '\\']) {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            other => parts.push(other),
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
+fn lookup<'e>(entries: &'e [Entry], name: &str) -> Option<&'e Entry> {
     entries
         .iter()
         .find(|e| e.name == name)
@@ -118,4 +176,33 @@ fn read_u16(data: &[u8], at: usize) -> Result<u16, ZipError> {
 fn read_u32(data: &[u8], at: usize) -> Result<u32, ZipError> {
     let bytes = data.get(at..at + 4).ok_or(ZipError::Truncated)?;
     Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize;
+
+    #[test]
+    fn traversal_is_rejected() {
+        assert_eq!(
+            normalize("OEBPS/ch1.xhtml").as_deref(),
+            Some("OEBPS/ch1.xhtml")
+        );
+        assert_eq!(
+            normalize("./OEBPS/./ch1.xhtml").as_deref(),
+            Some("OEBPS/ch1.xhtml")
+        );
+        assert_eq!(
+            normalize("OEBPS/../ch1.xhtml").as_deref(),
+            Some("ch1.xhtml")
+        );
+        assert_eq!(
+            normalize("/OEBPS/ch1.xhtml").as_deref(),
+            Some("OEBPS/ch1.xhtml")
+        );
+        assert_eq!(normalize("../evil"), None);
+        assert_eq!(normalize(".."), None);
+        assert_eq!(normalize(""), None);
+        assert_eq!(normalize("a\0b"), None);
+    }
 }

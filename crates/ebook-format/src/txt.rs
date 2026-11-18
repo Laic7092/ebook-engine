@@ -45,6 +45,7 @@ impl FormatAdapter for Txt {
                 media_type: String::from("text/plain"),
                 linear: true,
             }],
+            ..Book::default()
         })
     }
 

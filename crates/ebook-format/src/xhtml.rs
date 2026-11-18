@@ -7,7 +7,7 @@ use ebook_ir::{
 };
 
 use crate::css::{self, ElemKey, StyleSheet};
-use crate::FormatError;
+use crate::{ChapterLinks, FormatError};
 
 pub trait AssetResolver {
     fn css(&mut self, href: &str) -> Option<String>;
@@ -26,10 +26,22 @@ enum CssSource {
     Linked(String),
 }
 
+/// 一次 XHTML 解析的完整产物。`build()` 只返回文档，`build_document()` 把格式层
+/// 需要但 IR 还没有位置的 side table 一起带出去。
+pub struct Built {
+    pub doc: StyledDoc,
+    pub links: Vec<ChapterLinks>,
+    pub duplicate_ids: Vec<String>,
+    pub unsupported_css: Vec<String>,
+}
+
 struct Builder {
     doc: StyledDoc,
     keys: Vec<ElemKey>,
     sources: Vec<CssSource>,
+    links: Vec<ChapterLinks>,
+    ids: Vec<String>,
+    duplicate_ids: Vec<String>,
     spine: u32,
 }
 
@@ -67,12 +79,12 @@ impl Builder {
                     parent,
                     first_child: 0,
                     child_len: 0,
+                    link: None,
                     src: Some(Anchor {
                         spine: self.spine,
                         path: path.clone(),
                         offset: 0,
                     }),
-                    link: None,
                 },
                 key,
             ));
@@ -104,6 +116,15 @@ impl Builder {
         }
         key.inline.retain(|d| !d.name.is_empty());
 
+        if let Some(id) = key.id.as_deref() {
+            if self.ids.iter().any(|existing| existing == id) {
+                if !self.duplicate_ids.iter().any(|existing| existing == id) {
+                    self.duplicate_ids.push(id.to_string());
+                }
+            } else {
+                self.ids.push(id.to_string());
+            }
+        }
         if tag == Tag::Style {
             if let Some(text) = xml.text() {
                 self.sources.push(CssSource::Inline(text.to_string()));
@@ -138,8 +159,18 @@ impl Builder {
             _ => NodeKind::Element(tag),
         };
 
+        // `<a href>` 是排版层发射 `Op::Link` 的唯一来源。空 href 忽略。
+        let link = if tag == Tag::A {
+            xml.attribute("href")
+                .map(str::to_string)
+                .filter(|href| !href.trim().is_empty())
+        } else {
+            None
+        };
+
         let node = Node {
             kind,
+            link,
             style: ComputedStyle::default(),
             parent,
             first_child: 0,
@@ -149,9 +180,18 @@ impl Builder {
                 path: path.clone(),
                 offset: 0,
             }),
-            link: None,
         };
         let id = self.push(node, key);
+        if tag == Tag::A {
+            if let Some(href) = xml.attribute("href") {
+                if !href.trim().is_empty() {
+                    self.links.push(ChapterLinks {
+                        node: id,
+                        href: href.to_string(),
+                    });
+                }
+            }
+        }
 
         let mut kids: Vec<NodeId> = Vec::new();
         let mut index: u16 = 0;
@@ -177,12 +217,23 @@ pub fn build(
     spine: u32,
     resolver: &mut dyn AssetResolver,
 ) -> Result<StyledDoc, FormatError> {
+    build_document(xml, spine, resolver).map(|built| built.doc)
+}
+
+pub fn build_document(
+    xml: &str,
+    spine: u32,
+    resolver: &mut dyn AssetResolver,
+) -> Result<Built, FormatError> {
     let xml = super::entities::expand(xml);
     let tree = roxmltree::Document::parse(&xml).map_err(|_| FormatError::Malformed("xhtml"))?;
     let mut builder = Builder {
         doc: StyledDoc::default(),
         keys: Vec::new(),
         sources: Vec::new(),
+        links: Vec::new(),
+        ids: Vec::new(),
+        duplicate_ids: Vec::new(),
         spine,
     };
     builder.doc.meta.spine = spine;
@@ -203,7 +254,23 @@ pub fn build(
         }
     }
     css::cascade(&mut builder.doc, &builder.keys, &sheet);
-    Ok(builder.doc)
+
+    // 无法落到 IR 的声明按属性名去重后上报，既包含链接样式表也包含内联 style。
+    let mut unsupported_css: Vec<String> = sheet.unsupported().to_vec();
+    for key in &builder.keys {
+        for decl in &key.inline {
+            if !css::decl_supported(decl) && !unsupported_css.iter().any(|n| n == &decl.name) {
+                unsupported_css.push(decl.name.clone());
+            }
+        }
+    }
+
+    Ok(Built {
+        doc: builder.doc,
+        links: builder.links,
+        duplicate_ids: builder.duplicate_ids,
+        unsupported_css,
+    })
 }
 
 fn map_tag(name: &str) -> Tag {
