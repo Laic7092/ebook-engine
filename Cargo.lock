@@ -89,6 +89,7 @@ dependencies = [
  "ebook-ir",
  "ebook-layout",
  "ebook-render",
+ "ttf-parser",
 ]
 
 [[package]]
