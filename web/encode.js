@@ -141,6 +141,7 @@ function writeGlyph(w, value) {
   w.varint(value.gid);
   w.f32(value.dx);
   w.f32(value.dy);
+  w.varint(value.ch);
 }
 
 function writeGlyphRun(w, value) {
@@ -201,6 +202,12 @@ function writeOp(w, value) {
     w.vec(value.ops, writeOp);
     return;
   }
+  if (value.type === "link") {
+    w.varint(6);
+    writeRect(w, value.rect);
+    w.string(value.href);
+    return;
+  }
   throw new Error(`bad op type ${value.type}`);
 }
 
@@ -210,6 +217,14 @@ function writeLineBox(w, value) {
   w.varint(value.dir);
   writeSpan(w, value.src);
   w.option(value.anchor, writeAnchor);
+  writeSpan(w, value.glyphs);
+  w.varint(value.node);
+}
+
+function writeIssue(w, value) {
+  w.varint(value.node);
+  w.varint(value.code);
+  w.option(value.detail, (w2, v) => w2.string(v));
 }
 
 function writeDirty(w, value) {
@@ -233,6 +248,7 @@ export function encodeLayout(layout) {
   w.vec(layout.display.glyphs, writeGlyph);
   w.vec(layout.runs.lines, writeLineBox);
   w.vec(layout.dirty, writeDirty);
+  w.vec(layout.issues, writeIssue);
   return w.finish();
 }
 
