@@ -1,0 +1,10 @@
+[package]
+name = "ebook-format"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+ebook-ir.workspace = true
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+roxmltree = { version = "0.20", default-features = false }

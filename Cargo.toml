@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/ebook-ir",
+  "crates/ebook-layout",
+  "crates/ebook-format",
+  "crates/ebook-render",
+  "crates/ebook-cli",
+  "crates/ebook-web",
+  "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace.dependencies]
+ebook-ir = { path = "crates/ebook-ir" }
+ebook-layout = { path = "crates/ebook-layout" }
+ebook-format = { path = "crates/ebook-format" }
+ebook-render = { path = "crates/ebook-render" }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

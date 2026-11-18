@@ -1,0 +1,11 @@
+[package]
+name = "ebook-layout"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+ebook-ir.workspace = true
+
+[dev-dependencies]
+ebook-format.workspace = true

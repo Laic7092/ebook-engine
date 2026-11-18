@@ -1,0 +1,15 @@
+[package]
+name = "ebook-cli"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ebook"
+path = "src/main.rs"
+
+[dependencies]
+ebook-ir.workspace = true
+ebook-layout.workspace = true
+ebook-format.workspace = true
+ebook-render.workspace = true
