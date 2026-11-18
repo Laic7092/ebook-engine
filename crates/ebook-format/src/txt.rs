@@ -87,6 +87,7 @@ pub fn build(bytes: &[u8]) -> StyledDoc {
         first_child: 0,
         child_len: 0,
         src: Some(Anchor::default()),
+        link: None,
     });
     doc.root = root;
 
@@ -101,6 +102,7 @@ pub fn build(bytes: &[u8]) -> StyledDoc {
             first_child: 0,
             child_len: 0,
             src: Some(Anchor::default()),
+            link: None,
         }));
     }
     doc.set_kids(root, &para_ids);
@@ -125,6 +127,7 @@ pub fn build(bytes: &[u8]) -> StyledDoc {
                 path: alloc::vec![i as u16],
                 offset: 0,
             }),
+            link: None,
         });
         doc.set_kids(para, &[text_id]);
     }

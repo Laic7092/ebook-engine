@@ -154,6 +154,20 @@ impl Surface for SvgSurface {
         );
     }
 
+    /// 链接热区：输出 `<a href>` 包一个透明矩形，可见像素不变，但能在浏览器里点到。
+    fn link(&mut self, rect: RectF, href: &str) {
+        if rect.is_empty() {
+            return;
+        }
+        self.out.push_str("<a href=\"");
+        push_escaped(&mut self.out, href);
+        let _ = write!(
+            self.out,
+            "\"><rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" fill=\"none\" pointer-events=\"all\"/></a>",
+            rect.x, rect.y, rect.w, rect.h
+        );
+    }
+
     fn push_clip(&mut self, rect: RectF) {
         let id = self.take_id();
         let _ = write!(

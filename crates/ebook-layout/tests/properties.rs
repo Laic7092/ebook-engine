@@ -53,6 +53,7 @@ impl Builder {
             first_child: 0,
             child_len: 0,
             src: None,
+            link: None,
         });
         doc.root = root;
         Self { doc, rng: Rng::new(seed) }
@@ -84,6 +85,7 @@ impl Builder {
             first_child: 0,
             child_len: 0,
             src: None,
+            link: None,
         });
         let mut kids: Vec<u32> = self.doc.kids(parent).to_vec();
         kids.push(id);
@@ -117,6 +119,7 @@ impl Builder {
             first_child: 0,
             child_len: 0,
             src: None,
+            link: None,
         });
         let mut kids: Vec<u32> = self.doc.kids(parent).to_vec();
         kids.push(id);
@@ -131,6 +134,7 @@ impl Builder {
                 first_child: 0,
                 child_len: 0,
                 src: None,
+            link: None,
             });
             self.doc.set_kids(id, &[hidden]);
             return id;
@@ -275,6 +279,7 @@ fn degenerate_documents_stay_sane() {
         first_child: 0,
         child_len: 0,
         src: None,
+            link: None,
     });
     doc.root = root;
     let env = LayoutEnv { measurer: &StubMeasurer, resources: &NoImageSizes };

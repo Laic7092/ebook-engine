@@ -31,6 +31,9 @@ pub(crate) struct LaidLine {
     pub(crate) dir: Dir,
     pub(crate) src: Span,
     pub(crate) anchor: Option<Anchor>,
+    pub(crate) glyphs: Span,
+    pub(crate) node: NodeId,
+    pub(crate) link: Option<String>,
     pub(crate) runs: Vec<LaidRun>,
     pub(crate) unresolved: Vec<Op>,
     pub(crate) block: u32,
@@ -791,6 +794,24 @@ impl<'a> FlowCtx<'a> {
         chain
     }
 
+    /// 该行的链接目标：按字符顺序找到第一个带 `link` 的内联祖先。
+    ///
+    /// 取最先出现字符的链上最内层链接（`<a>` 嵌套时内层赢），结果只依赖
+    /// 行内容本身，所以同一份输入必然得到同样的 op。本轮**不合并**相邻行：
+    /// 一行一个 `Op::Link`，便于逐行命中。
+    fn line_link(&self, pieces: &[Piece], line: &[Ch]) -> Option<String> {
+        for ch in line {
+            let node = pieces[ch.piece as usize].node;
+            let Some(owner) = self.owner_id(node) else { continue };
+            for id in self.owner_chain(owner).into_iter().rev() {
+                if let Some(link) = self.doc.node(id).link.as_ref() {
+                    return Some(link.clone());
+                }
+            }
+        }
+        None
+    }
+
     fn line_entries(
         &self,
         pieces: &[Piece],
@@ -910,6 +931,14 @@ impl<'a> FlowCtx<'a> {
         let mut missing: Vec<(NodeId, RectF)> = Vec::new();
         let mut k = 0usize;
 
+        let first = line[0];
+        let last = line[line.len() - 1];
+        let first_piece = &pieces[first.piece as usize];
+        let last_piece = &pieces[last.piece as usize];
+        let src_start = first_piece.span.start + first.off;
+        let src_end = last_piece.span.start + last.off + last.c.len_utf8() as u32;
+        let glyph_start_all = self.flow.glyphs.len() as u32;
+
         while k < line.len() {
             let piece_id = line[k].piece;
             let piece = &pieces[piece_id as usize];
@@ -937,10 +966,12 @@ impl<'a> FlowCtx<'a> {
                 }
                 let adv = self.advance(&line[k], pieces);
                 if covered {
+                    let ch = piece.span.start + line[k].off - src_start;
                     self.flow.glyphs.push(Glyph {
                         gid: self.env.measurer.glyph_id(line[k].c, next_font),
                         dx: adv,
                         dy: 0.0,
+                        ch,
                     });
                     text.push(line[k].c);
                 }
@@ -966,18 +997,14 @@ impl<'a> FlowCtx<'a> {
             }
         }
 
-        let first = line[0];
-        let last = line[line.len() - 1];
-        let first_piece = &pieces[first.piece as usize];
-        let last_piece = &pieces[last.piece as usize];
-        let src_start = first_piece.span.start + first.off;
-        let src_end = last_piece.span.start + last.off + last.c.len_utf8() as u32;
         let anchor = self
             .doc
             .node(first_piece.node)
             .src
             .as_ref()
             .map(|a| a.with_offset(first.off));
+        let glyphs = Span::new(glyph_start_all, self.flow.glyphs.len() as u32 - glyph_start_all);
+        let link = self.line_link(pieces, line);
 
         let mut unresolved = Vec::new();
         for (node, rect) in missing {
@@ -1002,6 +1029,9 @@ impl<'a> FlowCtx<'a> {
             dir: base_style.dir,
             src: Span::new(src_start, src_end.saturating_sub(src_start)),
             anchor,
+            glyphs,
+            node: first_piece.node,
+            link,
             runs,
             unresolved,
             block,
