@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt / clippy / test / xtask
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install Rust (stable + wasm32)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: cache cargo and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # ebook-web 把 wasm-bindgen 精确锁在 0.2.129，CLI 必须同版本。
+      - name: install wasm-bindgen-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.129
+
+      - name: cargo fmt --all --check
+        run: cargo fmt --all --check
+
+      # clippy 不加 -D warnings：warning 数量作为指标，避免并行开发期间
+      # 因机械修复制造无谓冲突。真正阻断的是 error 与后续测试。
+      - name: cargo clippy --workspace --all-targets
+        run: |
+          set -o pipefail
+          cargo clippy --workspace --all-targets 2>&1 | tee clippy.log
+          warnings=$(grep -cE '^warning: ' clippy.log || true)
+          {
+            echo "### clippy warnings: ${warnings}"
+            echo ""
+            echo "只报告，不阻断（本轮不改 crates/ 源码）。"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: cargo test --workspace
+        run: cargo test --workspace
+
+      # tests/golden/*.ir 被 *.ir 排除，干净 checkout 里没有快照。
+      # 先生成，再由 contract 用同一批字节验证 JS 解码器。
+      - name: prepare golden IR
+        run: cargo run -p xtask -- bless
+
+      - name: xtask all (golden / contract / app / pixel / size / parity)
+        run: cargo run -p xtask -- all
+
+      - name: xtask size
+        run: cargo run -p xtask -- size
+
+      - name: upload clippy log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clippy-log
+          path: clippy.log
+          if-no-files-found: ignore
