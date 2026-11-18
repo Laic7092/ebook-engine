@@ -288,6 +288,24 @@ fn hit_line_end_sticks_to_last_glyph() {
 }
 
 #[test]
+fn hit_far_point_clamps_to_nearest_line() {
+    // 页内坐标远在右下角（margin 10：内容 70×40，一页 2 行，换算有一次浮点加减）：
+    // 仍命中本页最近的行。
+    let doc = doc_12(Dir::Ltr);
+    let ir = build_with(&doc, &Fixed, 10.0);
+    assert_eq!(ir.page(0).unwrap().lines, Span::new(0, 2));
+    let reader = Reader::new(&ir);
+    assert_eq!(
+        reader.hit(0, PointF::new(9999.0, 9999.0)),
+        Some(loc(0, 1, 3))
+    );
+    assert_eq!(
+        reader.hit(0, PointF::new(-9999.0, -9999.0)),
+        Some(loc(0, 0, 0))
+    );
+}
+
+#[test]
 fn hit_out_of_range_is_none() {
     let doc = doc_12(Dir::Ltr);
     let ir = build(&doc);

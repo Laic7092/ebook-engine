@@ -49,8 +49,12 @@ impl<'a> Reader<'a> {
         let page_ref = self.ir.page(page)?;
         let flow = self.to_flow(page, p)?;
         let line = nearest_line(self.ir.page_lines(page), flow)?;
-        let x = flow.x.max(line.rect.x).min(line.rect.right());
-        let y = flow.y.max(line.rect.y).min(line.rect.bottom());
+        // 夹点留 0.01 的余量并取行中线：页内坐标与流坐标来回换算有一次浮点
+        // 加减，正好落在矩形边界上会被舍入到边界外。
+        let low = line.rect.x + 0.01;
+        let high = (line.rect.right() - 0.01).max(low);
+        let x = flow.x.clamp(low, high);
+        let y = line.rect.y + line.rect.h * 0.5;
         let point = PointF::new(
             x - page_ref.origin.x + page_ref.inset.left,
             y - page_ref.origin.y + page_ref.inset.top,

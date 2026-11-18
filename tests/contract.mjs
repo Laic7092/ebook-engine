@@ -277,6 +277,95 @@ async function interactionSelfCheck() {
   return null;
 }
 
+// 选区交互模块（web/selection.js）不依赖 DOM 也能驱动：喂一个假 canvas 和
+// hit/select/linkAt 回调，验证拖动→矩形→高亮、点击→链接、clear 后不残留。
+async function selectionModuleSelfCheck() {
+  const { createSelection } = await import(new URL("../web/selection.js", import.meta.url).href);
+  const listeners = new Map();
+  const canvas = {
+    addEventListener(type, handler) {
+      if (!listeners.has(type)) {
+        listeners.set(type, []);
+      }
+      listeners.get(type).push(handler);
+    },
+    getBoundingClientRect() {
+      return { left: 0, top: 0, width: 100, height: 100 };
+    },
+    setPointerCapture() {},
+  };
+  const fire = (type, event) => {
+    for (const handler of listeners.get(type) || []) {
+      handler({ button: 0, pointerId: 1, pointerType: "mouse", preventDefault() {}, ...event });
+    }
+  };
+  let linked = null;
+  const page = () => ({
+    index: 0,
+    info: {
+      size: { w: 100, h: 100 },
+      inset: { top: 0, right: 0, bottom: 0, left: 0 },
+    },
+    layout: {},
+  });
+  const location = (x) => ({ page: 0, line: 0, byte: Math.max(0, Math.min(9, Math.floor(x / 10))) });
+  const selection = createSelection({
+    canvas,
+    page,
+    hit: (_index, x) => location(x),
+    select: (a, b) => {
+      const lo = Math.min(a.byte, b.byte);
+      const hi = Math.max(a.byte, b.byte);
+      return { rects: [{ page: 0, x: lo * 10, y: 0, w: (hi - lo) * 10, h: 10 }], text: "x".repeat(hi - lo) };
+    },
+    linkAt: () => "ch2.xhtml#n",
+    onLink: (href) => {
+      linked = href;
+    },
+    setStatus: () => {},
+    onChange: () => {},
+  });
+
+  // 拖动：x=10 → byte 1，x=40 → byte 4。
+  fire("pointerdown", { clientX: 10, clientY: 10 });
+  fire("pointermove", { clientX: 40, clientY: 10 });
+  fire("pointerup", { clientX: 40, clientY: 10 });
+  if (!selection.active() || selection.text() !== "xxx") {
+    throw new Error(`selection module: drag ${JSON.stringify({ active: selection.active(), text: selection.text() })}`);
+  }
+  let painted = 0;
+  const ctx = {
+    save() {},
+    restore() {},
+    fillRect(x, y, w, h) {
+      painted += 1;
+      if (x !== 10 || y !== 0 || w !== 30 || h !== 10) {
+        throw new Error(`selection module: rect ${x},${y},${w},${h}`);
+      }
+    },
+  };
+  selection.draw(ctx, 0);
+  if (painted !== 1) {
+    throw new Error(`selection module: painted ${painted} rects`);
+  }
+  selection.draw(ctx, 1);
+  if (painted !== 1) {
+    throw new Error("selection module: rect leaked onto another page");
+  }
+
+  // 不动鼠标地按下/抬起 = 点击链接。
+  selection.clear();
+  if (selection.active()) {
+    throw new Error("selection module: clear left rects behind");
+  }
+  fire("pointerdown", { clientX: 10, clientY: 10 });
+  fire("pointerup", { clientX: 10, clientY: 10 });
+  if (linked !== "ch2.xhtml#n") {
+    throw new Error(`selection module: link click ${linked}`);
+  }
+  console.log("contract ok: selection module drag/overlay/link-click");
+}
+
 const names = process.argv.length > 2
   ? process.argv.slice(2)
   : readdirSync(GOLDEN_DIR).filter((n) => n.endsWith(".ir")).sort().map((n) => resolve(GOLDEN_DIR, n));
@@ -290,6 +379,12 @@ try {
 }
 try {
   await interactionSelfCheck();
+} catch (error) {
+  console.error(`contract broken: ${error.message}`);
+  failed += 1;
+}
+try {
+  await selectionModuleSelfCheck();
 } catch (error) {
   console.error(`contract broken: ${error.message}`);
   failed += 1;
