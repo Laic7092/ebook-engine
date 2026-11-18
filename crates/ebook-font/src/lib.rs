@@ -1,6 +1,6 @@
 use ab_glyph_rasterizer::{point, Point, Rasterizer};
 use ebook_ir::{FontDesc, FontId, FontSpec, FontStyle, GlyphBitmap, ImageData, ImageId, Resources};
-use ebook_layout::{shape_per_char, ShapeGlyph, TextMeasurer};
+use ebook_layout::{shape_per_char, English, Hyphenator, ShapeGlyph, TextMeasurer};
 use ttf_parser::Face;
 
 const SYNTH_FLAG: u16 = 0x8000;
@@ -89,6 +89,9 @@ pub struct FontBook {
     /// 注入；没设置时按字形猜（见 [`guess_language`]），猜不到就不设，
     /// rustybuzz 会把脚本留成 `Zyyy`。
     lang: Option<String>,
+    /// 内置英文断字词典。零大小类型，`hyphenator()` 借出去；
+    /// `StubMeasurer` 仍然返回 `None`，保持“没有字体就没有断字”。
+    english: English,
 }
 
 impl FontBook {
@@ -713,6 +716,12 @@ impl TextMeasurer for FontBook {
 
     fn select_char(&self, spec: &FontSpec, ch: char) -> FontId {
         FontBook::select_char(self, spec, ch)
+    }
+
+    /// 宿主加载了字体，就已经明确接受“排版要用真实字体”：断字词典也在这里注入。
+    /// 没装任何字体时 `layout` 走 `StubMeasurer`，`hyphens: auto` 不生效。
+    fn hyphenator(&self) -> Option<&dyn Hyphenator> {
+        Some(&self.english)
     }
 }
 
