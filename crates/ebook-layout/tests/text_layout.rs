@@ -261,3 +261,28 @@ fn empty_block_keeps_negative_margins_in_the_collapsed_chain() {
     let gap = result.runs.lines[1].rect.y - result.runs.lines[0].rect.bottom();
     assert!((gap - 15.0).abs() < 0.01);
 }
+
+#[test]
+fn cjk_stays_one_glyph_per_character() {
+    // 没有 CJK 字体时走缺字路径；这里用 Fixed 度量，每个汉字仍然各自一个字形、
+    // 各自贡献一个 advance（不会被整形合并或挤压）。
+    let result = run(200.0, "", "<p>中文排</p>");
+    assert_eq!(result.runs.lines.len(), 1);
+    assert!((result.runs.lines[0].rect.w - 30.0).abs() < 0.01);
+    let glyphs: Vec<_> = result
+        .display
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::GlyphRun(run) => Some(result.display.glyph_slice(run.glyphs).to_vec()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(glyphs.len(), 3);
+    assert!(glyphs.iter().all(|glyph| (glyph.dx - 10.0).abs() < 0.01));
+    assert_eq!(
+        glyphs.iter().map(|glyph| glyph.ch).collect::<Vec<_>>(),
+        vec![0, 3, 6]
+    );
+}

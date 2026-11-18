@@ -7,6 +7,7 @@ use ebook_ir::{
 };
 
 use crate::resolve;
+use crate::shape::{Cluster, ShapeGlyph};
 use crate::{LayoutEnv, PageConstraint};
 
 #[derive(Clone, Debug)]
@@ -35,6 +36,8 @@ pub(crate) struct LaidLine {
     pub(crate) node: NodeId,
     pub(crate) link: Option<String>,
     pub(crate) runs: Vec<LaidRun>,
+    /// 两端对齐可以在哪些字形之后加余量（全局字形下标）。
+    pub(crate) stretch: Vec<u32>,
     pub(crate) unresolved: Vec<Op>,
     pub(crate) block: u32,
     pub(crate) order: u16,
@@ -58,10 +61,19 @@ pub(crate) struct Flow {
     pub(crate) dirty: Vec<DirtyBlock>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq)]
 enum PieceKind {
     Text,
     Break,
+    /// 行内图片：宽度/高度已知时按资源尺寸，未知时留 1em × 1.5em 的占位。
+    Image {
+        id: ImageId,
+        size: Option<ebook_ir::SizeF>,
+    },
+    /// 注音：`span` 是基文，`rt` 是注音文本；rt 不参与断行宽度。
+    Ruby {
+        rt: Span,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -77,6 +89,22 @@ struct Ch {
     c: char,
     off: u32,
     piece: u16,
+    /// 所属整形簇；换行符没有簇，用 [`NO_CLUSTER`] 标记。
+    cluster: u32,
+    /// 簇首字符：只有它贡献行宽，也只有它产字形。
+    head: bool,
+    /// UAX #9 的嵌入级：偶数 LTR、奇数 RTL。
+    level: u8,
+    /// 行内图片：这个"字符"实际是一个替换元素。
+    image: Option<ImageId>,
+}
+
+const NO_CLUSTER: u32 = u32::MAX;
+
+#[derive(Default)]
+struct Shaped {
+    glyphs: Vec<ShapeGlyph>,
+    clusters: Vec<Cluster>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -253,13 +281,13 @@ impl<'a> FlowCtx<'a> {
                 self.image(id, img, style, inner_x, &mut cy, inner_w);
                 content_empty = false;
             }
-            NodeKind::Ruby { base, .. } => {
+            NodeKind::Ruby { base, rt } => {
                 let mut pieces = Vec::new();
                 pieces.push(Piece {
                     style,
                     span: base,
                     node: id,
-                    kind: PieceKind::Text,
+                    kind: PieceKind::Ruby { rt },
                 });
                 let before = self.flow.items.len();
                 self.break_lines(&pieces, inner_x, &mut cy, inner_w, style);
@@ -404,6 +432,23 @@ impl<'a> FlowCtx<'a> {
         }
         self.env.resources.image_size(img)
     }
+
+    /// 行内图片尺寸：显式宽高 > 文档里的固有尺寸 > 资源查询，都没有就是未知。
+    fn inline_image_size(&self, img: ImageId, style: &ComputedStyle) -> Option<ebook_ir::SizeF> {
+        let em = style.font.size;
+        let w = style.width.resolve(em, em);
+        let h = style.height.resolve(em, em);
+        if let (Some(w), Some(h)) = (w, h) {
+            if w > 0.0 && h > 0.0 {
+                return Some(ebook_ir::SizeF::new(w, h));
+            }
+        }
+        if let Some(size) = self.doc.images.get(img as usize).and_then(|m| m.size) {
+            return Some(size);
+        }
+        self.env.resources.image_size(img)
+    }
+
     fn inline_from(
         &mut self,
         nodes: &[NodeId],
@@ -440,7 +485,21 @@ impl<'a> FlowCtx<'a> {
                 node: id,
                 kind: PieceKind::Break,
             }),
-            NodeKind::Image(_) | NodeKind::Ruby { .. } => {}
+            NodeKind::Image(img) => out.push(Piece {
+                style: node.style,
+                span: Span::EMPTY,
+                node: id,
+                kind: PieceKind::Image {
+                    id: img,
+                    size: self.inline_image_size(img, &node.style),
+                },
+            }),
+            NodeKind::Ruby { base, rt } => out.push(Piece {
+                style: node.style,
+                span: base,
+                node: id,
+                kind: PieceKind::Ruby { rt },
+            }),
             NodeKind::Element(_) => {
                 let child_len = node.child_len;
                 let first_child = node.first_child;
@@ -461,10 +520,26 @@ impl<'a> FlowCtx<'a> {
                         c: '\n',
                         off: 0,
                         piece: pi as u16,
+                        cluster: NO_CLUSTER,
+                        head: true,
+                        level: 0,
+                        image: None,
                     });
                     prev_space = false;
                 }
-                PieceKind::Text => {
+                PieceKind::Image { id, .. } => {
+                    out.push(Ch {
+                        c: '\u{FFFC}',
+                        off: 0,
+                        piece: pi as u16,
+                        cluster: NO_CLUSTER,
+                        head: true,
+                        level: 0,
+                        image: Some(id),
+                    });
+                    prev_space = false;
+                }
+                PieceKind::Text | PieceKind::Ruby { .. } => {
                     let text = self.doc.text_of(piece.span);
                     let collapse = matches!(
                         piece.style.text.white_space,
@@ -491,6 +566,10 @@ impl<'a> FlowCtx<'a> {
                                 c,
                                 off: off as u32,
                                 piece: pi as u16,
+                                cluster: NO_CLUSTER,
+                                head: true,
+                                level: 0,
+                                image: None,
                             }),
                             TextTransform::Uppercase => {
                                 for t in c.to_uppercase() {
@@ -498,6 +577,10 @@ impl<'a> FlowCtx<'a> {
                                         c: t,
                                         off: off as u32,
                                         piece: pi as u16,
+                                        cluster: NO_CLUSTER,
+                                        head: true,
+                                        level: 0,
+                                        image: None,
                                     });
                                 }
                             }
@@ -507,6 +590,10 @@ impl<'a> FlowCtx<'a> {
                                         c: t,
                                         off: off as u32,
                                         piece: pi as u16,
+                                        cluster: NO_CLUSTER,
+                                        head: true,
+                                        level: 0,
+                                        image: None,
                                     });
                                 }
                             }
@@ -522,17 +609,275 @@ impl<'a> FlowCtx<'a> {
         self.env.font_for(&style.font, ch.c)
     }
 
-    fn advance(&self, ch: &Ch, pieces: &[Piece]) -> f32 {
-        let style = &pieces[ch.piece as usize].style;
-        let font = self.font_for(ch, pieces);
-        let base = self.env.measurer.advance(ch.c, font, style.font.size);
-        let spacing = style.text.letter_spacing
-            + if ch.c == ' ' {
-                style.text.word_spacing
+    /// 按"同字体同字号"分组整形，字距/词距在整形之后叠加。
+    ///
+    /// 分组键是 `(piece, font, covers)`：同一段文本里字体切换、缺字都会切开 run，
+    /// 后面的断行与绘制都直接复用这里的簇宽，保证量到的和画出来的是一份数据。
+    fn shape_chars(&self, pieces: &[Piece], chars: &mut [Ch], shaped: &mut Shaped) {
+        let mut i = 0usize;
+        while i < chars.len() {
+            if chars[i].c == '\n' {
+                chars[i].cluster = NO_CLUSTER;
+                chars[i].head = true;
+                i += 1;
+                continue;
+            }
+            if chars[i].image.is_some() {
+                // 行内图片是一个原子替换元素：一个簇、没有字形、宽度就是它的宽度。
+                let style = pieces[chars[i].piece as usize].style;
+                let em = style.font.size;
+                let width = match pieces[chars[i].piece as usize].kind {
+                    PieceKind::Image { size, .. } => size.map(|s| s.w).unwrap_or(em),
+                    _ => em,
+                };
+                let advance = width.max(0.0);
+                shaped.clusters.push(Cluster {
+                    glyph_start: shaped.glyphs.len() as u32,
+                    glyph_len: 0,
+                    advance,
+                    ch: 0,
+                    gap: 0.0,
+                });
+                let cluster = (shaped.clusters.len() - 1) as u32;
+                chars[i].cluster = cluster;
+                chars[i].head = true;
+                i += 1;
+                continue;
+            }
+            let piece_id = chars[i].piece;
+            let style = pieces[piece_id as usize].style;
+            let font = self.font_for(&chars[i], pieces);
+            let covered = self.env.measurer.covers(chars[i].c, font);
+            let level = chars[i].level;
+            let mut j = i + 1;
+            while j < chars.len()
+                && chars[j].c != '\n'
+                && chars[j].piece == piece_id
+                && chars[j].level == level
+            {
+                let next = self.font_for(&chars[j], pieces);
+                if next != font || self.env.measurer.covers(chars[j].c, next) != covered {
+                    break;
+                }
+                j += 1;
+            }
+
+            let mut text = String::new();
+            let mut abs: Vec<u32> = Vec::with_capacity(j - i);
+            for ch in &chars[i..j] {
+                text.push(ch.c);
+                abs.push(pieces[ch.piece as usize].span.start + ch.off);
+            }
+
+            let base = shaped.clusters.len() as u32;
+            let mut map: Vec<u32> = Vec::with_capacity(j - i);
+            if covered {
+                crate::shape::shape_run(
+                    self.env.measurer,
+                    font,
+                    style.font.size,
+                    &text,
+                    &abs,
+                    &mut shaped.glyphs,
+                    &mut shaped.clusters,
+                    &mut map,
+                );
+                // 字距按字符累加到所属簇；簇宽以"整形 + 字距"为准。
+                let cluster_count = shaped.clusters.len() - base as usize;
+                let mut spacing: Vec<f32> = alloc::vec![0.0; cluster_count];
+                for (k, ch) in chars[i..j].iter().enumerate() {
+                    let extra = style.text.letter_spacing
+                        + if ch.c == ' ' {
+                            style.text.word_spacing
+                        } else {
+                            0.0
+                        };
+                    spacing[(map[k] - base) as usize] += extra;
+                }
+                for (local, &extra) in spacing.iter().enumerate() {
+                    let index = base as usize + local;
+                    let cluster = shaped.clusters[index];
+                    let advance = (cluster.advance + extra).max(0.0);
+                    shaped.clusters[index].advance = advance;
+                    let start = cluster.glyph_start as usize;
+                    let end = start + cluster.glyph_len as usize;
+                    crate::shape::pin_cluster(&mut shaped.glyphs[start..end], advance);
+                }
             } else {
-                0.0
+                // 缺字不猜：仍然占位（宽度取 measurer 的 advance），但不产字形。
+                for ch in &chars[i..j] {
+                    let advance = self
+                        .env
+                        .measurer
+                        .advance(ch.c, font, style.font.size)
+                        .max(0.0);
+                    shaped.clusters.push(Cluster {
+                        glyph_start: shaped.glyphs.len() as u32,
+                        glyph_len: 0,
+                        advance,
+                        ch: pieces[ch.piece as usize].span.start + ch.off,
+                        gap: 0.0,
+                    });
+                }
+                map.extend((0..(j - i) as u32).map(|local| base + local));
+            }
+
+            for (k, ch) in chars[i..j].iter_mut().enumerate() {
+                ch.cluster = map[k];
+                ch.head = k == 0 || map[k] != map[k - 1];
+            }
+            i = j;
+        }
+    }
+
+    /// 给一个簇减半宽：改簇宽，并把差值写回末字形，量到的和画出来的同步。
+    fn trim_cluster(shaped: &mut Shaped, cluster: u32, delta: f32) {
+        let slot = &mut shaped.clusters[cluster as usize];
+        let delta = delta.min(slot.advance).max(0.0);
+        if delta <= 0.0 {
+            return;
+        }
+        slot.advance -= delta;
+        let start = slot.glyph_start as usize;
+        let end = start + slot.glyph_len as usize;
+        crate::shape::pin_cluster(&mut shaped.glyphs[start..end], slot.advance);
+    }
+
+    /// 成对标点挤压：相邻两个全角标点之间收半宽，规则表在 `punct.rs`。
+    ///
+    /// 只压拥有空白半边的那一个（开标点压左、闭标点压右），所以一对最多少
+    /// 半宽；这里不挪字形墨迹，`Glyph.dx` 只表达前进宽度。
+    fn apply_trim(&self, chars: &[Ch], shaped: &mut Shaped, em: f32) {
+        let half = em * 0.5;
+        for pair in chars.windows(2) {
+            let (left, right) = (pair[0], pair[1]);
+            if !left.head || !right.head || left.c == '\n' || right.c == '\n' {
+                continue;
+            }
+            let Some(target) = crate::punct::trim_target(left.c, right.c) else {
+                continue;
             };
-        (base + spacing).max(0.0)
+            let trimmed = match target {
+                crate::punct::Trim::Left => left,
+                crate::punct::Trim::Right => right,
+            };
+            Self::trim_cluster(shaped, trimmed.cluster, half);
+        }
+    }
+
+    /// 中西文自动间距：在表意文字与拉丁字母/数字之间加 1/4 em。
+    ///
+    /// 空隙挂在**左**字符的簇上，所以行首永远不会有空隙；行末的空隙在
+    /// `emit_line` 里收回，保证"不插在行首行尾"。
+    fn apply_autospacing(&self, chars: &[Ch], shaped: &mut Shaped, em: f32) {
+        let gap = em * 0.25;
+        for pair in chars.windows(2) {
+            let (left, right) = (pair[0], pair[1]);
+            if !left.head || !right.head || left.c == '\n' || right.c == '\n' {
+                continue;
+            }
+            if !crate::punct::needs_autospacing(left.c, right.c) {
+                continue;
+            }
+            let slot = &mut shaped.clusters[left.cluster as usize];
+            slot.advance += gap;
+            slot.gap += gap;
+            let start = slot.glyph_start as usize;
+            let end = start + slot.glyph_len as usize;
+            crate::shape::pin_cluster(&mut shaped.glyphs[start..end], slot.advance);
+        }
+    }
+
+    /// 找出可断字的词内断点，并给词内每个字符记一个"预留连字符宽度"。
+    ///
+    /// 预留让断行时不必回头重排：只要在词内断行，行末的 `-` 一定放得下。
+    fn hyphen_points(
+        &self,
+        pieces: &[Piece],
+        chars: &[Ch],
+        hyphenator: &dyn crate::Hyphenator,
+        points: &mut Vec<usize>,
+        reserve: &mut [f32],
+    ) {
+        let mut word = String::new();
+        let mut word_start = 0usize;
+        let mut i = 0usize;
+        let mut breaks: Vec<u16> = Vec::new();
+        loop {
+            let inside = i < chars.len() && chars[i].c.is_ascii_alphabetic();
+            if inside {
+                if word.is_empty() {
+                    word_start = i;
+                }
+                word.push(chars[i].c);
+                i += 1;
+                continue;
+            }
+            if !word.is_empty() {
+                if word.len() >= 5 {
+                    hyphenator.breaks(&word, &mut breaks);
+                    if !breaks.is_empty() {
+                        let style = pieces[chars[word_start].piece as usize].style;
+                        let font = self.font_for(&chars[word_start], pieces);
+                        let dash = self
+                            .env
+                            .measurer
+                            .advance('-', font, style.font.size)
+                            .max(0.0);
+                        if dash > 0.0 {
+                            for slot in &mut reserve[word_start..i] {
+                                *slot = dash;
+                            }
+                        }
+                        for at in &breaks {
+                            let index = word_start + *at as usize;
+                            if index < i && chars[index].head {
+                                points.push(index);
+                            }
+                        }
+                    }
+                }
+                word.clear();
+            }
+            if i >= chars.len() {
+                break;
+            }
+            i += 1;
+        }
+    }
+
+    /// 在 `line_start..=want` 里找最靠后、且"文本 + 连字符"放得下的断字点。
+    ///
+    /// 连字符的宽度取词内预留值（`reserve`），它是按词首字符的样式量的。
+    fn fit_hyphen(
+        chars: &[Ch],
+        shaped: &Shaped,
+        points: &[usize],
+        reserve: &[f32],
+        line_start: usize,
+        want: usize,
+        w: f32,
+    ) -> Option<usize> {
+        let mut candidates: Vec<usize> = Vec::new();
+        candidates.push(want);
+        for &point in points.iter().rev() {
+            if point < want && point > line_start {
+                candidates.push(point);
+            }
+        }
+        for at in candidates {
+            let mut width = 0.0f32;
+            for ch in &chars[line_start..at] {
+                if ch.head {
+                    width += shaped.clusters[ch.cluster as usize].advance;
+                }
+            }
+            let dash = reserve.get(at.saturating_sub(1)).copied().unwrap_or(0.0);
+            if width + dash <= w + 0.001 {
+                return Some(at);
+            }
+        }
+        None
     }
 
     fn break_lines(
@@ -548,6 +893,21 @@ impl<'a> FlowCtx<'a> {
         if chars.is_empty() {
             return;
         }
+        self.resolve_bidi(&mut chars, container.dir);
+        let mut shaped = Shaped::default();
+        self.shape_chars(pieces, &mut chars, &mut shaped);
+        // 一个簇必须同级：跨级簇在重排时会被拆散，取簇首的级并灌回整簇。
+        let mut index = 0usize;
+        while index < chars.len() {
+            let head = chars[index].level;
+            let cluster = chars[index].cluster;
+            index += 1;
+            while index < chars.len() && chars[index].cluster == cluster {
+                chars[index].level = head;
+                index += 1;
+            }
+        }
+
         let block = self.next_block;
         self.next_block += 1;
         let item_start = self.flow.items.len();
@@ -555,6 +915,42 @@ impl<'a> FlowCtx<'a> {
 
         let base_style = container;
         let em = base_style.font.size;
+
+        // 中文排版政策是段落级的：块上没有就取任意一个内联片段上打开的开关
+        // （政策是文档级设置，宿主可能挂在 body 也可能挂在 span 上）。
+        let mut rules = base_style.text.rules;
+        for piece in pieces {
+            let piece_rules = piece.style.text.rules;
+            rules.spacing_trim |= piece_rules.spacing_trim;
+            rules.hanging_punctuation |= piece_rules.hanging_punctuation;
+            rules.autospacing |= piece_rules.autospacing;
+        }
+        if rules.spacing_trim {
+            self.apply_trim(&chars, &mut shaped, em);
+        }
+        if rules.autospacing {
+            self.apply_autospacing(&chars, &mut shaped, em);
+        }
+
+        // 断字：只有 hyphens:auto 且宿主注入了词典才找断点。断点落在字符边界、
+        // 不拆簇；词典是入参，所以同一份输入必然得到同一组断点。
+        let hyphens_on = (base_style.text.hyphens
+            || pieces.iter().any(|piece| piece.style.text.hyphens))
+            && self.env.measurer.hyphenator().is_some();
+        let mut hyphen_points: Vec<usize> = Vec::new();
+        let mut hyphen_reserve: Vec<f32> = alloc::vec![0.0; chars.len()];
+        if hyphens_on {
+            if let Some(hyphenator) = self.env.measurer.hyphenator() {
+                self.hyphen_points(
+                    pieces,
+                    &chars,
+                    hyphenator,
+                    &mut hyphen_points,
+                    &mut hyphen_reserve,
+                );
+            }
+        }
+        let hyphen_points = hyphen_points;
         let indent = base_style
             .text
             .indent
@@ -578,10 +974,12 @@ impl<'a> FlowCtx<'a> {
                 self.emit_line(
                     pieces,
                     &chars[line_start..i],
+                    &shaped,
                     x0,
                     y,
                     w,
                     pad,
+                    false,
                     base_style,
                     block,
                     &mut order,
@@ -593,19 +991,70 @@ impl<'a> FlowCtx<'a> {
                 i += 1;
                 continue;
             }
-            let adv = self.advance(&chars[i], pieces);
-            if !nowrap && used + adv > w + 0.001 && i > line_start {
-                let brk = last_break
-                    .filter(|&b| b > line_start && b <= i)
-                    .unwrap_or(i);
+            let adv = if chars[i].head {
+                shaped.clusters[chars[i].cluster as usize].advance
+            } else {
+                0.0
+            };
+            // 行末悬挂：闭标点最多探出右边界半宽，只影响"放没放下"，
+            // 字形坐标不动，所以这里只放宽 fit 判定。
+            let mut fits = used + adv <= w + 0.001;
+            if !fits && rules.hanging_punctuation && i > line_start && chars[i].head {
+                if let Some(hang) = crate::punct::hang_amount(chars[i].c, adv) {
+                    if used + adv - hang <= w + 0.001 {
+                        fits = true;
+                    }
+                }
+            }
+            if !nowrap && !fits && i > line_start {
+                let normal = last_break.filter(|&b| b > line_start && b <= i);
+                let hyphen = hyphen_points
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|&b| b > line_start && b <= i);
+                let (brk, hyphenated) = match (normal, hyphen) {
+                    (Some(n), Some(h)) if h > n => {
+                        match Self::fit_hyphen(
+                            &chars,
+                            &shaped,
+                            &hyphen_points,
+                            &hyphen_reserve,
+                            line_start,
+                            h,
+                            w,
+                        ) {
+                            Some(at) => (at, true),
+                            None => (n, false),
+                        }
+                    }
+                    (Some(n), _) => (n, false),
+                    (None, Some(h)) => {
+                        match Self::fit_hyphen(
+                            &chars,
+                            &shaped,
+                            &hyphen_points,
+                            &hyphen_reserve,
+                            line_start,
+                            h,
+                            w,
+                        ) {
+                            Some(at) => (at, true),
+                            None => (i, false),
+                        }
+                    }
+                    (None, None) => (i, false),
+                };
                 let pad = if first { indent } else { 0.0 };
                 self.emit_line(
                     pieces,
                     &chars[line_start..brk],
+                    &shaped,
                     x0,
                     y,
                     w,
                     pad,
+                    hyphenated,
                     base_style,
                     block,
                     &mut order,
@@ -622,6 +1071,7 @@ impl<'a> FlowCtx<'a> {
             }
             used += adv;
             if i + 1 < chars.len()
+                && chars[i].cluster != chars[i + 1].cluster
                 && crate::linebreak::can_break(
                     chars[i].c,
                     chars[i + 1].c,
@@ -638,10 +1088,12 @@ impl<'a> FlowCtx<'a> {
             self.emit_line(
                 pieces,
                 &chars[line_start..],
+                &shaped,
                 x0,
                 y,
                 w,
                 pad,
+                false,
                 base_style,
                 block,
                 &mut order,
@@ -682,37 +1134,16 @@ impl<'a> FlowCtx<'a> {
     }
 
     fn justify_line(&mut self, index: usize, x0: f32, w: f32) {
-        let (runs, line_x, line_w) = match &self.flow.items[index] {
-            Item::Line(line) => (line.runs.clone(), line.x, line.w),
+        let (runs, line_x, line_w, stretch) = match &self.flow.items[index] {
+            Item::Line(line) => (line.runs.clone(), line.x, line.w, line.stretch.clone()),
             _ => return,
         };
         let target = (w - (line_x - x0)).max(0.0);
         let extra = target - line_w;
-        if extra <= 0.001 || runs.is_empty() {
+        if extra <= 0.001 || stretch.is_empty() {
             return;
         }
-        let has_space = runs.iter().any(|run| run.text.contains(' '));
-        let last_glyph = runs.last().map(|run| run.glyphs.end() as usize);
-        let mut eligible: Vec<usize> = Vec::new();
-        for run in &runs {
-            if has_space {
-                for (offset, ch) in run.text.chars().enumerate() {
-                    if ch == ' ' {
-                        eligible.push(run.glyphs.start as usize + offset);
-                    }
-                }
-            } else {
-                for glyph in run.glyphs.as_range() {
-                    if Some(glyph + 1) != last_glyph {
-                        eligible.push(glyph);
-                    }
-                }
-            }
-        }
-        if eligible.is_empty() {
-            return;
-        }
-        let n = eligible.len() as f32;
+        let n = stretch.len() as f32;
         let each = extra / n;
         let mut origins = Vec::with_capacity(runs.len());
         let mut shift = 0.0f32;
@@ -720,8 +1151,8 @@ impl<'a> FlowCtx<'a> {
         for run in &runs {
             origins.push(run.origin.x + shift);
             for glyph in run.glyphs.as_range() {
-                if next < eligible.len() && eligible[next] == glyph {
-                    let delta = if next + 1 == eligible.len() {
+                if next < stretch.len() && stretch[next] as usize == glyph {
+                    let delta = if next + 1 == stretch.len() {
                         extra - each * (n - 1.0)
                     } else {
                         each
@@ -889,14 +1320,149 @@ impl<'a> FlowCtx<'a> {
         entries
     }
 
+    /// 按 UAX #9 的级给整段文本定方向（L1 的行尾空白复位由库负责）。
+    ///
+    /// 段落方向来自 `Dir`，逐字符的级存进 `Ch.level`，后面的整形分组和
+    /// 行内重排都只看这一个值，不再回头看样式。
+    fn resolve_bidi(&self, chars: &mut [Ch], base: Dir) {
+        if chars.is_empty() {
+            return;
+        }
+        let mut text = String::with_capacity(chars.len());
+        let mut starts: Vec<usize> = Vec::with_capacity(chars.len());
+        for ch in chars.iter() {
+            starts.push(text.len());
+            text.push(ch.c);
+        }
+        let level = if base == Dir::Rtl {
+            unicode_bidi::Level::rtl()
+        } else {
+            unicode_bidi::Level::ltr()
+        };
+        let info = unicode_bidi::BidiInfo::new(&text, Some(level));
+        for (index, ch) in chars.iter_mut().enumerate() {
+            ch.level = info
+                .levels
+                .get(starts[index])
+                .map(|level| level.number())
+                .unwrap_or(level.number());
+        }
+    }
+
+    /// 行的绘制顺序：逻辑下标按 UAX #9 L2 重排成视觉顺序。
+    ///
+    /// 重排以**簇**为单位，所以合字/组合字符不会被拆开；展开时簇内仍按逻辑
+    /// 顺序，`Glyph.dx` 依次累加就是行内视觉位置。
+    fn visual_order(&self, line: &[Ch]) -> Vec<usize> {
+        let mut heads: Vec<(usize, unicode_bidi::Level)> = Vec::new();
+        for (index, ch) in line.iter().enumerate() {
+            if ch.head {
+                let level = unicode_bidi::Level::new(ch.level)
+                    .unwrap_or_else(|_| unicode_bidi::Level::ltr());
+                heads.push((index, level));
+            }
+        }
+        if heads.len() <= 1 {
+            return (0..line.len()).collect();
+        }
+        let levels: Vec<unicode_bidi::Level> = heads.iter().map(|(_, level)| *level).collect();
+        let order = unicode_bidi::BidiInfo::reorder_visual(&levels);
+        let mut out = Vec::with_capacity(line.len());
+        for &unit in &order {
+            let head = heads[unit].0;
+            let cluster = line[head].cluster;
+            let mut index = head;
+            while index < line.len() && line[index].cluster == cluster {
+                out.push(index);
+                index += 1;
+            }
+        }
+        out
+    }
+
+    /// 注音排版：基文正常排，rt 用 0.5em 画在基线上方。
+    ///
+    /// rt 不参与断行宽度（`line_w` 里只有基文），字形宽度按基文簇宽平均分配，
+    /// 所以注音始终对在基文上方；`Glyph.dy` 是相对基线的 -0.5em。
+    fn ruby_run(
+        &mut self,
+        piece: &Piece,
+        line: &[Ch],
+        shaped: &Shaped,
+        rt: Span,
+        logical: &[usize],
+        src_start: u32,
+        baseline: f32,
+        run_x: f32,
+    ) -> Option<LaidRun> {
+        let rt_text = self.doc.text_of(rt);
+        if rt_text.is_empty() || logical.is_empty() {
+            return None;
+        }
+        let size = piece.style.font.size * 0.5;
+        if !(size > 0.0) {
+            return None;
+        }
+        let rt_chars: Vec<char> = rt_text.chars().collect();
+        let mut heads: Vec<(u32, f32)> = Vec::new();
+        for &at in logical {
+            if !line[at].head {
+                continue;
+            }
+            let cluster = shaped.clusters[line[at].cluster as usize];
+            heads.push((cluster.ch, cluster.advance));
+        }
+        if heads.is_empty() {
+            return None;
+        }
+        let glyph_start = self.flow.glyphs.len() as u32;
+        let mut count = 0u32;
+        for (index, (ch, advance)) in heads.iter().enumerate() {
+            let lo = index * rt_chars.len() / heads.len();
+            let hi = (index + 1) * rt_chars.len() / heads.len();
+            if hi <= lo {
+                continue;
+            }
+            let each = advance / (hi - lo) as f32;
+            for &c in &rt_chars[lo..hi] {
+                let font = self.env.font_for(&piece.style.font, c);
+                if !self.env.measurer.covers(c, font) {
+                    continue;
+                }
+                self.flow.glyphs.push(Glyph {
+                    gid: self.env.measurer.glyph_id(c, font),
+                    dx: each,
+                    dy: -size,
+                    ch: ch.saturating_sub(src_start),
+                });
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return None;
+        }
+        Some(LaidRun {
+            font: self.env.measurer.select(&piece.style.font),
+            size,
+            color: piece.style.color,
+            dir: Dir::Ltr,
+            rotate: Rotate::None,
+            origin: PointF::new(run_x, baseline),
+            glyphs: Span::new(glyph_start, count),
+            text: rt_text.into(),
+        })
+    }
+
     fn emit_line(
         &mut self,
         pieces: &[Piece],
         line: &[Ch],
+        shaped: &Shaped,
         x0: f32,
         y: &mut f32,
         w: f32,
         indent: f32,
+        hyphen: bool,
         base_style: ComputedStyle,
         block: u32,
         order: &mut u16,
@@ -910,8 +1476,30 @@ impl<'a> FlowCtx<'a> {
 
         let mut line_w = 0.0f32;
         for ch in line {
-            line_w += self.advance(ch, pieces);
+            if ch.head {
+                line_w += shaped.clusters[ch.cluster as usize].advance;
+            }
         }
+        // 自动间距不插在行尾：最后一个簇的空隙在行宽里收回。
+        let end_cluster = line.iter().rev().find(|ch| ch.head).map(|ch| ch.cluster);
+        let gap_cut = end_cluster
+            .map(|cluster| shaped.clusters[cluster as usize].gap)
+            .unwrap_or(0.0);
+        line_w -= gap_cut;
+
+        // 行末连字符：独立一个 run，跟在最后一个字形后面。
+        let last_char = line[line.len() - 1];
+        let hyphen_style = pieces[last_char.piece as usize].style;
+        let hyphen_font = self.font_for(&last_char, pieces);
+        let hyphen_advance = if hyphen {
+            self.env
+                .measurer
+                .advance('-', hyphen_font, hyphen_style.font.size)
+                .max(0.0)
+        } else {
+            0.0
+        };
+        line_w += hyphen_advance;
 
         let mut entries = self.line_entries(pieces, line, base_style);
         let mut base_top = f32::INFINITY;
@@ -925,6 +1513,17 @@ impl<'a> FlowCtx<'a> {
                 base_bottom = base_bottom.max(entry.shift + entry.bottom_dist);
             }
         }
+        // 行内图片按基线摆放：底边贴基线，太高的会把行盒往上顶。
+        let mut image_top = 0.0f32;
+        for ch in line {
+            if ch.image.is_some() {
+                if let PieceKind::Image { size, .. } = pieces[ch.piece as usize].kind {
+                    let height = size.map(|s| s.h).unwrap_or(base_style.font.size * 1.5);
+                    image_top = image_top.min(-height);
+                }
+            }
+        }
+        base_top = base_top.min(image_top);
         let line_h = (base_bottom - base_top).max(tallest).max(1.0);
         let line_top = base_top;
         let line_bottom = line_top + line_h;
@@ -948,8 +1547,10 @@ impl<'a> FlowCtx<'a> {
         let baseline = top - line_top;
         let mut cx = start_x;
         let mut runs: Vec<LaidRun> = Vec::new();
+        let mut inline_ops: Vec<Op> = Vec::new();
         let mut missing: Vec<(NodeId, RectF)> = Vec::new();
-        let mut k = 0usize;
+        // 每个簇的末字形下标 + 是否空格簇，两端对齐按它在字形之间分余量。
+        let mut ends: Vec<(u32, bool)> = Vec::new();
 
         let first = line[0];
         let last = line[line.len() - 1];
@@ -959,8 +1560,11 @@ impl<'a> FlowCtx<'a> {
         let src_end = last_piece.span.start + last.off + last.c.len_utf8() as u32;
         let glyph_start_all = self.flow.glyphs.len() as u32;
 
-        while k < line.len() {
-            let piece_id = line[k].piece;
+        let visual = self.visual_order(line);
+        let mut k = 0usize;
+        while k < visual.len() {
+            let at = visual[k];
+            let piece_id = line[at].piece;
             let piece = &pieces[piece_id as usize];
             let style = piece.style;
             let shift = self
@@ -973,48 +1577,165 @@ impl<'a> FlowCtx<'a> {
                 })
                 .unwrap_or(0.0);
             let run_baseline = baseline + shift;
-            let font = self.font_for(&line[k], pieces);
-            let covered = self.env.measurer.covers(line[k].c, font);
+            if let Some(id) = line[at].image {
+                // 行内图片：底边贴基线，宽度就是断行时算进去的那个宽度。
+                let cluster = shaped.clusters[line[at].cluster as usize];
+                let size = match piece.kind {
+                    PieceKind::Image { size, .. } => size,
+                    _ => None,
+                };
+                let height = size.map(|s| s.h).unwrap_or(base_style.font.size * 1.5);
+                let rect = RectF::new(cx, run_baseline - height, cluster.advance, height);
+                match size {
+                    Some(_) => inline_ops.push(Op::Image {
+                        id,
+                        rect,
+                        fit: Fit::Contain,
+                    }),
+                    None => {
+                        // 尺寸依赖内容：发占位并记诊断，行高保持可预测。
+                        inline_ops.push(Op::Unresolved(Unresolved {
+                            node: piece.node,
+                            rect,
+                            reason: UnresolvedReason::SizeFromContent,
+                        }));
+                        self.flow.dirty.push(DirtyBlock {
+                            node: piece.node,
+                            rect,
+                            reason: UnresolvedReason::SizeFromContent,
+                        });
+                    }
+                }
+                cx += cluster.advance;
+                k += 1;
+                continue;
+            }
+            let font = self.font_for(&line[at], pieces);
+            let covered = self.env.measurer.covers(line[at].c, font);
+            let rtl = line[at].level % 2 == 1;
             let glyph_start = self.flow.glyphs.len() as u32;
             let run_x = cx;
-            let mut text = String::new();
-            while k < line.len() && line[k].piece == piece_id {
-                let next_font = self.font_for(&line[k], pieces);
-                let next_covered = self.env.measurer.covers(line[k].c, next_font);
-                if next_font != font || next_covered != covered {
+            let mut logical: Vec<usize> = Vec::new();
+            while k < visual.len() {
+                let current = visual[k];
+                if line[current].piece != piece_id {
                     break;
                 }
-                let adv = self.advance(&line[k], pieces);
-                if covered {
-                    let ch = piece.span.start + line[k].off - src_start;
-                    self.flow.glyphs.push(Glyph {
-                        gid: self.env.measurer.glyph_id(line[k].c, next_font),
-                        dx: adv,
-                        dy: 0.0,
-                        ch,
-                    });
-                    text.push(line[k].c);
+                let next_font = self.font_for(&line[current], pieces);
+                let next_covered = self.env.measurer.covers(line[current].c, next_font);
+                if next_font != font
+                    || next_covered != covered
+                    || (line[current].level % 2 == 1) != rtl
+                {
+                    break;
                 }
-                cx += adv;
+                if line[current].head {
+                    let cluster = shaped.clusters[line[current].cluster as usize];
+                    let cut = if Some(line[current].cluster) == end_cluster {
+                        gap_cut
+                    } else {
+                        0.0
+                    };
+                    if covered {
+                        let start = cluster.glyph_start as usize;
+                        let end = start + cluster.glyph_len as usize;
+                        for glyph in &shaped.glyphs[start..end] {
+                            self.flow.glyphs.push(Glyph {
+                                gid: glyph.gid,
+                                dx: glyph.dx,
+                                dy: glyph.dy,
+                                ch: cluster.ch.saturating_sub(src_start),
+                            });
+                        }
+                        if cluster.glyph_len > 0 {
+                            ends.push((self.flow.glyphs.len() as u32 - 1, line[current].c == ' '));
+                            if cut != 0.0 {
+                                if let Some(last) = self.flow.glyphs.last_mut() {
+                                    last.dx -= cut;
+                                }
+                            }
+                        }
+                    }
+                    cx += cluster.advance - cut;
+                }
+                logical.push(current);
                 k += 1;
+            }
+            logical.sort_unstable();
+            let mut text = String::new();
+            for &current in &logical {
+                text.push(line[current].c);
             }
             if covered {
                 runs.push(LaidRun {
                     font,
                     size: style.font.size,
                     color: style.color,
-                    dir: style.dir,
+                    dir: if rtl { Dir::Rtl } else { Dir::Ltr },
                     rotate: Rotate::None,
                     origin: PointF::new(run_x, run_baseline),
                     glyphs: Span::new(glyph_start, self.flow.glyphs.len() as u32 - glyph_start),
                     text,
                 });
+                if let PieceKind::Ruby { rt } = piece.kind {
+                    if let Some(run) = self.ruby_run(
+                        piece,
+                        line,
+                        shaped,
+                        rt,
+                        &logical,
+                        src_start,
+                        run_baseline,
+                        run_x,
+                    ) {
+                        runs.push(run);
+                    }
+                }
             } else {
                 missing.push((
                     piece.node,
                     RectF::new(run_x, top, (cx - run_x).max(0.0), line_h),
                 ));
             }
+        }
+
+        if hyphen {
+            let piece = &pieces[last_char.piece as usize];
+            let shift = self
+                .owner_id(piece.node)
+                .and_then(|owner| {
+                    entries
+                        .iter()
+                        .find(|entry| entry.owner == Some(owner))
+                        .map(|entry| entry.shift)
+                })
+                .unwrap_or(0.0);
+            let run_x = cx;
+            let covered = self.env.measurer.covers('-', hyphen_font);
+            if covered {
+                let glyph_start = self.flow.glyphs.len() as u32;
+                // 连字符不属于原文：`ch` 停在行末最后一个字符上，选区不会越界。
+                let ch = (src_end - src_start).saturating_sub(1);
+                self.flow.glyphs.push(Glyph {
+                    gid: self.env.measurer.glyph_id('-', hyphen_font),
+                    dx: hyphen_advance,
+                    dy: 0.0,
+                    ch,
+                });
+                runs.push(LaidRun {
+                    font: hyphen_font,
+                    size: hyphen_style.font.size,
+                    color: hyphen_style.color,
+                    dir: Dir::Ltr,
+                    rotate: Rotate::None,
+                    origin: PointF::new(run_x, baseline + shift),
+                    glyphs: Span::new(glyph_start, 1),
+                    text: String::from("-"),
+                });
+            } else {
+                missing.push((piece.node, RectF::new(run_x, top, hyphen_advance, line_h)));
+            }
+            cx += hyphen_advance;
         }
 
         let anchor = self
@@ -1029,7 +1750,7 @@ impl<'a> FlowCtx<'a> {
         );
         let link = self.line_link(pieces, line);
 
-        let mut unresolved = Vec::new();
+        let mut unresolved: Vec<Op> = inline_ops;
         for (node, rect) in missing {
             unresolved.push(Op::Unresolved(Unresolved {
                 node,
@@ -1042,6 +1763,21 @@ impl<'a> FlowCtx<'a> {
                 reason: UnresolvedReason::FontMissing,
             });
         }
+
+        // 两端对齐的余量：有空格就分给空格，没有空格就把字间隙拉开（末字形除外）。
+        let has_space = ends.iter().any(|(_, space)| *space);
+        let stretch: Vec<u32> = if has_space {
+            ends.iter()
+                .filter(|(_, space)| *space)
+                .map(|(glyph, _)| *glyph)
+                .collect()
+        } else {
+            let last = ends.last().map(|(glyph, _)| *glyph);
+            ends.iter()
+                .map(|(glyph, _)| *glyph)
+                .filter(|glyph| Some(*glyph) != last)
+                .collect()
+        };
 
         self.flow.items.push(Item::Line(LaidLine {
             y: top,
@@ -1057,6 +1793,7 @@ impl<'a> FlowCtx<'a> {
             link,
             runs,
             unresolved,
+            stretch,
             block,
             order: index,
             len: 0,

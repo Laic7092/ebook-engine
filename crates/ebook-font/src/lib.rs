@@ -1,6 +1,6 @@
 use ab_glyph_rasterizer::{point, Point, Rasterizer};
 use ebook_ir::{FontDesc, FontId, FontSpec, FontStyle, GlyphBitmap, ImageData, ImageId, Resources};
-use ebook_layout::TextMeasurer;
+use ebook_layout::{shape_per_char, ShapeGlyph, TextMeasurer};
 use ttf_parser::Face;
 
 const SYNTH_FLAG: u16 = 0x8000;
@@ -83,6 +83,12 @@ impl Metrics {
 #[derive(Debug, Default)]
 pub struct FontBook {
     faces: Vec<Metrics>,
+    /// 文档语言（BCP-47 前缀，如 `zh` / `ja` / `en`）。
+    ///
+    /// 排版层的 `TextMeasurer::shape` 拿不到 `DocMeta`，所以语言由宿主在排版前
+    /// 注入；没设置时按字形猜（见 [`guess_language`]），猜不到就不设，
+    /// rustybuzz 会把脚本留成 `Zyyy`。
+    lang: Option<String>,
 }
 
 impl FontBook {
@@ -124,6 +130,15 @@ impl FontBook {
             },
             bytes,
         )
+    }
+
+    /// 设置文档语言，只影响 OpenType 的 `locl` 之类的语言相关替换。
+    pub fn set_language(&mut self, lang: Option<&str>) {
+        self.lang = lang.map(|value| value.to_ascii_lowercase());
+    }
+
+    pub fn language(&self) -> Option<&str> {
+        self.lang.as_deref()
     }
 
     pub fn len(&self) -> usize {
@@ -566,7 +581,88 @@ fn cubic_at(a: Point, b: Point, c: Point, d: Point, t: f32) -> Point {
     )
 }
 
+/// 从文本本身猜语言：只用于 `locl` 之类的替换，猜不到就算了。
+///
+/// 优先看假名/谚文（日/韩必须区分），再看汉字（默认按中文），最后拉丁字母按英文。
+fn guess_language(text: &str) -> Option<&'static str> {
+    let mut han = false;
+    let mut latin = false;
+    for ch in text.chars().take(64) {
+        match ch as u32 {
+            0x3040..=0x30FF | 0x31F0..=0x31FF => return Some("ja"),
+            0xAC00..=0xD7A3 | 0x1100..=0x11FF | 0x3130..=0x318F => return Some("ko"),
+            0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF => han = true,
+            _ => {
+                if ch.is_ascii_alphabetic() {
+                    latin = true;
+                }
+            }
+        }
+    }
+    if han {
+        Some("zh")
+    } else if latin {
+        Some("en")
+    } else {
+        None
+    }
+}
+
 impl TextMeasurer for FontBook {
+    /// 用 rustybuzz 整形：kerning、ligature 默认开，script/language 从入参或文本猜。
+    ///
+    /// 返回的字形按**逻辑顺序**（RTL run 内部会翻回去），`ch` 是簇首字符在
+    /// `text` 里的字节偏移，和逐字实现保持同一套语义。
+    fn shape(&self, text: &str, font: FontId, size: f32, out: &mut Vec<ShapeGlyph>) -> f32 {
+        let Some(metrics) = self
+            .real_index(font)
+            .and_then(|index| self.faces.get(index))
+        else {
+            return shape_per_char(self, text, font, size, out);
+        };
+        if !size.is_finite() || size <= 0.0 {
+            return 0.0;
+        }
+        let Some(face) = rustybuzz::Face::from_slice(&metrics.bytes, 0) else {
+            return shape_per_char(self, text, font, size, out);
+        };
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(text);
+        // 语言优先级：宿主注入 > 文本猜。脚本交给 guess，猜不到就是 Zyyy。
+        if let Some(lang) = self.lang.as_deref().or_else(|| guess_language(text)) {
+            if let Ok(lang) = lang.parse::<rustybuzz::Language>() {
+                buffer.set_language(lang);
+            }
+        }
+        buffer.guess_segment_properties();
+        let rtl = buffer.direction() == rustybuzz::Direction::RightToLeft;
+        let shaped = rustybuzz::shape(&face, &[], buffer);
+        let scale = size / metrics.units_per_em;
+        let mut total = 0.0f32;
+        let mut glyphs: Vec<ShapeGlyph> = Vec::with_capacity(shaped.len());
+        for (info, position) in shaped
+            .glyph_infos()
+            .iter()
+            .zip(shaped.glyph_positions().iter())
+        {
+            let dx = position.x_advance as f32 * scale;
+            let dy = position.y_offset as f32 * scale;
+            total += dx;
+            glyphs.push(ShapeGlyph {
+                gid: info.glyph_id.min(u16::MAX as u32) as u16,
+                dx,
+                dy,
+                ch: info.cluster,
+            });
+        }
+        if rtl {
+            // HarfBuzz 对 RTL 输出的是视觉顺序；IR 要逻辑顺序。
+            glyphs.reverse();
+        }
+        out.extend_from_slice(&glyphs);
+        total
+    }
+
     fn advance(&self, ch: char, font: FontId, size: f32) -> f32 {
         match self
             .real_index(font)

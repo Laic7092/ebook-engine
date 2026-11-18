@@ -5,12 +5,15 @@ extern crate std;
 
 mod flow;
 pub mod hit;
+mod hyphen;
 mod linebreak;
 mod linebreak_table;
 mod measure;
 mod paginate;
+mod punct;
 mod resolve;
 pub mod select;
+mod shape;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -22,8 +25,10 @@ use ebook_ir::{
 };
 
 pub use hit::Reader;
-pub use measure::{StubMeasurer, TextMeasurer};
+pub use hyphen::{English, Hyphenator};
+pub use measure::{ShapeGlyph, StubMeasurer, TextMeasurer};
 pub use select::{Selection, SelectionRect};
+pub use shape::shape_per_char;
 
 pub trait ResourceView {
     fn image_size(&self, id: ImageId) -> Option<SizeF>;

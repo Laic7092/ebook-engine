@@ -11,6 +11,7 @@ parallel = []
 
 [dependencies]
 ebook-ir.workspace = true
+unicode-bidi.workspace = true
 
 [dev-dependencies]
 ebook-format.workspace = true
