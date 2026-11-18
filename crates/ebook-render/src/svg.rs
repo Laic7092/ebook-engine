@@ -1,8 +1,8 @@
 use core::fmt::Write;
 
 use ebook_ir::{
-    BorderBox, Fit, Glyph, GlyphRun, ImageId, LayoutResult, LinkTarget, RectF, RenderError,
-    Renderer, Resources, Rgba8, SizeF, Surface, Unresolved,
+    BorderBox, Fit, Glyph, GlyphRun, ImageId, LayoutResult, RectF, RenderError, Renderer,
+    Resources, Rgba8, SizeF, Surface, Unresolved,
 };
 
 pub use crate::paint::paint;
@@ -24,6 +24,7 @@ impl Renderer for SvgRenderer {
 pub struct SvgSurface {
     out: alloc::string::String,
     size: SizeF,
+    next_id: u32,
 }
 
 impl SvgSurface {
@@ -31,7 +32,14 @@ impl SvgSurface {
         Self {
             out: alloc::string::String::new(),
             size,
+            next_id: 0,
         }
+    }
+
+    fn take_id(&mut self) -> u32 {
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        id
     }
 
     pub fn finish(self) -> alloc::string::String {
@@ -113,16 +121,27 @@ impl Surface for SvgSurface {
         }
     }
 
-    fn image(&mut self, _id: ImageId, rect: RectF, _fit: Fit, res: &mut dyn Resources) {
-        let exists = res.image(_id).is_some();
+    fn image(&mut self, id: ImageId, rect: RectF, _fit: Fit, res: &mut dyn Resources) {
+        if rect.is_empty() {
+            return;
+        }
+        if res.image(id).is_some() {
+            let _ = write!(
+                self.out,
+                "<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" fill=\"#dddddd\" stroke=\"#999999\"/>",
+                rect.x, rect.y, rect.w, rect.h
+            );
+            return;
+        }
+        let pattern = self.take_id();
         let _ = write!(
             self.out,
-            "<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" fill=\"{}\" stroke=\"#999999\"/>",
-            rect.x,
-            rect.y,
-            rect.w,
-            rect.h,
-            if exists { "#dddddd" } else { "#f5f5f5" }
+            "<defs><pattern id=\"placeholder{pattern}\" width=\"8\" height=\"8\" patternUnits=\"userSpaceOnUse\"><path d=\"M0 8L8 0\" stroke=\"#d0d0d0\" stroke-width=\"1\" fill=\"none\"/></pattern></defs>"
+        );
+        let _ = write!(
+            self.out,
+            "<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" fill=\"url(#placeholder{pattern})\" stroke=\"#999999\" stroke-dasharray=\"4 4\"/>",
+            rect.x, rect.y, rect.w, rect.h
         );
     }
 
@@ -135,7 +154,18 @@ impl Surface for SvgSurface {
         );
     }
 
-    fn link(&mut self, _rect: RectF, _target: &LinkTarget) {}
+    fn push_clip(&mut self, rect: RectF) {
+        let id = self.take_id();
+        let _ = write!(
+            self.out,
+            "<defs><clipPath id=\"clip{id}\"><rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\"/></clipPath></defs><g clip-path=\"url(#clip{id})\">",
+            rect.x, rect.y, rect.w, rect.h
+        );
+    }
+
+    fn pop_clip(&mut self) {
+        self.out.push_str("</g>");
+    }
 }
 
 fn push_escaped(out: &mut alloc::string::String, text: &str) {

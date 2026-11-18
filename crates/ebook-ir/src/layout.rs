@@ -12,7 +12,7 @@ pub struct IrVersion {
     pub minor: u16,
 }
 
-pub const IR_VERSION: IrVersion = IrVersion { major: 1, minor: 0 };
+pub const IR_VERSION: IrVersion = IrVersion { major: 1, minor: 1 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Rotate {
@@ -42,12 +42,6 @@ pub struct Unresolved {
     pub node: NodeId,
     pub rect: RectF,
     pub reason: UnresolvedReason,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum LinkTarget {
-    Spine(u32),
-    External(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -83,7 +77,7 @@ pub enum Op {
     Border(BorderBox),
     Image { id: ImageId, rect: RectF, fit: Fit },
     Unresolved(Unresolved),
-    Link { rect: RectF, target: LinkTarget },
+    Clip { rect: RectF, ops: Vec<Op> },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

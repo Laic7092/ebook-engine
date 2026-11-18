@@ -215,6 +215,6 @@ pub(crate) fn op_bounds(op: &Op) -> (f32, f32) {
         Op::Border(border) => (border.rect.y, border.rect.h),
         Op::Image { rect, .. } => (rect.y, rect.h),
         Op::Unresolved(u) => (u.rect.y, u.rect.h),
-        Op::Link { rect, .. } => (rect.y, rect.h),
+        Op::Clip { rect, .. } => (rect.y, rect.h),
     }
 }

@@ -8,7 +8,18 @@ pub fn paint(
 ) -> Result<(), RenderError> {
     let page = ir.page(page).ok_or(RenderError::NoSuchPage(page))?;
     let origin = PointF::new(page.origin.x - page.inset.left, page.origin.y - page.inset.top);
-    for op in ir.display.op_slice(page.ops) {
+    paint_ops(ir, ir.display.op_slice(page.ops), surface, res, origin);
+    Ok(())
+}
+
+fn paint_ops(
+    ir: &LayoutResult,
+    ops: &[Op],
+    surface: &mut dyn Surface,
+    res: &mut dyn Resources,
+    origin: PointF,
+) {
+    for op in ops {
         match op {
             Op::GlyphRun(run) => {
                 let glyphs = ir.display.glyph_slice(run.glyphs);
@@ -30,8 +41,11 @@ pub fn paint(
                 moved.rect = u.rect.shifted(-origin.x, -origin.y);
                 surface.unresolved(&moved);
             }
-            Op::Link { rect, target } => surface.link(rect.shifted(-origin.x, -origin.y), target),
+            Op::Clip { rect, ops } => {
+                surface.push_clip(rect.shifted(-origin.x, -origin.y));
+                paint_ops(ir, ops, surface, res, origin);
+                surface.pop_clip();
+            }
         }
     }
-    Ok(())
 }

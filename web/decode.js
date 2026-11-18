@@ -138,17 +138,6 @@ function readUnresolved(r) {
   return { node: r.varint(), rect: readRect(r), reason: r.varint() };
 }
 
-function readLinkTarget(r) {
-  const tag = r.varint();
-  if (tag === 0) {
-    return { type: "spine", spine: r.varint() };
-  }
-  if (tag === 1) {
-    return { type: "external", href: r.string() };
-  }
-  throw new Error("bad link target");
-}
-
 function readOp(r) {
   const tag = r.varint();
   if (tag === 0) {
@@ -167,7 +156,7 @@ function readOp(r) {
     return { type: "unresolved", unresolved: readUnresolved(r) };
   }
   if (tag === 5) {
-    return { type: "link", rect: readRect(r), target: readLinkTarget(r) };
+    return { type: "clip", rect: readRect(r), ops: readVec(r, readOp) };
   }
   throw new Error(`bad op tag ${tag}`);
 }

@@ -120,6 +120,12 @@ impl Layout {
                         anchor: line.anchor,
                     });
                 }
+                flow::Item::Op(Op::Image { id, rect, fit }) => {
+                    ops.push(Op::Clip {
+                        rect,
+                        ops: alloc::vec![Op::Image { id, rect, fit }],
+                    });
+                }
                 flow::Item::Op(op) => ops.push(op),
             }
         }

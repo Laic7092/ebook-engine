@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 
 use ebook_ir::{
-    BorderBox, Fit, Glyph, GlyphBitmap, GlyphRun, ImageId, LayoutResult, LinkTarget, RenderError,
+    BorderBox, Fit, Glyph, GlyphBitmap, GlyphRun, ImageId, LayoutResult, RectF, RenderError,
     Renderer, Resources, Rgba8, SizeF, Surface, Unresolved,
 };
 
@@ -16,6 +16,7 @@ pub struct RgbaSurface {
     width: u32,
     height: u32,
     pixels: Vec<Rgba8>,
+    clips: Vec<RectF>,
 }
 
 impl RgbaSurface {
@@ -25,6 +26,7 @@ impl RgbaSurface {
             width,
             height,
             pixels: vec![Rgba8::WHITE; len],
+            clips: Vec::new(),
         }
     }
 
@@ -86,6 +88,18 @@ impl RgbaSurface {
     fn write(&mut self, x: i64, y: i64, color: Rgba8) {
         if x < 0 || y < 0 || x >= self.width as i64 || y >= self.height as i64 {
             return;
+        }
+        if let Some(clip) = self.clips.last() {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            if clip.is_empty()
+                || px < clip.x
+                || px >= clip.right()
+                || py < clip.y
+                || py >= clip.bottom()
+            {
+                return;
+            }
         }
         let index = y as usize * self.width as usize + x as usize;
         if let Some(dst) = self.pixels.get_mut(index) {
@@ -173,6 +187,50 @@ impl RgbaSurface {
                 if dash_on(y - y0) {
                     self.write(x0, y, color);
                     self.write(x1, y, color);
+                }
+            }
+        }
+    }
+
+    fn draw_placeholder(&mut self, rect: RectF) {
+        if rect.is_empty() {
+            return;
+        }
+        let x0 = ceil_i(rect.x);
+        let y0 = ceil_i(rect.y);
+        let x1 = floor_i(rect.right()).saturating_sub(1);
+        let y1 = floor_i(rect.bottom()).saturating_sub(1);
+        if x1 < x0 || y1 < y0 {
+            return;
+        }
+        let left = x0.max(0);
+        let top = y0.max(0);
+        let right = x1.min(self.width as i64 - 1);
+        let bottom = y1.min(self.height as i64 - 1);
+        let hatch = Rgba8::new(0xd0, 0xd0, 0xd0, 255);
+        let border = Rgba8::new(0x99, 0x99, 0x99, 255);
+        if left <= right && top <= bottom {
+            for y in top..=bottom {
+                for x in left..=right {
+                    if (x + y).rem_euclid(8) == 0 {
+                        self.write(x, y, hatch);
+                    }
+                }
+            }
+        }
+        if top <= bottom {
+            for x in left..=right {
+                if dash_on(x - x0) {
+                    self.write(x, y0, border);
+                    self.write(x, y1, border);
+                }
+            }
+        }
+        if left <= right {
+            for y in top..=bottom {
+                if dash_on(y - y0) {
+                    self.write(x0, y, border);
+                    self.write(x1, y, border);
                 }
             }
         }
@@ -290,8 +348,9 @@ impl Surface for RgbaSurface {
     }
 
     fn image(&mut self, id: ImageId, rect: ebook_ir::RectF, fit: Fit, res: &mut dyn Resources) {
-        if let Some(image) = res.image(id) {
-            self.draw_image(&image, rect, fit);
+        match res.image(id) {
+            Some(image) => self.draw_image(&image, rect, fit),
+            None => self.draw_placeholder(rect),
         }
     }
 
@@ -299,7 +358,17 @@ impl Surface for RgbaSurface {
         self.draw_dashes(unresolved);
     }
 
-    fn link(&mut self, _rect: ebook_ir::RectF, _target: &LinkTarget) {}
+    fn push_clip(&mut self, rect: RectF) {
+        let next = match self.clips.last() {
+            Some(current) => current.intersect(rect).unwrap_or(RectF::ZERO),
+            None => rect,
+        };
+        self.clips.push(next);
+    }
+
+    fn pop_clip(&mut self) {
+        self.clips.pop();
+    }
 }
 
 impl Renderer for RgbaSurface {

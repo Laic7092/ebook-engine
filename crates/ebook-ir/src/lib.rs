@@ -17,7 +17,7 @@ pub use doc::{
 pub use font::{FontData, FontDesc, FontId, FontSet, FontStyle};
 pub use geom::{EdgesF, PointF, RectF, Rgba8, Sided, Sides, SidesF, SizeF};
 pub use layout::{
-    BorderBox, DirtyBlock, DisplayList, Fit, Glyph, GlyphRun, IrVersion, LayoutResult, LineBox, LinkTarget,
+    BorderBox, DirtyBlock, DisplayList, Fit, Glyph, GlyphRun, IrVersion, LayoutResult, LineBox,
     Op, Page, Rotate, RunMap, Unresolved, UnresolvedReason, IR_VERSION,
 };
 pub use render::{
