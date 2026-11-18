@@ -110,6 +110,7 @@ impl Layout {
                             rotate: run.rotate,
                         }));
                     }
+                    ops.extend(line.unresolved);
                     lines.push(LineBox {
                         rect: RectF::new(line.x, line.y, line.w, line.h),
                         baseline: line.baseline,
