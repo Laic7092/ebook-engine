@@ -1,7 +1,8 @@
 use ebook_format::xhtml::{build, NoAssets};
 use ebook_ir::{
-    BorderBox, EdgesF, Fit, FontId, GlyphBitmap, GlyphRun, ImageData, ImageId, LayoutResult, Op,
-    RectF, Renderer, Resources, Rgba8, SidesF, StyledDoc, Unresolved, UnresolvedReason,
+    BorderBox, Dir, EdgesF, Fit, FontId, Glyph, GlyphBitmap, GlyphRun, ImageData, ImageId,
+    LayoutResult, Op, PointF, RectF, Renderer, Resources, Rgba8, Rotate, SidesF, Span, StyledDoc,
+    Unresolved, UnresolvedReason,
 };
 use ebook_layout::{layout, LayoutEnv, NoImageSizes, PageConstraint, StubMeasurer};
 use ebook_raster::RgbaSurface;
@@ -164,10 +165,12 @@ fn border_and_image_are_painted() {
     assert_eq!(surface.pixel(20, 40), Some(border_color));
     assert_eq!(surface.pixel(22, 42), Some(border_color));
     assert_eq!(surface.pixel(23, 43), Some(Rgba8::WHITE));
+    // 图片走双线性采样：2x2 放大到 8x8 时，(64,40) 落在红绿之间，
+    // 不是最近邻的纯绿。权重由目标像素中心到 texel 中心的距离决定。
     assert_eq!(surface.pixel(60, 40), Some(Rgba8::new(255, 0, 0, 255)));
-    assert_eq!(surface.pixel(64, 40), Some(Rgba8::new(0, 255, 0, 255)));
-    assert_eq!(surface.pixel(60, 44), Some(Rgba8::new(0, 0, 255, 255)));
-    assert_eq!(surface.pixel(64, 44), Some(Rgba8::new(255, 255, 255, 255)));
+    assert_eq!(surface.pixel(64, 40), Some(Rgba8::new(96, 159, 0, 255)));
+    assert_eq!(surface.pixel(60, 44), Some(Rgba8::new(96, 0, 159, 255)));
+    assert_eq!(surface.pixel(64, 44), Some(Rgba8::new(135, 159, 159, 255)));
 }
 
 #[test]
@@ -256,4 +259,183 @@ fn ops_are_clipped_to_the_canvas() {
     assert!(surface.pixels().iter().all(|pixel| pixel.a == 255));
     let ppm = surface.to_ppm();
     assert_eq!(ppm.len(), "P6\n32 32\n255\n".len() + 32 * 32 * 3);
+}
+
+fn blank_ir() -> LayoutResult {
+    let mut ir = document_ir("A");
+    ir.display.ops.clear();
+    ir.display.glyphs.clear();
+    ir.runs.lines.clear();
+    ir.pages.truncate(1);
+    ir.pages[0].ops = Span::EMPTY;
+    ir.pages[0].lines = Span::EMPTY;
+    ir
+}
+
+#[test]
+fn nested_clips_intersect() {
+    let mut ir = blank_ir();
+    let rect = Op::Rect {
+        rect: RectF::new(0.0, 0.0, 200.0, 200.0),
+        color: Rgba8::BLACK,
+    };
+    let inner = Op::Clip {
+        rect: RectF::new(20.0, 20.0, 30.0, 30.0),
+        ops: vec![rect],
+    };
+    let outer = Op::Clip {
+        rect: RectF::new(10.0, 10.0, 50.0, 50.0),
+        ops: vec![inner],
+    };
+    append_op(&mut ir, outer);
+
+    let mut surface = RgbaSurface::new(200, 200);
+    render(&ir, &mut surface);
+
+    // 两层裁剪的交集：x/y 都在 [20, 50)。
+    assert_eq!(surface.pixel(19, 25), Some(Rgba8::WHITE));
+    assert_eq!(surface.pixel(20, 25), Some(Rgba8::BLACK));
+    assert_eq!(surface.pixel(49, 49), Some(Rgba8::BLACK));
+    assert_eq!(surface.pixel(50, 49), Some(Rgba8::WHITE));
+    assert_eq!(surface.pixel(30, 19), Some(Rgba8::WHITE));
+    assert_eq!(surface.pixel(30, 20), Some(Rgba8::BLACK));
+}
+
+#[test]
+fn clip_cuts_a_glyph_in_half() {
+    let mut ir = blank_ir();
+    ir.display.glyphs.push(Glyph {
+        gid: 1,
+        dx: 0.0,
+        dy: 0.0,
+    });
+    let run = GlyphRun {
+        font: FontId(0),
+        size: 16.0,
+        color: Rgba8::BLACK,
+        origin: PointF::new(20.0, 30.0),
+        glyphs: Span::new(0, 1),
+        text: String::from("A"),
+        dir: Dir::Ltr,
+        rotate: Rotate::None,
+    };
+    append_op(
+        &mut ir,
+        Op::Clip {
+            rect: RectF::new(24.0, 0.0, 100.0, 200.0),
+            ops: vec![Op::GlyphRun(run)],
+        },
+    );
+
+    let mut surface = RgbaSurface::new(200, 200);
+    render(&ir, &mut surface);
+
+    // 字形覆盖 x 20..28；裁剪从 x=24 开始，左半变白，右半仍有墨。
+    assert_eq!(surface.pixel(23, 22), Some(Rgba8::WHITE));
+    assert_eq!(surface.pixel(24, 22), Some(Rgba8::new(127, 127, 127, 255)));
+    assert_eq!(surface.pixel(27, 29), Some(Rgba8::new(127, 127, 127, 255)));
+    assert_eq!(surface.pixel(28, 22), Some(Rgba8::WHITE));
+}
+
+#[test]
+fn border_sides_have_independent_widths() {
+    let mut ir = blank_ir();
+    let color = Rgba8::new(10, 20, 30, 255);
+    append_op(
+        &mut ir,
+        Op::Border(BorderBox {
+            rect: RectF::new(20.0, 40.0, 40.0, 30.0),
+            width: SidesF {
+                top: 2.0,
+                right: 4.0,
+                bottom: 6.0,
+                left: 8.0,
+            },
+            color,
+        }),
+    );
+
+    let mut surface = RgbaSurface::new(100, 100);
+    render(&ir, &mut surface);
+
+    // 上 2、下 6、左 8、右 4，四条边在拐角不重叠。
+    assert_eq!(surface.pixel(20, 40), Some(color));
+    assert_eq!(surface.pixel(59, 41), Some(color));
+    assert_eq!(surface.pixel(20, 44), Some(color));
+    assert_eq!(surface.pixel(55, 44), Some(Rgba8::WHITE));
+    assert_eq!(surface.pixel(56, 44), Some(color));
+    assert_eq!(surface.pixel(30, 64), Some(color));
+    assert_eq!(surface.pixel(30, 62), Some(Rgba8::WHITE));
+    assert_eq!(surface.pixel(30, 70), Some(Rgba8::WHITE));
+}
+
+#[test]
+fn translucent_border_corners_blend_once() {
+    let mut ir = blank_ir();
+    // 50% 黑。拐角若被上/左两边各画一次会变成 ~25% 白，这里要求只混合一次。
+    append_op(
+        &mut ir,
+        Op::Border(BorderBox {
+            rect: RectF::new(20.0, 40.0, 40.0, 30.0),
+            width: SidesF {
+                top: 4.0,
+                right: 4.0,
+                bottom: 4.0,
+                left: 4.0,
+            },
+            color: Rgba8::new(0, 0, 0, 128),
+        }),
+    );
+
+    let mut surface = RgbaSurface::new(100, 100);
+    render(&ir, &mut surface);
+
+    let corner = surface.pixel(20, 40).expect("corner");
+    assert_eq!(corner, Rgba8::new(127, 127, 127, 255));
+    assert_eq!(corner, surface.pixel(23, 43).expect("corner"));
+}
+
+#[test]
+fn to_ppm_is_byte_identical_across_runs_and_op_order() {
+    let mut first = blank_ir();
+    append_op(
+        &mut first,
+        Op::Rect {
+            rect: RectF::new(10.0, 10.0, 20.0, 20.0),
+            color: Rgba8::new(200, 10, 10, 255),
+        },
+    );
+    append_op(
+        &mut first,
+        Op::Rect {
+            rect: RectF::new(50.0, 50.0, 20.0, 20.0),
+            color: Rgba8::new(10, 10, 200, 255),
+        },
+    );
+
+    // 互不重叠的两个 op 交换顺序，字节流必须相同。
+    let mut second = blank_ir();
+    append_op(
+        &mut second,
+        Op::Rect {
+            rect: RectF::new(50.0, 50.0, 20.0, 20.0),
+            color: Rgba8::new(10, 10, 200, 255),
+        },
+    );
+    append_op(
+        &mut second,
+        Op::Rect {
+            rect: RectF::new(10.0, 10.0, 20.0, 20.0),
+            color: Rgba8::new(200, 10, 10, 255),
+        },
+    );
+
+    let mut a = RgbaSurface::new(200, 200);
+    render(&first, &mut a);
+    let mut b = RgbaSurface::new(200, 200);
+    render(&first, &mut b);
+    let mut c = RgbaSurface::new(200, 200);
+    render(&second, &mut c);
+    assert_eq!(a.to_ppm(), b.to_ppm());
+    assert_eq!(a.to_ppm(), c.to_ppm());
 }
