@@ -25,6 +25,18 @@ pub fn eb_font(bytes: &[u8]) -> u32 {
 
 #[cfg(feature = "epub")]
 #[wasm_bindgen]
+pub fn eb_font_reset() {
+    crate::reset_fonts()
+}
+
+#[cfg(feature = "epub")]
+#[wasm_bindgen]
+pub fn eb_font_count() -> u32 {
+    crate::font_count()
+}
+
+#[cfg(feature = "epub")]
+#[wasm_bindgen]
 pub fn eb_font_desc(id: u32) -> String {
     crate::font_desc(id)
 }

@@ -1,12 +1,15 @@
-import init, { eb_open, eb_font, eb_font_desc, eb_layout } from "./pkg/ebook_web.js";
+import init, { eb_open, eb_font, eb_font_count, eb_font_desc, eb_font_reset, eb_layout } from "./pkg/ebook_web.js";
 import { decodeLayout } from "./decode.js";
 
 const PAGE_W = 720;
 const PAGE_H = 960;
 const MARGIN = 54;
+const MIN_SCALE = 0.55;
 const BOOK_URLS = ["./en.epub", "../fixtures/en.epub", "fixtures/en.epub"];
 const FONT_URLS = ["./test.ttf", "../fixtures/font/test.ttf", "fixtures/font/test.ttf"];
 const FONT_FAMILY = "ebook-demo";
+const FONT_FALLBACK =
+  '"ebook-demo", "Noto Serif CJK SC", "Songti SC", "Source Han Serif SC", "Noto Sans CJK SC", Georgia, serif';
 
 const canvas = document.getElementById("page");
 const ctx = canvas.getContext("2d");
@@ -18,6 +21,9 @@ const labelEl = document.getElementById("page-label");
 const prevEl = document.getElementById("prev");
 const nextEl = document.getElementById("next");
 const fileEl = document.getElementById("file");
+const fontFileEl = document.getElementById("font-file");
+const builtinEl = document.getElementById("builtin-font");
+const fitEl = document.getElementById("fit");
 
 let book = null;
 let layout = null;
@@ -53,7 +59,7 @@ function fontOf(size, id) {
   if (desc.bold) {
     parts.push("bold");
   }
-  parts.push(`${size}px "${FONT_FAMILY}"`);
+  parts.push(`${size}px ${FONT_FALLBACK}`);
   return parts.join(" ");
 }
 
@@ -205,8 +211,11 @@ function render() {
   const h = (info.size.h || PAGE_H) + info.inset.top + info.inset.bottom;
   canvas.width = Math.round(w * dpr);
   canvas.height = Math.round(h * dpr);
-  canvas.style.width = `${w}px`;
-  canvas.style.height = `${h}px`;
+  const scale = fitEl && fitEl.checked ? Math.min(1, (window.innerHeight - 150) / h) : 1;
+  const shown_w = Math.round(w * Math.max(scale, MIN_SCALE));
+  const shown_h = Math.round(h * Math.max(scale, MIN_SCALE));
+  canvas.style.width = `${shown_w}px`;
+  canvas.style.height = `${shown_h}px`;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, w, h);
@@ -309,26 +318,49 @@ async function fetchFirst(urls) {
 }
 
 async function loadFont(bytes) {
-  const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-  const face = new FontFace(FONT_FAMILY, buffer);
-  await face.load();
-  document.fonts.add(face);
-  await document.fonts.ready;
   eb_font(bytes);
+  const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  try {
+    const face = new FontFace(FONT_FAMILY, buffer);
+    await face.load();
+    document.fonts.add(face);
+    await document.fonts.ready;
+  } catch (error) {
+    setStatus("font loaded for layout only");
+  }
+  fontDescs.clear();
+}
+
+async function relayout() {
+  if (!book) {
+    return;
+  }
+  busy = true;
+  try {
+    layoutChapter(chapter, page);
+  } catch (error) {
+    setStatus(String(error.message || error));
+  } finally {
+    busy = false;
+  }
 }
 
 async function boot() {
   busy = true;
-  setStatus("loading wasm");
-  await init();
-  setStatus("loading font");
-  const fontBytes = await fetchFirst(FONT_URLS);
-  await loadFont(fontBytes);
-  setStatus("loading book");
-  const bookBytes = await fetchFirst(BOOK_URLS);
-  openBook(bookBytes);
-  setStatus("ready");
-  busy = false;
+  try {
+    setStatus("loading wasm");
+    await init();
+    setStatus("loading book");
+    try {
+      const bookBytes = await fetchFirst(BOOK_URLS);
+      openBook(bookBytes);
+      setStatus("ready");
+    } catch (error) {
+      setStatus("pick an epub file to start");
+    }
+  } finally {
+    busy = false;
+  }
 }
 
 prevEl.addEventListener("click", prevPage);
@@ -336,20 +368,92 @@ nextEl.addEventListener("click", nextPage);
 chapterEl.addEventListener("change", () => {
   layoutChapter(Number(chapterEl.value), 0);
 });
-fileEl.addEventListener("change", async () => {
-  const file = fileEl.files && fileEl.files[0];
-  if (!file) {
-    return;
-  }
+async function loadBookFile(file) {
   busy = true;
-  setStatus("opening file");
+  setStatus(`opening ${file.name}`);
   try {
     openBook(new Uint8Array(await file.arrayBuffer()));
-    setStatus("ready");
+    setStatus(`${book.spine.length} chapters`);
   } catch (error) {
     setStatus(String(error.message || error));
   } finally {
     busy = false;
+  }
+}
+
+fileEl.addEventListener("change", () => {
+  const file = fileEl.files && fileEl.files[0];
+  if (file) {
+    loadBookFile(file);
+  }
+});
+
+fontFileEl.addEventListener("change", async () => {
+  const file = fontFileEl.files && fontFileEl.files[0];
+  if (!file) {
+    return;
+  }
+  busy = true;
+  setStatus(`loading ${file.name}`);
+  try {
+    await loadFont(new Uint8Array(await file.arrayBuffer()));
+    setStatus(`fonts: ${eb_font_count()}`);
+    await relayout();
+  } catch (error) {
+    setStatus(String(error.message || error));
+  } finally {
+    busy = false;
+  }
+});
+
+builtinEl.addEventListener("change", async () => {
+  busy = true;
+  try {
+    if (builtinEl.checked) {
+      setStatus("loading builtin font");
+      await loadFont(await fetchFirst(FONT_URLS));
+      setStatus(`fonts: ${eb_font_count()}`);
+    } else {
+      eb_font_reset();
+      fontDescs.clear();
+      setStatus("browser fonts");
+    }
+    await relayout();
+  } catch (error) {
+    builtinEl.checked = false;
+    setStatus(String(error.message || error));
+  } finally {
+    busy = false;
+  }
+});
+
+fitEl.addEventListener("change", () => {
+  if (layout) {
+    render();
+  }
+});
+
+document.addEventListener("dragover", (event) => {
+  event.preventDefault();
+});
+
+document.addEventListener("drop", (event) => {
+  event.preventDefault();
+  const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+  if (!file) {
+    return;
+  }
+  if (/\.(ttf|otf)$/i.test(file.name)) {
+    fontFileEl.files = event.dataTransfer.files;
+    fontFileEl.dispatchEvent(new Event("change"));
+  } else {
+    loadBookFile(file);
+  }
+});
+
+window.addEventListener("resize", () => {
+  if (layout) {
+    render();
   }
 });
 window.addEventListener("keydown", (event) => {

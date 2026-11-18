@@ -18,6 +18,7 @@ main { display: flex; justify-content: center; padding: 24px 12px 40px; }
 canvas { max-width: 100%; height: auto; background: #ffffff; box-shadow: 0 8px 30px rgba(20,30,45,0.16); }
 footer { text-align: center; color: #5e6b78; font-size: 14px; padding-bottom: 28px; }
 #status { color: #65717f; font-size: 13px; }
+header .opt { display: inline-flex; gap: 4px; align-items: center; font-size: 13px; color: #4b5866; }
 </style>
 </head>
 <body>
@@ -29,6 +30,9 @@ footer { text-align: center; color: #5e6b78; font-size: 14px; padding-bottom: 28
   <button id="prev">Prev</button>
   <button id="next">Next</button>
   <input id="file" type="file" accept=".epub,application/epub+zip">
+  <label class="opt"><input id="builtin-font" type="checkbox"> builtin font</label>
+  <label class="opt"><input id="font-file" type="file" accept=".ttf,.otf"> load font</label>
+  <label class="opt"><input id="fit" type="checkbox" checked> fit</label>
   <span id="status"></span>
 </header>
 <main><canvas id="page"></canvas></main>

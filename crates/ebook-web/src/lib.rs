@@ -33,14 +33,24 @@ pub fn open_book(bytes: &[u8]) -> String {
 }
 
 pub fn register_font(bytes: &[u8]) -> u32 {
-    let mut font = FontBook::new();
+    let mut slot = FONT.lock().unwrap();
+    let font = slot.get_or_insert_with(FontBook::new);
     match font.add(bytes.to_vec()) {
-        Some(id) => {
-            *FONT.lock().unwrap() = Some(font);
-            id.0 as u32
-        }
+        Some(id) => id.0 as u32,
         None => u32::MAX,
     }
+}
+
+pub fn reset_fonts() {
+    *FONT.lock().unwrap() = None;
+}
+
+pub fn font_count() -> u32 {
+    FONT.lock()
+        .unwrap()
+        .as_ref()
+        .map(|font| font.len() as u32)
+        .unwrap_or(0)
 }
 
 pub fn font_desc(id: u32) -> String {
