@@ -11,10 +11,11 @@ pub mod render;
 pub use codec::{decode, encode, hash_of, read_header, to_bytes, CodecError, MAGIC};
 pub use doc::{
     Anchor, Break, BreakPolicy, Border, ComputedStyle, Dir, Display, DocMeta, ImageId, ImageMeta,
-    Len, LineHeight, ListStyle, Node, NodeId, NodeKind, Span, StyledDoc, Tag, TextAlign, TextStyle,
-    TextTransform, VerticalAlign, WhiteSpace, WordBreak, WritingMode,
+    FontSpec, Len, LineHeight, ListStyle, Node, NodeId, NodeKind, Span, StyledDoc, Tag, TextAlign,
+    TextStyle, TextTransform, VerticalAlign, WhiteSpace, WordBreak, WritingMode,
 };
-pub use font::{FontData, FontDesc, FontId, FontSet, FontStyle};
+pub use font::{FontData, FontDesc, FontFamilies, FontFamily, FontId, FontSet, FontStyle,
+};
 pub use geom::{EdgesF, PointF, RectF, Rgba8, Sided, Sides, SidesF, SizeF};
 pub use layout::{
     BorderBox, DirtyBlock, DisplayList, Fit, Glyph, GlyphRun, IrVersion, LayoutResult, LineBox, LinkTarget,

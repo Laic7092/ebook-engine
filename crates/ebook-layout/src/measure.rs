@@ -1,4 +1,4 @@
-use ebook_ir::FontId;
+use ebook_ir::{FontId, FontSpec};
 
 pub trait TextMeasurer {
     fn advance(&self, ch: char, font: FontId, size: f32) -> f32;
@@ -20,6 +20,14 @@ pub trait TextMeasurer {
         } else {
             0xFFFD
         }
+    }
+
+    fn select(&self, spec: &FontSpec) -> FontId {
+        spec.font
+    }
+
+    fn select_char(&self, spec: &FontSpec, _ch: char) -> FontId {
+        self.select(spec)
     }
 }
 
