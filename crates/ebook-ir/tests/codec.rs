@@ -67,6 +67,7 @@ fn ir() -> ebook_ir::LayoutResult {
             code: IssueCode::MissingImage,
             detail: Some(String::from("image pending")),
         }],
+        truncated: false,
     }
 }
 

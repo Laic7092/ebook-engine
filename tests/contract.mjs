@@ -69,6 +69,10 @@ function checkFields(name, layout) {
       throw new Error(`${name}: issue detail is not a string`);
     }
   }
+
+  if (typeof layout.truncated !== "boolean") {
+    throw new Error(`${name}: truncated flag is not a boolean`);
+  }
 }
 
 function checkSpans(name, layout) {
@@ -150,6 +154,7 @@ function selfCheck() {
     },
     dirty: [],
     issues: [{ node: 4, code: 3, detail: "image pending" }],
+    truncated: true,
   };
   const bytes = encodeLayout(layout);
   const again = decodeLayout(bytes);
@@ -164,6 +169,7 @@ function selfCheck() {
   diff(layout.display.glyphs, again.display.glyphs, "glyphs");
   diff(layout.runs.lines, again.runs.lines, "lines");
   diff(layout.issues, again.issues, "issues");
+  diff(layout.truncated, again.truncated, "truncated");
   const reencoded = encodeLayout(again);
   if (reencoded.length !== bytes.length) {
     throw new Error(`synthetic: re-encode length ${reencoded.length} != ${bytes.length}`);

@@ -198,6 +198,7 @@ function readLayout(r) {
     },
     dirty: readVec(r, readDirty),
     issues: readVec(r, readIssue),
+    truncated: r.u8() !== 0,
   };
 }
 

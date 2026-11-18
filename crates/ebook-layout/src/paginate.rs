@@ -22,14 +22,40 @@ pub(crate) struct PageStart {
     pub(crate) y: f32,
 }
 
-pub(crate) fn plan(units: &[Unit], page_h: f32) -> Vec<PageStart> {
-    let mut starts = Vec::new();
+/// 分页计划：页起点 + 是否因 `max_pages` 截断。
+///
+/// `cut` 是第一个“本来会开新页”的 unit 下标：`0..cut` 的内容已经被 `starts`
+/// 覆盖，`cut..` 的内容应当整体丢弃，才能保证每一行都落在自己的页高内。
+pub(crate) struct Plan {
+    pub(crate) starts: Vec<PageStart>,
+    pub(crate) truncated: bool,
+    pub(crate) cut: Option<usize>,
+}
+
+pub(crate) fn plan(units: &[Unit], page_h: f32, max_pages: usize) -> Plan {
+    let cap = max_pages.max(1);
+    let h = page_h.max(1.0);
+
+    // 分页前先用内容高度估页数上界，只用来给 `starts` 定容量：
+    // 真正的截断发生在下面“需要开新页但已经到 max_pages”时。
+    let total_h = units.last().map(|unit| unit.y + unit.h).unwrap_or(0.0);
+    // no_std 下没有 f32::ceil：正数截断取整再 +2 就是保守上界。
+    let estimate = if total_h <= 0.0 {
+        1
+    } else {
+        (total_h / h) as usize + 2
+    };
+
+    let mut starts = Vec::with_capacity(estimate.min(cap));
     starts.push(PageStart { unit: 0, y: 0.0 });
     let n = units.len();
     if n == 0 {
-        return starts;
+        return Plan {
+            starts,
+            truncated: false,
+            cut: None,
+        };
     }
-    let h = page_h.max(1.0);
     let mut s = 0usize;
     let mut top = 0.0f32;
 
@@ -56,6 +82,14 @@ pub(crate) fn plan(units: &[Unit], page_h: f32) -> Vec<PageStart> {
         if cut >= n {
             break;
         }
+        // 当前页已经是第 max_pages 页，再往下就要越预算：整体丢弃 cut..。
+        if starts.len() >= cap {
+            return Plan {
+                starts,
+                truncated: true,
+                cut: Some(cut),
+            };
+        }
         top = units[cut].y.max(top + 1.0);
         starts.push(PageStart {
             unit: cut as u32,
@@ -64,7 +98,11 @@ pub(crate) fn plan(units: &[Unit], page_h: f32) -> Vec<PageStart> {
         s = cut;
     }
 
-    starts
+    Plan {
+        starts,
+        truncated: false,
+        cut: None,
+    }
 }
 
 fn resolve(units: &[Unit], s: usize, greedy: usize) -> usize {
