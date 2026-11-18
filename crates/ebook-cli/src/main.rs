@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use ebook_format::{open, MemorySource};
 use ebook_ir::{codec, EdgesF, NoResources, Renderer, SizeF};
 use ebook_layout::{Layout, LayoutEnv, NoImageSizes, PageConstraint, StubMeasurer};
-use ebook_render::{stats, SvgRenderer, SvgSurface};
+use ebook_render::{SvgRenderer, SvgSurface};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -125,10 +125,19 @@ fn run(args: &[String]) -> Result<(), String> {
     }
 
     if want_stats || !wrote_ir {
-        let s = stats(&ir, bytes.len());
+        let s = ir.stats_with_doc(&doc);
         println!(
-            "pages={} lines={} glyphs={} ops={} dirty={} ir={} bytes",
-            s.pages, s.lines, s.glyphs, s.ops, s.dirty, s.bytes
+            "pages={} lines={} glyphs={} ops={} dirty={} ir={} bytes nodes={} text_bytes={} layout_bytes={} truncated={}",
+            s.pages,
+            s.lines,
+            s.glyphs,
+            s.ops,
+            ir.dirty.len(),
+            bytes.len(),
+            s.nodes,
+            s.text_bytes,
+            s.layout_bytes,
+            ir.truncated
         );
     }
 
