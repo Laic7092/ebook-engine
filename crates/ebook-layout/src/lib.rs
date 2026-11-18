@@ -2,11 +2,13 @@
 extern crate alloc;
 
 mod flow;
+pub mod hit;
 mod linebreak;
 mod linebreak_table;
 mod measure;
 mod paginate;
 mod resolve;
+pub mod select;
 
 use alloc::vec::Vec;
 
@@ -15,7 +17,9 @@ use ebook_ir::{
     LineBox, Op, RectF, RunMap, SizeF, StyledDoc, UnresolvedReason, WritingMode, IR_VERSION,
 };
 
+pub use hit::Reader;
 pub use measure::{StubMeasurer, TextMeasurer};
+pub use select::{Selection, SelectionRect};
 
 pub trait ResourceView {
     fn image_size(&self, id: ImageId) -> Option<SizeF>;

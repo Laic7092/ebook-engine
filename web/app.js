@@ -1,5 +1,23 @@
-import init, { eb_open, eb_font, eb_font_count, eb_font_desc, eb_font_reset, eb_layout } from "./pkg/ebook_web.js";
-import { decodeLayout } from "./decode.js";
+import init, {
+  eb_open,
+  eb_font,
+  eb_font_count,
+  eb_font_desc,
+  eb_font_reset,
+  eb_hit,
+  eb_layout,
+  eb_link_at,
+  eb_progress,
+  eb_selection,
+} from "./pkg/ebook_web.js";
+import {
+  decodeHit,
+  decodeLayout,
+  decodeLink,
+  decodeProgress,
+  decodeSelection,
+} from "./decode.js";
+import { createSelection } from "./selection.js";
 
 const PAGE_W = 720;
 const PAGE_H = 960;
@@ -18,6 +36,7 @@ const metaEl = document.getElementById("book-meta");
 const chapterEl = document.getElementById("chapter");
 const statusEl = document.getElementById("status");
 const labelEl = document.getElementById("page-label");
+const progressEl = document.getElementById("progress");
 const prevEl = document.getElementById("prev");
 const nextEl = document.getElementById("next");
 const fileEl = document.getElementById("file");
@@ -31,6 +50,36 @@ let layout = null;
 let chapter = 0;
 let page = 0;
 let busy = false;
+
+// 交互查询只对最近一次排版的章节有效；回调里再取 layout/page，避免闭包过期。
+const selection = createSelection({
+  canvas,
+  page: () => (layout ? { index: page, info: layout.pages[page], layout } : null),
+  hit: (index, x, y) => {
+    try {
+      return decodeHit(eb_hit(index, x, y));
+    } catch (error) {
+      return null;
+    }
+  },
+  select: (a, b) => decodeSelection(eb_selection(a.page, a.line, a.byte, b.page, b.line, b.byte)),
+  linkAt: (index, x, y) => {
+    try {
+      return decodeLink(eb_link_at(index, x, y));
+    } catch (error) {
+      return null;
+    }
+  },
+  onLink: (href) => {
+    followLink(href);
+  },
+  setStatus,
+  onChange: () => {
+    if (layout) {
+      render();
+    }
+  },
+});
 
 function colorOf(color) {
   return `rgba(${color.r},${color.g},${color.b},${color.a / 255})`;
@@ -229,9 +278,146 @@ function render() {
   for (let i = start; i < end; i += 1) {
     drawOp(layout.display.ops[i], ox, oy);
   }
+  selection.draw(ctx, shown);
   labelEl.textContent = `chapter ${chapter + 1} / ${book.spine.length} · page ${shown + 1} / ${layout.pages.length}`;
+  if (progressEl) {
+    progressEl.textContent = `全书 ${(bookProgress(shown) * 100).toFixed(1)}%`;
+  }
   prevEl.disabled = shown === 0 && chapter === 0;
   nextEl.disabled = shown === layout.pages.length - 1 && chapter === book.spine.length - 1;
+}
+
+// 全书进度 = (已完成章节 + 本章进度) / 章节数。本章进度来自 IR 的行号，
+// 不是像素，所以换页面尺寸也稳定。
+function bookProgress(shown) {
+  const info = layout.pages[shown];
+  const inChapter = decodeProgress(eb_progress(shown, info.lines.start, 0));
+  const total = book && book.spine.length ? book.spine.length : 1;
+  return Math.min(1, Math.max(0, (chapter + inChapter) / total));
+}
+
+// 链接跳转：宿主可以通过 window.ebookResolveLink(href) 接管解析，
+// 返回 { spine, page } 或 { spine, path, offset }（Anchor 形状）；否则退化：
+// 跨文件的按 spine href 找到目标章节并从页首开始，同章锚点暂不支持（格式层还没
+// 把 id → Anchor 的映射带进来）。
+function followLink(href) {
+  if (!href || !book) {
+    return;
+  }
+  const host = typeof window !== "undefined" ? window.ebookResolveLink : null;
+  if (typeof host === "function") {
+    let target = null;
+    try {
+      target = host(href);
+    } catch (error) {
+      target = null;
+    }
+    if (target && typeof target === "object") {
+      if (Number.isInteger(target.page)) {
+        layoutChapter(Number(target.spine || 0), target.page);
+        return;
+      }
+      if (Array.isArray(target.path)) {
+        jumpToAnchor(target);
+        return;
+      }
+    }
+    setStatus(`链接未解析：${href}`);
+    return;
+  }
+  const [rawPath, fragment] = splitHref(href);
+  if (!rawPath) {
+    // 同章锚点：#fragment 需要宿主把 fragment 解析成 Anchor 才能 locate。
+    setStatus(`章节内锚点需要宿主 resolveLink：${href}`);
+    return;
+  }
+  const index = spineIndexOfPath(rawPath);
+  if (index === null) {
+    setStatus(`外链或未知目标：${href}`);
+    return;
+  }
+  if (index === chapter) {
+    setStatus(fragment ? `章节内锚点需要宿主 resolveLink：${href}` : href);
+    return;
+  }
+  layoutChapter(index, 0);
+  if (fragment) {
+    setStatus(`已切到第 ${index + 1} 章；锚点 ${fragment} 需要宿主 resolveLink`);
+  }
+}
+
+function jumpToAnchor(anchor) {
+  const index = Number(anchor.spine || 0);
+  if (index !== chapter) {
+    layoutChapter(index, 0);
+  }
+  const line = locateAnchor(anchor);
+  if (line === null) {
+    setStatus("锚点不在本章");
+    return;
+  }
+  const target = layout.pages.findIndex(
+    (info) => line >= info.lines.start && line < info.lines.start + info.lines.len,
+  );
+  if (target >= 0) {
+    page = target;
+    selection.clear();
+    render();
+  }
+}
+
+// 与 IR 的 `LayoutResult::location_of` 同一套语义：同 spine + path，offset 落在
+// 哪一行 `anchor.offset .. anchor.offset + src.len` 里就是哪一行，超出夹到末尾。
+function locateAnchor(anchor) {
+  if (!layout) {
+    return null;
+  }
+  let last = null;
+  for (let index = 0; index < layout.runs.lines.length; index += 1) {
+    const line = layout.runs.lines[index];
+    const start = line.anchor;
+    if (!start || start.spine !== anchor.spine) {
+      continue;
+    }
+    if (!samePath(start.path, anchor.path)) {
+      continue;
+    }
+    const byte = anchor.offset - start.offset;
+    if (byte >= 0 && byte <= line.src.len) {
+      return index;
+    }
+    last = index;
+  }
+  return last;
+}
+
+function samePath(a, b) {
+  return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => v === b[i]);
+}
+
+function splitHref(href) {
+  const hash = href.indexOf("#");
+  if (hash < 0) {
+    return [href, ""];
+  }
+  return [href.slice(0, hash), href.slice(hash + 1)];
+}
+
+function spineIndexOfPath(path) {
+  const clean = (value) => value.replace(/^\.\//, "").toLowerCase();
+  const want = clean(path);
+  if (!want) {
+    return null;
+  }
+  const current = book.spine[chapter];
+  const dir = current ? current.href.replace(/[^\/]*$/, "") : "";
+  for (let index = 0; index < book.spine.length; index += 1) {
+    const href = clean(book.spine[index].href);
+    if (href === want || href === clean(dir + want) || href.endsWith(`/${want}`)) {
+      return index;
+    }
+  }
+  return null;
 }
 
 function setStatus(text) {
@@ -272,6 +458,7 @@ function updateBook() {
 }
 
 function layoutChapter(index, targetPage) {
+  selection.clear();
   chapter = Math.max(0, Math.min(index, book.spine.length - 1));
   const bytes = eb_layout(chapter, PAGE_W, PAGE_H, MARGIN);
   if (!bytes.length) {
@@ -300,6 +487,7 @@ function nextPage() {
     return;
   }
   if (page + 1 < layout.pages.length) {
+    selection.clear();
     page += 1;
     render();
   } else if (chapter + 1 < book.spine.length) {
@@ -312,6 +500,7 @@ function prevPage() {
     return;
   }
   if (page > 0) {
+    selection.clear();
     page -= 1;
     render();
   } else if (chapter > 0) {
@@ -467,6 +656,7 @@ builtinEl.addEventListener("change", async () => {
 });
 
 fitEl.addEventListener("change", () => {
+  selection.clear();
   if (layout) {
     render();
   }
@@ -491,6 +681,8 @@ document.addEventListener("drop", (event) => {
 });
 
 window.addEventListener("resize", () => {
+  // 缩放会改变画布 CSS 尺寸，旧选区的页内坐标换算前提变了，直接清掉。
+  selection.clear();
   if (layout) {
     render();
   }

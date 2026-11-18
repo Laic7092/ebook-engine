@@ -70,3 +70,32 @@ pub fn eb_layout_chapter(
 pub fn eb_version() -> u32 {
     (ebook_ir::IR_VERSION.major as u32) << 16 | ebook_ir::IR_VERSION.minor as u32
 }
+
+// 交互查询：都作用在最近一次 `eb_layout*` 的 IR 上，返回 JSON（与 `protocol.rs`
+// 同一套"明确字段"约定），JS 侧由 `decode.js` 解析。
+#[wasm_bindgen]
+pub fn eb_hit(page: u32, x: f32, y: f32) -> String {
+    crate::hit_json(page, x, y)
+}
+
+#[wasm_bindgen]
+pub fn eb_link_at(page: u32, x: f32, y: f32) -> String {
+    crate::link_at_json(page, x, y)
+}
+
+#[wasm_bindgen]
+pub fn eb_selection(
+    a_page: u32,
+    a_line: u32,
+    a_byte: u32,
+    b_page: u32,
+    b_line: u32,
+    b_byte: u32,
+) -> String {
+    crate::selection_json(a_page, a_line, a_byte, b_page, b_line, b_byte)
+}
+
+#[wasm_bindgen]
+pub fn eb_progress(page: u32, line: u32, byte: u32) -> String {
+    crate::progress_json(page, line, byte)
+}

@@ -15,7 +15,8 @@ header .meta { color: #65717f; font-size: 13px; }
 header button, header select { font: inherit; padding: 6px 10px; border: 1px solid #aab6c2; background: #f7f9fb; border-radius: 6px; cursor: pointer; }
 header button:hover { background: #eef3f7; }
 main { display: flex; justify-content: center; padding: 24px 12px 40px; }
-canvas { max-width: 100%; height: auto; background: #ffffff; box-shadow: 0 8px 30px rgba(20,30,45,0.16); }
+canvas { max-width: 100%; height: auto; background: #ffffff; box-shadow: 0 8px 30px rgba(20,30,45,0.16); touch-action: none; }
+#progress { margin-left: 12px; color: #3f4c5a; font-variant-numeric: tabular-nums; }
 footer { text-align: center; color: #5e6b78; font-size: 14px; padding-bottom: 28px; }
 #status { color: #65717f; font-size: 13px; }
 header .opt { display: inline-flex; gap: 4px; align-items: center; font-size: 13px; color: #4b5866; }
@@ -38,7 +39,7 @@ header .opt { display: inline-flex; gap: 4px; align-items: center; font-size: 13
 </header>
 <div id="banner" hidden></div>
 <main><canvas id="page"></canvas></main>
-<footer id="page-label"></footer>
+<footer><span id="page-label"></span><span id="progress"></span></footer>
 <script type="module" src="./app.js"></script>
 </body>
 </html>
