@@ -308,6 +308,7 @@ fn clip_cuts_a_glyph_in_half() {
         gid: 1,
         dx: 0.0,
         dy: 0.0,
+        ch: 0,
     });
     let run = GlyphRun {
         font: FontId(0),
