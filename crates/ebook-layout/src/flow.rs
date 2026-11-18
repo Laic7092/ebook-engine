@@ -61,10 +61,19 @@ pub(crate) struct Flow {
     pub(crate) dirty: Vec<DirtyBlock>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq)]
 enum PieceKind {
     Text,
     Break,
+    /// 行内图片：宽度/高度已知时按资源尺寸，未知时留 1em × 1.5em 的占位。
+    Image {
+        id: ImageId,
+        size: Option<ebook_ir::SizeF>,
+    },
+    /// 注音：`span` 是基文，`rt` 是注音文本；rt 不参与断行宽度。
+    Ruby {
+        rt: Span,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -86,6 +95,8 @@ struct Ch {
     head: bool,
     /// UAX #9 的嵌入级：偶数 LTR、奇数 RTL。
     level: u8,
+    /// 行内图片：这个"字符"实际是一个替换元素。
+    image: Option<ImageId>,
 }
 
 const NO_CLUSTER: u32 = u32::MAX;
@@ -270,13 +281,13 @@ impl<'a> FlowCtx<'a> {
                 self.image(id, img, style, inner_x, &mut cy, inner_w);
                 content_empty = false;
             }
-            NodeKind::Ruby { base, .. } => {
+            NodeKind::Ruby { base, rt } => {
                 let mut pieces = Vec::new();
                 pieces.push(Piece {
                     style,
                     span: base,
                     node: id,
-                    kind: PieceKind::Text,
+                    kind: PieceKind::Ruby { rt },
                 });
                 let before = self.flow.items.len();
                 self.break_lines(&pieces, inner_x, &mut cy, inner_w, style);
@@ -421,6 +432,23 @@ impl<'a> FlowCtx<'a> {
         }
         self.env.resources.image_size(img)
     }
+
+    /// 行内图片尺寸：显式宽高 > 文档里的固有尺寸 > 资源查询，都没有就是未知。
+    fn inline_image_size(&self, img: ImageId, style: &ComputedStyle) -> Option<ebook_ir::SizeF> {
+        let em = style.font.size;
+        let w = style.width.resolve(em, em);
+        let h = style.height.resolve(em, em);
+        if let (Some(w), Some(h)) = (w, h) {
+            if w > 0.0 && h > 0.0 {
+                return Some(ebook_ir::SizeF::new(w, h));
+            }
+        }
+        if let Some(size) = self.doc.images.get(img as usize).and_then(|m| m.size) {
+            return Some(size);
+        }
+        self.env.resources.image_size(img)
+    }
+
     fn inline_from(
         &mut self,
         nodes: &[NodeId],
@@ -457,7 +485,21 @@ impl<'a> FlowCtx<'a> {
                 node: id,
                 kind: PieceKind::Break,
             }),
-            NodeKind::Image(_) | NodeKind::Ruby { .. } => {}
+            NodeKind::Image(img) => out.push(Piece {
+                style: node.style,
+                span: Span::EMPTY,
+                node: id,
+                kind: PieceKind::Image {
+                    id: img,
+                    size: self.inline_image_size(img, &node.style),
+                },
+            }),
+            NodeKind::Ruby { base, rt } => out.push(Piece {
+                style: node.style,
+                span: base,
+                node: id,
+                kind: PieceKind::Ruby { rt },
+            }),
             NodeKind::Element(_) => {
                 let child_len = node.child_len;
                 let first_child = node.first_child;
@@ -481,10 +523,23 @@ impl<'a> FlowCtx<'a> {
                         cluster: NO_CLUSTER,
                         head: true,
                         level: 0,
+                        image: None,
                     });
                     prev_space = false;
                 }
-                PieceKind::Text => {
+                PieceKind::Image { id, .. } => {
+                    out.push(Ch {
+                        c: '\u{FFFC}',
+                        off: 0,
+                        piece: pi as u16,
+                        cluster: NO_CLUSTER,
+                        head: true,
+                        level: 0,
+                        image: Some(id),
+                    });
+                    prev_space = false;
+                }
+                PieceKind::Text | PieceKind::Ruby { .. } => {
                     let text = self.doc.text_of(piece.span);
                     let collapse = matches!(
                         piece.style.text.white_space,
@@ -514,6 +569,7 @@ impl<'a> FlowCtx<'a> {
                                 cluster: NO_CLUSTER,
                                 head: true,
                                 level: 0,
+                                image: None,
                             }),
                             TextTransform::Uppercase => {
                                 for t in c.to_uppercase() {
@@ -524,6 +580,7 @@ impl<'a> FlowCtx<'a> {
                                         cluster: NO_CLUSTER,
                                         head: true,
                                         level: 0,
+                                        image: None,
                                     });
                                 }
                             }
@@ -536,6 +593,7 @@ impl<'a> FlowCtx<'a> {
                                         cluster: NO_CLUSTER,
                                         head: true,
                                         level: 0,
+                                        image: None,
                                     });
                                 }
                             }
@@ -560,6 +618,28 @@ impl<'a> FlowCtx<'a> {
         while i < chars.len() {
             if chars[i].c == '\n' {
                 chars[i].cluster = NO_CLUSTER;
+                chars[i].head = true;
+                i += 1;
+                continue;
+            }
+            if chars[i].image.is_some() {
+                // 行内图片是一个原子替换元素：一个簇、没有字形、宽度就是它的宽度。
+                let style = pieces[chars[i].piece as usize].style;
+                let em = style.font.size;
+                let width = match pieces[chars[i].piece as usize].kind {
+                    PieceKind::Image { size, .. } => size.map(|s| s.w).unwrap_or(em),
+                    _ => em,
+                };
+                let advance = width.max(0.0);
+                shaped.clusters.push(Cluster {
+                    glyph_start: shaped.glyphs.len() as u32,
+                    glyph_len: 0,
+                    advance,
+                    ch: 0,
+                    gap: 0.0,
+                });
+                let cluster = (shaped.clusters.len() - 1) as u32;
+                chars[i].cluster = cluster;
                 chars[i].head = true;
                 i += 1;
                 continue;
@@ -1300,6 +1380,79 @@ impl<'a> FlowCtx<'a> {
         out
     }
 
+    /// 注音排版：基文正常排，rt 用 0.5em 画在基线上方。
+    ///
+    /// rt 不参与断行宽度（`line_w` 里只有基文），字形宽度按基文簇宽平均分配，
+    /// 所以注音始终对在基文上方；`Glyph.dy` 是相对基线的 -0.5em。
+    fn ruby_run(
+        &mut self,
+        piece: &Piece,
+        line: &[Ch],
+        shaped: &Shaped,
+        rt: Span,
+        logical: &[usize],
+        src_start: u32,
+        baseline: f32,
+        run_x: f32,
+    ) -> Option<LaidRun> {
+        let rt_text = self.doc.text_of(rt);
+        if rt_text.is_empty() || logical.is_empty() {
+            return None;
+        }
+        let size = piece.style.font.size * 0.5;
+        if !(size > 0.0) {
+            return None;
+        }
+        let rt_chars: Vec<char> = rt_text.chars().collect();
+        let mut heads: Vec<(u32, f32)> = Vec::new();
+        for &at in logical {
+            if !line[at].head {
+                continue;
+            }
+            let cluster = shaped.clusters[line[at].cluster as usize];
+            heads.push((cluster.ch, cluster.advance));
+        }
+        if heads.is_empty() {
+            return None;
+        }
+        let glyph_start = self.flow.glyphs.len() as u32;
+        let mut count = 0u32;
+        for (index, (ch, advance)) in heads.iter().enumerate() {
+            let lo = index * rt_chars.len() / heads.len();
+            let hi = (index + 1) * rt_chars.len() / heads.len();
+            if hi <= lo {
+                continue;
+            }
+            let each = advance / (hi - lo) as f32;
+            for &c in &rt_chars[lo..hi] {
+                let font = self.env.font_for(&piece.style.font, c);
+                if !self.env.measurer.covers(c, font) {
+                    continue;
+                }
+                self.flow.glyphs.push(Glyph {
+                    gid: self.env.measurer.glyph_id(c, font),
+                    dx: each,
+                    dy: -size,
+                    ch: ch.saturating_sub(src_start),
+                });
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return None;
+        }
+        Some(LaidRun {
+            font: self.env.measurer.select(&piece.style.font),
+            size,
+            color: piece.style.color,
+            dir: Dir::Ltr,
+            rotate: Rotate::None,
+            origin: PointF::new(run_x, baseline),
+            glyphs: Span::new(glyph_start, count),
+            text: rt_text.into(),
+        })
+    }
+
     fn emit_line(
         &mut self,
         pieces: &[Piece],
@@ -1360,6 +1513,17 @@ impl<'a> FlowCtx<'a> {
                 base_bottom = base_bottom.max(entry.shift + entry.bottom_dist);
             }
         }
+        // 行内图片按基线摆放：底边贴基线，太高的会把行盒往上顶。
+        let mut image_top = 0.0f32;
+        for ch in line {
+            if ch.image.is_some() {
+                if let PieceKind::Image { size, .. } = pieces[ch.piece as usize].kind {
+                    let height = size.map(|s| s.h).unwrap_or(base_style.font.size * 1.5);
+                    image_top = image_top.min(-height);
+                }
+            }
+        }
+        base_top = base_top.min(image_top);
         let line_h = (base_bottom - base_top).max(tallest).max(1.0);
         let line_top = base_top;
         let line_bottom = line_top + line_h;
@@ -1383,6 +1547,7 @@ impl<'a> FlowCtx<'a> {
         let baseline = top - line_top;
         let mut cx = start_x;
         let mut runs: Vec<LaidRun> = Vec::new();
+        let mut inline_ops: Vec<Op> = Vec::new();
         let mut missing: Vec<(NodeId, RectF)> = Vec::new();
         // 每个簇的末字形下标 + 是否空格簇，两端对齐按它在字形之间分余量。
         let mut ends: Vec<(u32, bool)> = Vec::new();
@@ -1412,6 +1577,39 @@ impl<'a> FlowCtx<'a> {
                 })
                 .unwrap_or(0.0);
             let run_baseline = baseline + shift;
+            if let Some(id) = line[at].image {
+                // 行内图片：底边贴基线，宽度就是断行时算进去的那个宽度。
+                let cluster = shaped.clusters[line[at].cluster as usize];
+                let size = match piece.kind {
+                    PieceKind::Image { size, .. } => size,
+                    _ => None,
+                };
+                let height = size.map(|s| s.h).unwrap_or(base_style.font.size * 1.5);
+                let rect = RectF::new(cx, run_baseline - height, cluster.advance, height);
+                match size {
+                    Some(_) => inline_ops.push(Op::Image {
+                        id,
+                        rect,
+                        fit: Fit::Contain,
+                    }),
+                    None => {
+                        // 尺寸依赖内容：发占位并记诊断，行高保持可预测。
+                        inline_ops.push(Op::Unresolved(Unresolved {
+                            node: piece.node,
+                            rect,
+                            reason: UnresolvedReason::SizeFromContent,
+                        }));
+                        self.flow.dirty.push(DirtyBlock {
+                            node: piece.node,
+                            rect,
+                            reason: UnresolvedReason::SizeFromContent,
+                        });
+                    }
+                }
+                cx += cluster.advance;
+                k += 1;
+                continue;
+            }
             let font = self.font_for(&line[at], pieces);
             let covered = self.env.measurer.covers(line[at].c, font);
             let rtl = line[at].level % 2 == 1;
@@ -1479,6 +1677,20 @@ impl<'a> FlowCtx<'a> {
                     glyphs: Span::new(glyph_start, self.flow.glyphs.len() as u32 - glyph_start),
                     text,
                 });
+                if let PieceKind::Ruby { rt } = piece.kind {
+                    if let Some(run) = self.ruby_run(
+                        piece,
+                        line,
+                        shaped,
+                        rt,
+                        &logical,
+                        src_start,
+                        run_baseline,
+                        run_x,
+                    ) {
+                        runs.push(run);
+                    }
+                }
             } else {
                 missing.push((
                     piece.node,
@@ -1538,7 +1750,7 @@ impl<'a> FlowCtx<'a> {
         );
         let link = self.line_link(pieces, line);
 
-        let mut unresolved = Vec::new();
+        let mut unresolved: Vec<Op> = inline_ops;
         for (node, rect) in missing {
             unresolved.push(Op::Unresolved(Unresolved {
                 node,
