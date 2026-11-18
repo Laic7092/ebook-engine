@@ -118,15 +118,15 @@ impl RgbaSurface {
         );
     }
 
-    fn draw_glyph(&mut self, color: Rgba8, bitmap: &GlyphBitmap, pen_x: f32, baseline: f32) {
+    fn draw_glyph(&mut self, color: Rgba8, bitmap: &GlyphBitmap, x0: i64, y0: i64) {
         let w = bitmap.w as usize;
         let h = bitmap.h as usize;
         let len = w.saturating_mul(h);
         if w == 0 || h == 0 || bitmap.alpha.len() < len {
             return;
         }
-        let x0 = floor_i(pen_x + bitmap.left as f32);
-        let y0 = floor_i(baseline + bitmap.top as f32);
+        let x0 = x0 + bitmap.left as i64;
+        let y0 = y0 + bitmap.top as i64;
         for by in 0..h {
             for bx in 0..w {
                 let coverage = bitmap.alpha[by * w + bx];
@@ -262,8 +262,13 @@ impl Surface for RgbaSurface {
         let baseline = run.origin.y;
         for glyph in glyphs {
             let advance = glyph.dx;
-            if let Some(bitmap) = res.glyph_alpha(run.font, glyph.gid, run.size) {
-                self.draw_glyph(run.color, &bitmap, pen_x, baseline + glyph.dy);
+            let pen_y = baseline + glyph.dy;
+            let origin_x = floor_i(pen_x);
+            let origin_y = floor_i(pen_y);
+            let dx = pen_x - origin_x as f32;
+            let dy = pen_y - origin_y as f32;
+            if let Some(bitmap) = res.glyph_alpha_at(run.font, glyph.gid, run.size, dx, dy) {
+                self.draw_glyph(run.color, &bitmap, origin_x, origin_y);
             }
             pen_x += advance;
         }

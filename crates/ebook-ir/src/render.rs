@@ -23,6 +23,18 @@ pub struct ImageData {
 
 pub trait Resources {
     fn glyph_alpha(&mut self, font: FontId, gid: u16, px: f32) -> Option<GlyphBitmap>;
+    fn glyph_alpha_at(
+        &mut self,
+        font: FontId,
+        gid: u16,
+        px: f32,
+        dx: f32,
+        dy: f32,
+    ) -> Option<GlyphBitmap> {
+        let _ = (dx, dy);
+        self.glyph_alpha(font, gid, px)
+    }
+
     fn image(&mut self, id: ImageId) -> Option<ImageData>;
 }
 

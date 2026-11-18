@@ -1,7 +1,7 @@
 use alloc::{string::String, vec::Vec};
 use serde::{Deserialize, Serialize};
 
-use crate::font::FontId;
+use crate::font::{FontFamilies, FontId, FontStyle};
 use crate::geom::{Rgba8, SizeF, Sides};
 
 pub type NodeId = u32;
@@ -255,11 +255,35 @@ pub struct FontSpec {
     pub font: FontId,
     pub size: f32,
     pub weight: u16,
+    pub style: FontStyle,
+    pub families: FontFamilies,
 }
 
 impl Default for FontSpec {
     fn default() -> Self {
-        Self { font: FontId(0), size: 16.0, weight: 400 }
+        Self {
+            font: FontId(0),
+            size: 16.0,
+            weight: 400,
+            style: FontStyle::Normal,
+            families: FontFamilies::new(),
+        }
+    }
+}
+
+impl FontSpec {
+    pub fn new(size: f32, weight: u16, style: FontStyle) -> Self {
+        Self { size, weight, style, ..Self::default() }
+    }
+
+    pub fn with_families(mut self, families: FontFamilies) -> Self {
+        self.families = families;
+        self
+    }
+
+    pub fn with_family(mut self, family: &str) -> Self {
+        self.families.push(family);
+        self
     }
 }
 

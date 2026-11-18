@@ -2,8 +2,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use ebook_ir::{
-    Break, Display, Len, LineHeight, ListStyle, NodeId, Rgba8, StyledDoc, Tag, TextAlign,
-    TextTransform, WhiteSpace, WordBreak, WritingMode,
+    Break, Display, FontFamilies, FontStyle, Len, LineHeight, ListStyle, NodeId, Rgba8, StyledDoc,
+    Tag, TextAlign, TextTransform, WhiteSpace, WordBreak, WritingMode,
 };
 
 type Spec = (u16, u16, u16);
@@ -131,13 +131,14 @@ pub fn cascade(doc: &mut StyledDoc, keys: &[ElemKey], sheet: &StyleSheet) {
         }
         matched.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
         let parent_size = parent_style.font.size;
+        let parent_weight = parent_style.font.weight;
         for (_, i) in matched.iter() {
             for decl in &sheet.rules[*i].decls {
-                apply(&mut style, decl, parent_size);
+                apply(&mut style, decl, parent_size, parent_weight);
             }
         }
         for decl in &keys[id as usize].inline {
-            apply(&mut style, decl, parent_size);
+            apply(&mut style, decl, parent_size, parent_weight);
         }
         doc.node_mut(id).style = style;
     }
@@ -211,7 +212,7 @@ fn heading(style: &mut ebook_ir::ComputedStyle, size: f32, scale: f32, margin: f
     style.margin.bottom = Len::Em(margin * 0.6);
 }
 
-fn apply(style: &mut ebook_ir::ComputedStyle, decl: &Decl, parent_size: f32) {
+fn apply(style: &mut ebook_ir::ComputedStyle, decl: &Decl, parent_size: f32, parent_weight: u16) {
     let value = decl.value.trim();
     let base = style.font.size;
     match decl.name.as_str() {
@@ -236,13 +237,19 @@ fn apply(style: &mut ebook_ir::ComputedStyle, decl: &Decl, parent_size: f32) {
             }
         }
         "font-weight" => {
-            let weight = match value {
-                "bold" | "bolder" => Some(700),
-                "normal" | "lighter" => Some(400),
-                other => other.parse::<u16>().ok(),
-            };
-            if let Some(w) = weight {
-                style.font.weight = w;
+            if let Some(weight) = parse_weight(value, parent_weight) {
+                style.font.weight = weight;
+            }
+        }
+        "font-style" => {
+            if let Some(style_value) = parse_font_style(value) {
+                style.font.style = style_value;
+            }
+        }
+        "font-family" => {
+            let families = parse_font_families(value);
+            if !families.is_empty() {
+                style.font.families = families;
             }
         }
         "line-height" => {
@@ -365,6 +372,59 @@ fn apply(style: &mut ebook_ir::ComputedStyle, decl: &Decl, parent_size: f32) {
         }
         _ => {}
     }
+}
+
+fn parse_font_style(value: &str) -> Option<FontStyle> {
+    let value = value.trim().to_ascii_lowercase();
+    if value == "normal" {
+        Some(FontStyle::Normal)
+    } else if value == "italic" {
+        Some(FontStyle::Italic)
+    } else if value == "oblique" || value.starts_with("oblique ") {
+        Some(FontStyle::Oblique)
+    } else {
+        None
+    }
+}
+
+fn parse_weight(value: &str, current: u16) -> Option<u16> {
+    let value = value.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "normal" => Some(400),
+        "bold" => Some(700),
+        "bolder" => Some(if current < 350 {
+            400
+        } else if current < 550 {
+            700
+        } else if current < 900 {
+            900
+        } else {
+            900
+        }),
+        "lighter" => Some(if current < 550 {
+            100
+        } else if current < 750 {
+            400
+        } else {
+            700
+        }),
+        other => other
+            .parse::<f32>()
+            .ok()
+            .filter(|weight| weight.is_finite())
+            .map(|weight| (weight.clamp(1.0, 1000.0) + 0.5) as u16),
+    }
+}
+
+fn parse_font_families(value: &str) -> FontFamilies {
+    let mut families = FontFamilies::new();
+    for part in value.split(',') {
+        let name = part.trim().trim_matches(|c| c == '\'' || c == '"').trim();
+        if !name.is_empty() {
+            families.push(name);
+        }
+    }
+    families
 }
 
 fn apply_border(style: &mut ebook_ir::ComputedStyle, value: &str) {

@@ -11,8 +11,8 @@ mod resolve;
 use alloc::vec::Vec;
 
 use ebook_ir::{
-    DisplayList, ImageId, LayoutResult, LineBox, Op, RectF, RunMap, SizeF, StyledDoc, GlyphRun,
-    IR_VERSION, EdgesF, WritingMode,
+    DisplayList, EdgesF, FontId, FontSpec, GlyphRun, ImageId, LayoutResult, LineBox, Op, RectF,
+    RunMap, SizeF, StyledDoc, WritingMode, IR_VERSION,
 };
 
 pub use measure::{StubMeasurer, TextMeasurer};
@@ -34,6 +34,16 @@ impl ResourceView for NoImageSizes {
 pub struct LayoutEnv<'a> {
     pub measurer: &'a dyn TextMeasurer,
     pub resources: &'a dyn ResourceView,
+}
+
+impl LayoutEnv<'_> {
+    pub fn select_font(&self, spec: &FontSpec) -> FontId {
+        self.measurer.select(spec)
+    }
+
+    pub fn font_for(&self, spec: &FontSpec, ch: char) -> FontId {
+        self.measurer.select_char(spec, ch)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -73,7 +73,7 @@ impl Builder {
     fn inline(&mut self, parent: u32, size: f32, weight: u16) {
         let span = self.span();
         let style = ComputedStyle::inline(
-            ebook_ir::doc::FontSpec { font: FontId(0), size, weight },
+            ebook_ir::doc::FontSpec { font: FontId(0), size, weight, ..Default::default() },
             Rgba8::BLACK,
             Dir::Ltr,
         );
@@ -94,7 +94,7 @@ impl Builder {
         let size = 10.0 + self.rng.unit() * 12.0;
         let mut style = ComputedStyle::default();
         style.display = Display::Block;
-        style.font = ebook_ir::doc::FontSpec { font: FontId(0), size, weight: 400 };
+        style.font = ebook_ir::doc::FontSpec { font: FontId(0), size, weight: 400, ..Default::default() };
         style.line_height = if self.rng.below(2) == 0 {
             LineHeight::Normal
         } else {

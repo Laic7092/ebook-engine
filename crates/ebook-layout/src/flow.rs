@@ -351,12 +351,15 @@ impl<'a> FlowCtx<'a> {
         }
     }
 
+    fn font_for(&self, ch: &Ch, pieces: &[Piece]) -> FontId {
+        let style = &pieces[ch.piece as usize].style;
+        self.env.font_for(&style.font, ch.c)
+    }
+
     fn advance(&self, ch: &Ch, pieces: &[Piece]) -> f32 {
         let style = &pieces[ch.piece as usize].style;
-        let base = self
-            .env
-            .measurer
-            .advance(ch.c, style.font.font, style.font.size);
+        let font = self.font_for(ch, pieces);
+        let base = self.env.measurer.advance(ch.c, font, style.font.size);
         let spacing = style.text.letter_spacing
             + if ch.c == ' ' {
                 style.text.word_spacing
@@ -596,10 +599,10 @@ impl<'a> FlowCtx<'a> {
         let mut line_w = 0.0f32;
         for ch in line {
             let style = pieces[ch.piece as usize].style;
+            let font = self.font_for(ch, pieces);
             max_size = max_size.max(style.font.size);
-            max_ascent = max_ascent.max(self.env.measurer.ascent(style.font.font, style.font.size));
-            max_descent =
-                max_descent.max(self.env.measurer.descent(style.font.font, style.font.size));
+            max_ascent = max_ascent.max(self.env.measurer.ascent(font, style.font.size));
+            max_descent = max_descent.max(self.env.measurer.descent(font, style.font.size));
             line_w += self.advance(ch, pieces);
         }
 
@@ -625,18 +628,21 @@ impl<'a> FlowCtx<'a> {
             let piece_id = line[k].piece;
             let piece = &pieces[piece_id as usize];
             let style = piece.style;
-            let covered = self.env.measurer.covers(line[k].c, style.font.font);
+            let font = self.font_for(&line[k], pieces);
+            let covered = self.env.measurer.covers(line[k].c, font);
             let glyph_start = self.flow.glyphs.len() as u32;
             let run_x = cx;
             let mut text = String::new();
-            while k < line.len()
-                && line[k].piece == piece_id
-                && self.env.measurer.covers(line[k].c, style.font.font) == covered
-            {
+            while k < line.len() && line[k].piece == piece_id {
+                let next_font = self.font_for(&line[k], pieces);
+                let next_covered = self.env.measurer.covers(line[k].c, next_font);
+                if next_font != font || next_covered != covered {
+                    break;
+                }
                 let adv = self.advance(&line[k], pieces);
                 if covered {
                     self.flow.glyphs.push(Glyph {
-                        gid: self.env.measurer.glyph_id(line[k].c, style.font.font),
+                        gid: self.env.measurer.glyph_id(line[k].c, next_font),
                         dx: adv,
                         dy: 0.0,
                     });
@@ -647,7 +653,7 @@ impl<'a> FlowCtx<'a> {
             }
             if covered {
                 runs.push(LaidRun {
-                    font: style.font.font,
+                    font,
                     size: style.font.size,
                     color: style.color,
                     dir: style.dir,
