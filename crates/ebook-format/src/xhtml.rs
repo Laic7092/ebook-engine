@@ -177,6 +177,8 @@ impl Builder {
         };
 
         // `<a href>` 是排版层发射 `Op::Link` 的唯一来源。空 href 忽略。
+        // 这里保存的是**属性原文**（相对本章的路径 + fragment），不做解析：
+        // 解析需要章节上下文，留给宿主的 `resolve_link_from`。
         let link = if tag == Tag::A {
             xml.attribute("href")
                 .map(str::to_string)

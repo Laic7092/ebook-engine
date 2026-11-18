@@ -1,21 +1,33 @@
 import init, {
-  eb_open,
+  eb_anchor,
+  eb_asset,
+  eb_chapter_images,
   eb_font,
   eb_font_count,
   eb_font_desc,
+  eb_font_face,
+  eb_font_face_bytes,
+  eb_font_face_count,
   eb_font_reset,
   eb_hit,
   eb_layout,
   eb_link_at,
   eb_progress,
+  eb_resolve_link,
+  eb_open,
   eb_selection,
+  eb_toc,
 } from "./pkg/ebook_web.js";
 import {
+  decodeAnchor,
   decodeHit,
+  decodeImages,
   decodeLayout,
   decodeLink,
   decodeProgress,
+  decodeResolvedLink,
   decodeSelection,
+  decodeToc,
 } from "./decode.js";
 import { createSelection } from "./selection.js";
 
@@ -44,12 +56,18 @@ const fontFileEl = document.getElementById("font-file");
 const builtinEl = document.getElementById("builtin-font");
 const fitEl = document.getElementById("fit");
 const bannerEl = document.getElementById("banner");
+const tocEl = document.getElementById("toc");
+const tocToggleEl = document.getElementById("toc-toggle");
 
 let book = null;
 let layout = null;
 let chapter = 0;
 let page = 0;
 let busy = false;
+// 最近一次排版那一章的图片表（{id,href,mime}）与按 href 缓存的 ImageBitmap。
+let chapterImages = [];
+const imageCache = new Map();
+let tocItems = [];
 
 // 交互查询只对最近一次排版的章节有效；回调里再取 layout/page，避免闭包过期。
 const selection = createSelection({
@@ -89,11 +107,11 @@ const fontDescs = new Map();
 
 function fontDesc(id) {
   if (!fontDescs.has(id)) {
-    let parsed = { bold: false, italic: false };
+    let parsed = { bold: false, italic: false, family: null };
     try {
       parsed = JSON.parse(eb_font_desc(id));
     } catch (error) {
-      parsed = { bold: false, italic: false };
+      parsed = { bold: false, italic: false, family: null };
     }
     fontDescs.set(id, parsed);
   }
@@ -101,7 +119,7 @@ function fontDesc(id) {
 }
 
 function fontOf(size, id) {
-  const desc = id === undefined ? { bold: false, italic: false } : fontDesc(id);
+  const desc = id === undefined ? { bold: false, italic: false, family: null } : fontDesc(id);
   const parts = [];
   if (desc.italic) {
     parts.push("italic");
@@ -109,7 +127,9 @@ function fontOf(size, id) {
   if (desc.bold) {
     parts.push("bold");
   }
-  parts.push(`${size}px ${FONT_FALLBACK}`);
+  // 内嵌字体用 `@font-face` 的 family（浏览器侧已注册）；否则用宿主字体栈。
+  const family = desc.family ? `"${desc.family}", ` : "";
+  parts.push(`${size}px ${family}${FONT_FALLBACK}`);
   return parts.join(" ");
 }
 
@@ -158,8 +178,10 @@ function drawUnresolved(item, ox, oy) {
   ctx.restore();
 }
 
-function drawImage(item, ox, oy) {
-  const r = shifted(item.rect, ox, oy);
+// `Fit` 的编码与 IR 一致：0 = Contain、1 = Cover、2 = Fill。
+const FIT_NAMES = ["contain", "cover", "fill"];
+
+function drawImagePlaceholder(r) {
   ctx.save();
   ctx.beginPath();
   ctx.rect(r.x, r.y, r.w, r.h);
@@ -178,6 +200,38 @@ function drawImage(item, ox, oy) {
   ctx.setLineDash([4, 4]);
   ctx.strokeRect(r.x + 0.5, r.y + 0.5, Math.max(0, r.w - 1), Math.max(0, r.h - 1));
   ctx.setLineDash([]);
+  ctx.restore();
+}
+
+// 图片只画 IR 给出的 rect：Fit 是“在 rect 里怎么放”，不是重新排版。
+// 字节来自 `eb_asset`，失败（缺图、解码失败、createImageBitmap 不可用）时
+// 仍然画斜线占位，不白屏。
+function drawImage(item, ox, oy) {
+  const r = shifted(item.rect, ox, oy);
+  if (r.w <= 0 || r.h <= 0) {
+    return;
+  }
+  const entry = chapterImages.find((image) => image.id === item.id);
+  const bitmap = entry && entry.href ? imageCache.get(entry.href) : null;
+  if (!bitmap || !bitmap.width || !bitmap.height) {
+    drawImagePlaceholder(r);
+    return;
+  }
+  const fit = FIT_NAMES[item.fit] || "contain";
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(r.x, r.y, r.w, r.h);
+  ctx.clip();
+  if (fit === "fill") {
+    ctx.drawImage(bitmap, r.x, r.y, r.w, r.h);
+  } else {
+    const scale = fit === "cover"
+      ? Math.max(r.w / bitmap.width, r.h / bitmap.height)
+      : Math.min(r.w / bitmap.width, r.h / bitmap.height);
+    const w = bitmap.width * scale;
+    const h = bitmap.height * scale;
+    ctx.drawImage(bitmap, r.x + (r.w - w) / 2, r.y + (r.h - h) / 2, w, h);
+  }
   ctx.restore();
 }
 
@@ -296,14 +350,55 @@ function bookProgress(shown) {
   return Math.min(1, Math.max(0, (chapter + inChapter) / total));
 }
 
-// 链接跳转：宿主可以通过 window.ebookResolveLink(href) 接管解析，
-// 返回 { spine, page } 或 { spine, path, offset }（Anchor 形状）；否则退化：
-// 跨文件的按 spine href 找到目标章节并从页首开始，同章锚点暂不支持（格式层还没
-// 把 id → Anchor 的映射带进来）。
+// 链接跳转：先用格式层的 `eb_resolve_link`（章节上下文里的 resolve_link_from）
+// 把 href 解析成 {spine,fragment}，再切章 + 用 `eb_anchor` 查 fragment 锚点。
+// 拿不到目标时才退化到宿主钩子 / 按 spine href 匹配。
 function followLink(href) {
   if (!href || !book) {
     return;
   }
+  let target = null;
+  try {
+    target = decodeResolvedLink(eb_resolve_link(href));
+  } catch (error) {
+    target = null;
+  }
+  if (target) {
+    if (target.external) {
+      setStatus(`外链：${href}`);
+      return;
+    }
+    if (target.spine !== chapter) {
+      layoutChapter(target.spine, 0);
+    } else {
+      page = 0;
+      selection.clear();
+      render();
+    }
+    if (target.fragment) {
+      jumpToFragment(target.fragment);
+    }
+    return;
+  }
+  followLinkFallback(href);
+}
+
+function jumpToFragment(fragment) {
+  let anchor = null;
+  try {
+    anchor = decodeAnchor(eb_anchor(fragment));
+  } catch (error) {
+    anchor = null;
+  }
+  if (!anchor) {
+    setStatus(`找不到锚点 #${fragment}`);
+    return;
+  }
+  jumpToAnchor(anchor);
+}
+
+// 宿主接管或按路径匹配。仅在 `eb_resolve_link` 拿不到目标时使用。
+function followLinkFallback(href) {
   const host = typeof window !== "undefined" ? window.ebookResolveLink : null;
   if (typeof host === "function") {
     let target = null;
@@ -327,8 +422,7 @@ function followLink(href) {
   }
   const [rawPath, fragment] = splitHref(href);
   if (!rawPath) {
-    // 同章锚点：#fragment 需要宿主把 fragment 解析成 Anchor 才能 locate。
-    setStatus(`章节内锚点需要宿主 resolveLink：${href}`);
+    setStatus(`找不到锚点 #${fragment}`);
     return;
   }
   const index = spineIndexOfPath(rawPath);
@@ -336,13 +430,9 @@ function followLink(href) {
     setStatus(`外链或未知目标：${href}`);
     return;
   }
-  if (index === chapter) {
-    setStatus(fragment ? `章节内锚点需要宿主 resolveLink：${href}` : href);
-    return;
-  }
   layoutChapter(index, 0);
   if (fragment) {
-    setStatus(`已切到第 ${index + 1} 章；锚点 ${fragment} 需要宿主 resolveLink`);
+    jumpToFragment(fragment);
   }
 }
 
@@ -440,6 +530,149 @@ function clearError() {
   }
 }
 
+// ---- 目录 -----------------------------------------------------------------
+// `eb_toc` 返回扁平列表 + depth；这里按 depth 拼成嵌套 <ul>。
+function fillToc() {
+  if (!tocEl) {
+    return;
+  }
+  let entries = [];
+  try {
+    entries = decodeToc(eb_toc());
+  } catch (error) {
+    entries = [];
+  }
+  tocEl.replaceChildren();
+  tocItems = [];
+  if (!entries.length) {
+    return;
+  }
+  const root = document.createElement("ul");
+  // levels 栈：每一项是一个缩进层，lastLi 是该层最后一个 <li>（嵌套列表挂在它下面）。
+  const levels = [{ depth: 0, list: root, lastLi: null }];
+  for (const entry of entries) {
+    while (levels.length > 1 && entry.depth < levels[levels.length - 1].depth) {
+      levels.pop();
+    }
+    let level = levels[levels.length - 1];
+    if (entry.depth > level.depth) {
+      const sub = document.createElement("ul");
+      if (level.lastLi) {
+        level.lastLi.append(sub);
+      } else {
+        level.list.append(sub);
+      }
+      level = { depth: entry.depth, list: sub, lastLi: null };
+      levels.push(level);
+    }
+    const li = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "toc-entry";
+    button.textContent = entry.label;
+    if (entry.spine === null) {
+      button.disabled = true;
+    } else {
+      button.addEventListener("click", () => goToToc(entry));
+    }
+    li.append(button);
+    level.list.append(li);
+    level.lastLi = li;
+    tocItems.push({ entry, button });
+  }
+  tocEl.append(root);
+  highlightToc();
+}
+
+function goToToc(entry) {
+  if (entry.spine === null) {
+    return;
+  }
+  layoutChapter(entry.spine, 0);
+  if (entry.fragment) {
+    jumpToFragment(entry.fragment);
+  }
+  closeTocOnNarrow();
+}
+
+function highlightToc() {
+  for (const item of tocItems) {
+    const active = item.entry.spine === chapter;
+    item.button.className = active ? "toc-entry active" : "toc-entry";
+  }
+}
+
+function closeTocOnNarrow() {
+  if (typeof window !== "undefined" && window.innerWidth < 1000 && document.body) {
+    document.body.classList.remove("toc-open");
+  }
+}
+
+// ---- 图片 -----------------------------------------------------------------
+// 图片字节来自 wasm 的 `eb_asset`，按 `ImageMeta.src`（归档路径）缓存。
+// Fit 三态在 drawImage 里结算；这里只负责拿到 bitmap，失败保留占位。
+async function loadChapterImages() {
+  let entries = [];
+  try {
+    entries = decodeImages(eb_chapter_images());
+  } catch (error) {
+    entries = [];
+  }
+  chapterImages = entries;
+  if (typeof createImageBitmap !== "function" || typeof Blob !== "function") {
+    return;
+  }
+  let changed = false;
+  for (const entry of entries) {
+    if (!entry.href || imageCache.has(entry.href)) {
+      continue;
+    }
+    try {
+      const bytes = eb_asset(entry.href);
+      if (!bytes || !bytes.length) {
+        continue;
+      }
+      const blob = new Blob([bytes], { type: entry.mime || "application/octet-stream" });
+      imageCache.set(entry.href, await createImageBitmap(blob));
+      changed = true;
+    } catch (error) {
+      // 标记为“试过了”：同一章反复渲染时不要再重试坏图，继续画占位。
+      imageCache.set(entry.href, null);
+    }
+  }
+  if (changed) {
+    render();
+  }
+}
+
+// ---- 内嵌字体 ---------------------------------------------------------------
+// wasm 侧的 FontBook 负责度量，这里再把同一份字节注册给浏览器的 FontFace，
+// 否则量到的和画出来的不是同一张脸。
+async function loadEmbeddedFonts(info) {
+  const faces = Array.isArray(info.fonts) ? info.fonts : [];
+  if (!faces.length) {
+    return;
+  }
+  const count = eb_font_face_count();
+  for (let index = 0; index < count; index += 1) {
+    if (eb_font_face(index) === 0xffffffff) {
+      continue;
+    }
+    const family = faces[index] && faces[index].family;
+    if (!family || typeof FontFace !== "function" || !document.fonts) {
+      continue;
+    }
+    try {
+      const bytes = eb_font_face_bytes(index);
+      const face = new FontFace(family, bytes.slice().buffer);
+      document.fonts.add(await face.load());
+    } catch (error) {
+      // 浏览器解析不了（或者被 CSP 拦）：布局仍用 FontBook 的量度。
+    }
+  }
+  fontDescs.clear();
+}
+
 function fillChapters() {
   chapterEl.replaceChildren();
   book.spine.forEach((item, index) => {
@@ -455,6 +688,7 @@ function updateBook() {
   titleEl.textContent = book.title || "untitled";
   metaEl.textContent = book.language || book.lang || "";
   fillChapters();
+  fillToc();
 }
 
 function layoutChapter(index, targetPage) {
@@ -467,10 +701,13 @@ function layoutChapter(index, targetPage) {
   layout = decodeLayout(bytes);
   page = targetPage === "last" ? layout.pages.length - 1 : Number(targetPage || 0);
   chapterEl.value = String(chapter);
+  highlightToc();
   render();
+  // 图片解码是异步的；先按占位排版，拿到 bitmap 后只重画一次。
+  loadChapterImages();
 }
 
-function openBook(bytes) {
+async function openBook(bytes) {
   const info = JSON.parse(eb_open(bytes));
   if (info.error) {
     throw new Error(info.error);
@@ -478,6 +715,8 @@ function openBook(bytes) {
   clearError();
   book = info;
   chapter = 0;
+  // 先把内嵌字体装进 wasm 与浏览器，再排版，避免第一页用错字脸。
+  await loadEmbeddedFonts(info);
   updateBook();
   layoutChapter(0, 0);
 }
@@ -576,7 +815,7 @@ async function boot() {
     setStatus("loading book");
     try {
       const bookBytes = await fetchFirst(urls);
-      openBook(bookBytes);
+      await openBook(bookBytes);
       setStatus("ready");
     } catch (error) {
       setStatus("pick an epub file to start");
@@ -600,7 +839,7 @@ async function loadBookFile(file) {
   busy = true;
   setStatus(`opening ${file.name}`);
   try {
-    openBook(new Uint8Array(await file.arrayBuffer()));
+    await openBook(new Uint8Array(await file.arrayBuffer()));
     setStatus(`${book.spine.length} chapters`);
   } catch (error) {
     showError(`打不开 ${file.name}：${error.message || error}`);
@@ -654,6 +893,14 @@ builtinEl.addEventListener("change", async () => {
     busy = false;
   }
 });
+
+if (tocToggleEl) {
+  tocToggleEl.addEventListener("click", () => {
+    if (document.body) {
+      document.body.classList.toggle("toc-open");
+    }
+  });
+}
 
 fitEl.addEventListener("change", () => {
   selection.clear();

@@ -23,14 +23,25 @@ fn ir() -> ebook_ir::LayoutResult {
 }
 
 #[test]
-fn unresolved_images_are_reported_not_guessed() {
+fn images_with_intrinsic_size_are_resolved() {
+    // 格式层现在会从 PNG 头填 `ImageMeta.size`，所以 demo.epub 里那张图不再走
+    // `Unresolved`：排版用固有尺寸发 `Op::Image`，没有脏块。
     let result = ir();
-    assert_eq!(result.dirty.len(), 1);
-    assert!(result
+    assert_eq!(result.dirty.len(), 0);
+    assert!(!result
         .display
         .ops
         .iter()
         .any(|op| matches!(op, Op::Unresolved(_))));
+    assert!(has_image(&result.display.ops));
+}
+
+fn has_image(ops: &[Op]) -> bool {
+    ops.iter().any(|op| match op {
+        Op::Image { .. } => true,
+        Op::Clip { ops, .. } => has_image(ops),
+        _ => false,
+    })
 }
 
 #[test]

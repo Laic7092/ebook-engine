@@ -99,3 +99,51 @@ pub fn eb_selection(
 pub fn eb_progress(page: u32, line: u32, byte: u32) -> String {
     crate::progress_json(page, line, byte)
 }
+
+// ---- 资源、目录与跳转 ------------------------------------------------------
+// 与交互查询一样走 JSON（列表/结构体），只有图片字节走 Uint8Array。
+
+/// 归档内资产字节；找不到返回空数组。
+#[wasm_bindgen]
+pub fn eb_asset(href: &str) -> Vec<u8> {
+    crate::asset_bytes(href)
+}
+
+/// 最近一次排版那一章的图片表：`[{id,href,mime}]`。
+#[wasm_bindgen]
+pub fn eb_chapter_images() -> String {
+    crate::chapter_images_json()
+}
+
+/// 目录：`[{label,spine,fragment,depth}]`。
+#[wasm_bindgen]
+pub fn eb_toc() -> String {
+    crate::toc_json()
+}
+
+/// 当前章节的 `#fragment` → Anchor。
+#[wasm_bindgen]
+pub fn eb_anchor(fragment: &str) -> String {
+    crate::anchor_json(fragment)
+}
+
+/// 按当前章节解析书内链接：`{target:{spine,fragment,external}}`。
+#[wasm_bindgen]
+pub fn eb_resolve_link(href: &str) -> String {
+    crate::resolve_link_json(href)
+}
+
+#[wasm_bindgen]
+pub fn eb_font_face(index: u32) -> u32 {
+    crate::load_font_face(index as usize)
+}
+
+#[wasm_bindgen]
+pub fn eb_font_face_count() -> u32 {
+    crate::font_face_count()
+}
+
+#[wasm_bindgen]
+pub fn eb_font_face_bytes(index: u32) -> Vec<u8> {
+    crate::load_font_face_bytes(index as usize)
+}
