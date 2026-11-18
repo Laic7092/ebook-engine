@@ -1,5 +1,5 @@
 use alloc::vec::Vec;
-use ebook_ir::{Op, Page, PointF, SizeF};
+use ebook_ir::{EdgesF, Op, Page, PointF, SizeF};
 
 #[derive(Clone, Copy)]
 pub(crate) struct Unit {
@@ -157,12 +157,13 @@ pub(crate) struct OpenPage {
 pub(crate) struct PageBuilder {
     pub(crate) pages: Vec<Page>,
     pub(crate) page_size: SizeF,
+    inset: EdgesF,
     open: Option<OpenPage>,
 }
 
 impl PageBuilder {
-    pub(crate) fn new(page_size: SizeF) -> Self {
-        Self { pages: Vec::new(), page_size, open: None }
+    pub(crate) fn new(page_size: SizeF, inset: EdgesF) -> Self {
+        Self { pages: Vec::new(), page_size, inset, open: None }
     }
 
     pub(crate) fn sync(&mut self, page: u32, top: f32, ops_len: u32, lines_len: u32) {
@@ -199,6 +200,7 @@ impl PageBuilder {
             index: o.index,
             origin: PointF::new(0.0, o.top),
             size: self.page_size,
+            inset: self.inset,
             ops: ebook_ir::Span::new(o.op_start, op_len),
             lines: ebook_ir::Span::new(o.line_start, line_len),
             anchor: o.anchor,

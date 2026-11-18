@@ -1,4 +1,4 @@
-use ebook_ir::{LayoutResult, Op, RenderError, Resources, Surface};
+use ebook_ir::{LayoutResult, Op, PointF, RenderError, Resources, Surface};
 
 pub fn paint(
     ir: &LayoutResult,
@@ -7,7 +7,7 @@ pub fn paint(
     res: &mut dyn Resources,
 ) -> Result<(), RenderError> {
     let page = ir.page(page).ok_or(RenderError::NoSuchPage(page))?;
-    let origin = page.origin;
+    let origin = PointF::new(page.origin.x - page.inset.left, page.origin.y - page.inset.top);
     for op in ir.display.op_slice(page.ops) {
         match op {
             Op::GlyphRun(run) => {

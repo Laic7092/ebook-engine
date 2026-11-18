@@ -88,7 +88,7 @@ impl Layout {
         let mut built = flow::flow(doc, env, c);
         let content = c.content_size();
         let starts = paginate::plan(&units_of(&built.items), content.h);
-        let mut builder = paginate::PageBuilder::new(content);
+        let mut builder = paginate::PageBuilder::new(content, c.margin);
         let mut ops: Vec<Op> = Vec::new();
         let mut lines: Vec<LineBox> = Vec::new();
 

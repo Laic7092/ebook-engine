@@ -10,4 +10,5 @@ ebook-render.workspace = true
 
 [dev-dependencies]
 ebook-format.workspace = true
+ebook-font.workspace = true
 ebook-layout.workspace = true

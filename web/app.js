@@ -173,8 +173,8 @@ function render() {
   page = shown;
   const info = layout.pages[shown];
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const w = info.size.w || PAGE_W;
-  const h = info.size.h || PAGE_H;
+  const w = (info.size.w || PAGE_W) + info.inset.left + info.inset.right;
+  const h = (info.size.h || PAGE_H) + info.inset.top + info.inset.bottom;
   canvas.width = Math.round(w * dpr);
   canvas.height = Math.round(h * dpr);
   canvas.style.width = `${w}px`;
@@ -184,8 +184,8 @@ function render() {
   ctx.fillRect(0, 0, w, h);
   ctx.fontKerning = "none";
   ctx.textBaseline = "alphabetic";
-  const ox = info.origin.x;
-  const oy = info.origin.y;
+  const ox = info.origin.x - info.inset.left;
+  const oy = info.origin.y - info.inset.top;
   const start = info.ops.start;
   const end = start + info.ops.len;
   for (let i = start; i < end; i += 1) {

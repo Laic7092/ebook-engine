@@ -28,6 +28,10 @@ impl RgbaSurface {
         }
     }
 
+    pub fn from_page(page: &ebook_ir::Page) -> Self {
+        Self::from_size(page.box_size())
+    }
+
     pub fn from_size(size: SizeF) -> Self {
         Self::new(float_to_u32(size.w), float_to_u32(size.h))
     }

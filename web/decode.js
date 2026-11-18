@@ -97,11 +97,16 @@ function readAnchor(r) {
   };
 }
 
+function readEdges(r) {
+  return { top: r.f32(), right: r.f32(), bottom: r.f32(), left: r.f32() };
+}
+
 function readPage(r) {
   return {
     index: r.varint(),
     origin: readPoint(r),
     size: readSize(r),
+    inset: readEdges(r),
     ops: readSpan(r),
     lines: readSpan(r),
     anchor: r.option(readAnchor),

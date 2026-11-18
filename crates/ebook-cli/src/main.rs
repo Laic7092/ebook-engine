@@ -104,7 +104,7 @@ fn run(args: &[String]) -> Result<(), String> {
     }
 
     if let Some(out) = svg_out {
-        let size = ir.page(page).map(|p| p.size).unwrap_or(SizeF::ZERO);
+        let size = ir.page(page).map(|p| p.box_size()).unwrap_or(SizeF::ZERO);
         let mut surface = SvgSurface::new(size);
         SvgRenderer
             .render(&ir, page, &mut surface, &mut NoResources)

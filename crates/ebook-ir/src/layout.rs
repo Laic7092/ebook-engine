@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::doc::{Anchor, Dir, ImageId, NodeId, Span};
 use crate::font::FontId;
-use crate::geom::{PointF, RectF, Rgba8, SidesF, SizeF};
+use crate::geom::{EdgesF, PointF, RectF, Rgba8, SidesF, SizeF};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IrVersion {
@@ -107,9 +107,23 @@ pub struct Page {
     pub index: u32,
     pub origin: PointF,
     pub size: SizeF,
+    pub inset: EdgesF,
     pub ops: Span,
     pub lines: Span,
     pub anchor: Option<Anchor>,
+}
+
+impl Page {
+    pub fn box_size(&self) -> SizeF {
+        SizeF::new(
+            self.size.w + self.inset.horizontal(),
+            self.size.h + self.inset.vertical(),
+        )
+    }
+
+    pub fn content_origin(&self) -> PointF {
+        PointF::new(self.inset.left, self.inset.top)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

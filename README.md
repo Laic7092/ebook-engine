@@ -62,9 +62,29 @@ format  ──>  StyledDoc  ──>  layout  ──>  LayoutResult  ──>  ren
 
 字体是排版入参，不是排版过程中去「找」的东西。不同平台 fallback 链不同，会导致同一本书分页不同，书签与跨端同步全部失效。这是正确性问题，不是性能问题。
 
+度量只认字体入参：`TextMeasurer` 由外部注入，`FontBook` 用 `ttf-parser` 给出真实的 advance / ascent / descent / cmap，同一份字体字节同时也是 `Resources` 的光栅化来源。`ebook-layout` 到今天依然只依赖 `ebook-ir` 一个 crate。
+
+断行按 UAX #14，属性表由 `data/unicode/LineBreak.txt` 生成（`data/gen_linebreak.py`），不引第三方 crate。只实现成对可判定的规则，需要上下文的规则明确不装。
+
+两端对齐、孤行寡行、块边界与强制分页都在排版层结算。缺字不猜：产 `Op::Unresolved{FontMissing}` 与 `DirtyBlock`，由宿主决定换字体还是换字。
+
 分页属于排版，因为断点会反过来影响孤行寡行与段落切分。`orphans` / `widows` / `break-before` / `break-after` 都在分页器里结算：先求最满的断点，再按约束往回退，退不动就退回最满断点。约束冲突时宁可难看，也不产生空页。
 
 op 坐标是**排版流坐标**，不是页面内坐标。`Page.origin` 表示这一页在流里的起点，渲染时整体减去它。所以改分页只移动 `origin`，一个 op 的坐标都不用重写——这正是「渲染层不改坐标」能成立的前提。
+
+---
+
+## 三个后端
+
+同一份 IR，三种画法。彼此是替代关系，不是备份关系。
+
+| 后端 | 位置 | 用途 |
+|---|---|---|
+| SVG | `ebook-render` | 参考实现，输出可以直接看，也方便和浏览器排同一份 XHTML 做差分 |
+| 光栅 | `ebook-raster` | 整数混合，跨平台逐字节一致；`to_ppm()` 可以落到文件 |
+| Canvas2D | `web/` | 浏览器阅读器，按 `GlyphRun.text` 画，文本可选中 |
+
+`paint()` 是三个后端共用的 op 遍历，坐标只在这里被平移到页面内，后端自己不碰坐标。
 
 ---
 
@@ -100,6 +120,10 @@ cargo run -p xtask -- golden
 cargo run -p xtask -- size
 cargo run -p xtask -- parity
 cargo run -p ebook-cli -- layout fixtures/demo.epub --spine 0 --stats --svg page.svg
+cargo run -p ebook-raster --example page
+./web/build.sh && python3 -m http.server
 ```
+
+最后一条打开 `http://localhost:8000/web/` 就是阅读器：选 EPUB、翻页、换章。`fixtures/en.epub` 是自带的英文样书，字体用 `fixtures/font/test.ttf`，浏览器侧用同一份字体做绘制，量出来的和画出来的不该有漂移。中日韩书需要自带一个覆盖 CJK 的字体，仓库里那个只覆盖拉丁。
 
 `golden` 比字节；`size` 卡预算；`parity` 用同一份输入分别跑 native 与 wasm，逐字节比对 IR。
