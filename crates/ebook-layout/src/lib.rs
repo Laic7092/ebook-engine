@@ -1,5 +1,7 @@
 #![cfg_attr(not(test), no_std)]
 extern crate alloc;
+#[cfg(feature = "parallel")]
+extern crate std;
 
 mod flow;
 pub mod hit;
@@ -10,11 +12,13 @@ mod paginate;
 mod resolve;
 pub mod select;
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use ebook_ir::{
     DisplayList, EdgesF, FontId, FontSpec, GlyphRun, ImageId, Issue, IssueCode, LayoutResult,
-    LineBox, Op, RectF, RunMap, SizeF, StyledDoc, UnresolvedReason, WritingMode, IR_VERSION,
+    Limits, LineBox, NodeId, NodeKind, Op, RectF, RunMap, SizeF, StyledDoc, Unresolved,
+    UnresolvedReason, WritingMode, IR_VERSION,
 };
 
 pub use hit::Reader;
@@ -85,6 +89,19 @@ impl Default for PageConstraint {
     }
 }
 
+/// 一次排版的选项。零值表示“全部走默认”：`Limits` 里为 0 的字段由
+/// [`Limits::resolved`] 换成默认上限。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LayoutOptions {
+    pub limits: Limits,
+}
+
+impl LayoutOptions {
+    pub fn with_limits(limits: Limits) -> Self {
+        Self { limits }
+    }
+}
+
 #[derive(Default)]
 pub struct Layout;
 
@@ -93,23 +110,113 @@ impl Layout {
         Self
     }
 
+    /// 默认预算：`Limits::default()`，与旧调用点行为一致。
     pub fn layout(
         &mut self,
         doc: &StyledDoc,
         env: &LayoutEnv<'_>,
         c: &PageConstraint,
     ) -> LayoutResult {
+        self.layout_with(doc, env, c, &LayoutOptions::default())
+    }
+
+    /// 带预算的排版。超限时返回合法但被截断的 IR：`pages` 覆盖
+    /// `display.ops` / `runs.lines` 仍成立，`truncated` 为真。
+    pub fn layout_with(
+        &mut self,
+        doc: &StyledDoc,
+        env: &LayoutEnv<'_>,
+        c: &PageConstraint,
+        opts: &LayoutOptions,
+    ) -> LayoutResult {
+        self.run(doc, env, c, opts, None)
+    }
+
+    /// 把“段落断行之后的工作单元”切成任务并行计算，再按输入顺序拼回。
+    ///
+    /// 输出必须是串行结果的逐字节副本：任务只写自己的下标，不共享可变状态。
+    /// `workers` 只是本次调用的上限；线程在一次调用内创建、返回前 join。
+    /// `parallel` feature 关闭时（wasm 就是这样）直接走串行路径。
+    pub fn layout_parallel(
+        &mut self,
+        doc: &StyledDoc,
+        env: &LayoutEnv<'_>,
+        c: &PageConstraint,
+        workers: usize,
+        opts: &LayoutOptions,
+    ) -> LayoutResult {
+        let workers = workers.max(1);
+        self.run(doc, env, c, opts, Some(workers))
+    }
+
+    fn run(
+        &mut self,
+        doc: &StyledDoc,
+        env: &LayoutEnv<'_>,
+        c: &PageConstraint,
+        opts: &LayoutOptions,
+        workers: Option<usize>,
+    ) -> LayoutResult {
+        let limits = opts.limits.resolved();
+
+        // 先量后遍历：arena 的节点数、文本字节数是 O(1) 的，深度按 parent 链
+        // 记忆化一次算完。超限时连 flow 都不进。
+        if doc.nodes.len() > limits.max_nodes as usize {
+            return limited_result(doc, "max_nodes");
+        }
+        if doc_depth(doc) > limits.max_depth as u32 {
+            return limited_result(doc, "max_depth");
+        }
+        if doc.text.len() > limits.max_text_bytes as usize {
+            return limited_result(doc, "max_text_bytes");
+        }
+
         let mut built = flow::flow(doc, env, c);
         let content = c.content_size();
-        let starts = paginate::plan(&units_of(&built.items), content.h);
+
+        // 分页本身按行串行（页起点依赖上一页终点），但把每个 item 换成分页
+        // 单元的映射是纯函数，可以按任务切。任务只写自己的下标，拼回时顺序固定。
+        let units = match workers {
+            Some(workers) => units_of_parallel(&built.items, workers),
+            None => units_of(&built.items),
+        };
+        let plan = paginate::plan(&units, content.h, limits.max_pages as usize);
+
         let mut builder = paginate::PageBuilder::new(content, c.margin);
         let mut ops: Vec<Op> = Vec::new();
         let mut lines: Vec<LineBox> = Vec::new();
         let mut issues: Vec<Issue> = Vec::new();
+        let mut truncated = plan.truncated;
+        if plan.truncated {
+            issues.push(Issue {
+                node: doc.root,
+                code: IssueCode::LimitExceeded,
+                detail: Some(String::from("max_pages")),
+            });
+        }
+
+        let max_lines = limits.max_lines as usize;
+        let max_image_pixels = limits.max_image_pixels as u64;
+        let mut image_pixels = 0u64;
+        let mut image_nodes: Option<Vec<NodeId>> = None;
 
         for (index, item) in built.items.drain(..).enumerate() {
-            let page = paginate::page_of(&starts, index);
-            let top = starts[page as usize].y;
+            if plan.cut.is_some_and(|cut| index >= cut) {
+                truncated = true;
+                break;
+            }
+            // 断行在 flow 里已经发生；这里在组装侧“停止再产”，已产出的行保留。
+            if lines.len() >= max_lines {
+                truncated = true;
+                issues.push(Issue {
+                    node: doc.root,
+                    code: IssueCode::LimitExceeded,
+                    detail: Some(String::from("max_lines")),
+                });
+                break;
+            }
+            let page = paginate::page_of(&plan.starts, index);
+            let top = plan.starts[page as usize].y;
             builder.sync(page, top, ops.len() as u32, lines.len() as u32);
             match item {
                 flow::Item::Line(line) => {
@@ -149,10 +256,33 @@ impl Layout {
                     });
                 }
                 flow::Item::Op(Op::Image { id, rect, fit }) => {
-                    ops.push(Op::Clip {
-                        rect,
-                        ops: alloc::vec![Op::Image { id, rect, fit }],
-                    });
+                    // 图片像素预算：按资源给出的固有尺寸累加，超限的图降级成
+                    // `SizeFromContent`，交给宿主决定怎么办，而不是让排版去猜。
+                    let size = env
+                        .resources
+                        .image_size(id)
+                        .unwrap_or(SizeF::new(rect.w, rect.h));
+                    let pixels = (size.w.max(0.0) as u64).saturating_mul(size.h.max(0.0) as u64);
+                    if image_pixels.saturating_add(pixels) > max_image_pixels {
+                        let node = image_node(doc, &mut image_nodes, id);
+                        issues.push(Issue {
+                            node,
+                            code: IssueCode::LimitExceeded,
+                            detail: Some(String::from("max_image_pixels")),
+                        });
+                        ops.push(Op::Unresolved(Unresolved {
+                            node,
+                            rect,
+                            reason: UnresolvedReason::SizeFromContent,
+                        }));
+                        truncated = true;
+                    } else {
+                        image_pixels += pixels;
+                        ops.push(Op::Clip {
+                            rect,
+                            ops: alloc::vec![Op::Image { id, rect, fit }],
+                        });
+                    }
                 }
                 flow::Item::Op(op) => {
                     if let Op::Unresolved(unresolved) = &op {
@@ -163,6 +293,16 @@ impl Layout {
             }
         }
         builder.close(ops.len() as u32, lines.len() as u32);
+
+        // 截断后丢弃尾部不再被行引用的字形，保证 IR 里没有悬空的字形区间。
+        if truncated {
+            let glyph_end = lines
+                .iter()
+                .map(|line| line.glyphs.end())
+                .max()
+                .unwrap_or(0) as usize;
+            built.glyphs.truncate(glyph_end);
+        }
 
         LayoutResult {
             version: IR_VERSION,
@@ -175,12 +315,13 @@ impl Layout {
             runs: RunMap { lines },
             dirty: built.dirty,
             issues,
+            truncated,
         }
     }
 }
 
-/// 未解析占位 → 诊断条目。本轮只在遇到 `Unresolved` 时顺手记录，不做拦截。
-fn issue_of(unresolved: &ebook_ir::Unresolved) -> Issue {
+/// 未解析占位 → 诊断条目。
+fn issue_of(unresolved: &Unresolved) -> Issue {
     let code = match unresolved.reason {
         UnresolvedReason::ImagePending => IssueCode::MissingImage,
         UnresolvedReason::FontMissing => IssueCode::MissingGlyph,
@@ -193,42 +334,177 @@ fn issue_of(unresolved: &ebook_ir::Unresolved) -> Issue {
     }
 }
 
+/// 限额触发的空结果。空结果是合法 IR：没有页也就没有页覆盖问题。
+fn limited_result(doc: &StyledDoc, detail: &str) -> LayoutResult {
+    LayoutResult {
+        version: IR_VERSION,
+        spine: doc.meta.spine,
+        pages: Vec::new(),
+        display: DisplayList::default(),
+        runs: RunMap::default(),
+        dirty: Vec::new(),
+        issues: alloc::vec![Issue {
+            node: doc.root,
+            code: IssueCode::LimitExceeded,
+            detail: Some(String::from(detail)),
+        }],
+        truncated: true,
+    }
+}
+
+/// 文档最大深度（根为 0）。按 parent 链记忆化，不递归，深文档不会爆栈。
+fn doc_depth(doc: &StyledDoc) -> u32 {
+    const UNKNOWN: u32 = u32::MAX;
+    let n = doc.nodes.len();
+    let mut memo = alloc::vec![UNKNOWN; n];
+    let mut path: Vec<usize> = Vec::new();
+    for start in 0..n {
+        if memo[start] != UNKNOWN {
+            continue;
+        }
+        path.clear();
+        let mut cur = start;
+        loop {
+            if memo[cur] != UNKNOWN {
+                break;
+            }
+            path.push(cur);
+            match doc.nodes[cur].parent {
+                Some(parent) if (parent as usize) < n && parent as usize != cur => {
+                    cur = parent as usize
+                }
+                _ => {
+                    memo[cur] = 0;
+                    break;
+                }
+            }
+            // parent 链成环（损坏的 arena）：把这条路当成超深。
+            if path.len() > n {
+                for &node in &path {
+                    memo[node] = u32::MAX;
+                }
+                path.clear();
+                break;
+            }
+        }
+        while let Some(node) = path.pop() {
+            if memo[node] != UNKNOWN {
+                continue;
+            }
+            let parent = doc.nodes[node].parent.map(|p| p as usize).unwrap_or(node);
+            let base = if parent < n && parent != node {
+                memo[parent]
+            } else {
+                0
+            };
+            memo[node] = base.saturating_add(1);
+        }
+    }
+    memo.into_iter()
+        .filter(|&depth| depth != UNKNOWN)
+        .max()
+        .unwrap_or(0)
+}
+
+/// 按图片 id 找到声明它的节点，供限额降级时填 `Issue.node`。
+fn image_node(doc: &StyledDoc, cache: &mut Option<Vec<NodeId>>, id: ImageId) -> NodeId {
+    let map = cache.get_or_insert_with(|| {
+        let mut owners = alloc::vec![doc.root; doc.images.len()];
+        for (index, node) in doc.nodes.iter().enumerate() {
+            if let NodeKind::Image(image) = node.kind {
+                if let Some(owner) = owners.get_mut(image as usize) {
+                    *owner = index as NodeId;
+                }
+            }
+        }
+        owners
+    });
+    map.get(id as usize).copied().unwrap_or(doc.root)
+}
+
+fn unit_of(item: &flow::Item) -> paginate::Unit {
+    match item {
+        flow::Item::Line(line) => paginate::Unit {
+            y: line.y,
+            h: line.h,
+            line: true,
+            block: line.block,
+            order: line.order,
+            len: line.len,
+            orphans: line.orphans,
+            widows: line.widows,
+            force: line.force,
+            avoid_before: line.avoid_before,
+            avoid_after: line.avoid_after,
+        },
+        flow::Item::Op(op) => {
+            let (y, h) = paginate::op_bounds(op);
+            paginate::Unit {
+                y,
+                h,
+                line: false,
+                block: u32::MAX,
+                order: 0,
+                len: 0,
+                orphans: 1,
+                widows: 1,
+                force: false,
+                avoid_before: false,
+                avoid_after: false,
+            }
+        }
+    }
+}
+
 fn units_of(items: &[flow::Item]) -> Vec<paginate::Unit> {
     let mut units = Vec::with_capacity(items.len());
     for item in items {
-        units.push(match item {
-            flow::Item::Line(line) => paginate::Unit {
-                y: line.y,
-                h: line.h,
-                line: true,
-                block: line.block,
-                order: line.order,
-                len: line.len,
-                orphans: line.orphans,
-                widows: line.widows,
-                force: line.force,
-                avoid_before: line.avoid_before,
-                avoid_after: line.avoid_after,
-            },
-            flow::Item::Op(op) => {
-                let (y, h) = paginate::op_bounds(op);
-                paginate::Unit {
-                    y,
-                    h,
-                    line: false,
-                    block: u32::MAX,
-                    order: 0,
-                    len: 0,
-                    orphans: 1,
-                    widows: 1,
-                    force: false,
-                    avoid_before: false,
-                    avoid_after: false,
-                }
-            }
-        });
+        units.push(unit_of(item));
     }
     units
+}
+
+/// 并行版本：输入是只读的 item 切片，任务只写自己下标的结果槽。
+/// 用 `thread::scope` + 原子索引队列，调用线程也参与，返回前 join。
+#[cfg(feature = "parallel")]
+fn units_of_parallel(items: &[flow::Item], workers: usize) -> Vec<paginate::Unit> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    let n = items.len();
+    // 任务数就是上限；再套一个固定上限，避免调用方传 1e6 时真去起 1e6 个线程。
+    let workers = workers.clamp(1, 64).min(n.max(1));
+    if workers <= 1 || n == 0 {
+        return units_of(items);
+    }
+    let next = AtomicUsize::new(0);
+    let slots: Mutex<Vec<Option<paginate::Unit>>> = Mutex::new((0..n).map(|_| None).collect());
+    let claim = |next: &AtomicUsize| loop {
+        let index = next.fetch_add(1, Ordering::Relaxed);
+        if index >= n {
+            return;
+        }
+        let unit = unit_of(&items[index]);
+        slots.lock().unwrap()[index] = Some(unit);
+    };
+    std::thread::scope(|scope| {
+        for _ in 1..workers {
+            scope.spawn(|| claim(&next));
+        }
+        claim(&next);
+    });
+    slots
+        .into_inner()
+        .unwrap()
+        .into_iter()
+        .map(|unit| unit.expect("every task wrote its slot"))
+        .collect()
+}
+
+/// `parallel` 关闭时（wasm）`layout_parallel` 退化成串行，签名保持不变。
+#[cfg(not(feature = "parallel"))]
+fn units_of_parallel(items: &[flow::Item], _workers: usize) -> Vec<paginate::Unit> {
+    units_of(items)
 }
 
 pub fn layout(doc: &StyledDoc, env: &LayoutEnv<'_>, c: &PageConstraint) -> LayoutResult {

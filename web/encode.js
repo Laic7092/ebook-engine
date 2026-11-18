@@ -249,6 +249,7 @@ export function encodeLayout(layout) {
   w.vec(layout.runs.lines, writeLineBox);
   w.vec(layout.dirty, writeDirty);
   w.vec(layout.issues, writeIssue);
+  w.u8(layout.truncated ? 1 : 0);
   return w.finish();
 }
 

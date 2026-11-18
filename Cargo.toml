@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "crates/ebook-ir",
   "crates/ebook-layout",
+  "crates/ebook-cache",
   "crates/ebook-format",
   "crates/ebook-render",
   "crates/ebook-cli",
@@ -19,7 +20,8 @@ publish = false
 
 [workspace.dependencies]
 ebook-ir = { path = "crates/ebook-ir" }
-ebook-layout = { path = "crates/ebook-layout" }
+ebook-layout = { path = "crates/ebook-layout", default-features = false }
+ebook-cache = { path = "crates/ebook-cache" }
 ebook-format = { path = "crates/ebook-format" }
 ebook-render = { path = "crates/ebook-render" }
 ebook-font = { path = "crates/ebook-font" }

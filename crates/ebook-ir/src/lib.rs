@@ -18,7 +18,7 @@ pub use font::{FontData, FontDesc, FontFamilies, FontFamily, FontId, FontSet, Fo
 pub use geom::{EdgesF, PointF, RectF, Rgba8, Sided, Sides, SidesF, SizeF};
 pub use layout::{
     BorderBox, DirtyBlock, DisplayList, Fit, Glyph, GlyphRun, IrVersion, Issue, IssueCode,
-    LayoutResult, Limits, LineBox, Location, Op, Page, Rotate, RunMap, Unresolved,
+    LayoutResult, LayoutStats, Limits, LineBox, Location, Op, Page, Rotate, RunMap, Unresolved,
     UnresolvedReason, IR_VERSION,
 };
 pub use render::{GlyphBitmap, ImageData, NoResources, RenderError, Renderer, Resources, Surface};

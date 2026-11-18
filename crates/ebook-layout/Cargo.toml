@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[features]
+# wasm 不启用：线程只在 native 上参与，关闭后 layout_parallel 走串行路径。
+default = ["parallel"]
+parallel = []
+
 [dependencies]
 ebook-ir.workspace = true
 

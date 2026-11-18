@@ -28,8 +28,8 @@ function compare(name, bytes) {
 // 所以这里对新增字段的语义做最小断言，防止 decode/encode 一起跑偏。
 function checkFields(name, layout) {
   const { major, minor } = layout.version;
-  if (major !== 1 || minor !== 2) {
-    throw new Error(`${name}: IR version ${major}.${minor}, want 1.2`);
+  if (major !== 1 || minor !== 3) {
+    throw new Error(`${name}: IR version ${major}.${minor}, want 1.3`);
   }
 
   const glyphs = layout.display.glyphs;
@@ -69,6 +69,10 @@ function checkFields(name, layout) {
       throw new Error(`${name}: issue detail is not a string`);
     }
   }
+
+  if (typeof layout.truncated !== "boolean") {
+    throw new Error(`${name}: truncated flag is not a boolean`);
+  }
 }
 
 function checkSpans(name, layout) {
@@ -106,8 +110,8 @@ function checkSpans(name, layout) {
 // golden 里暂时没有 link（格式层还没填 `Node.link`），所以这一段是 link 解码的唯一覆盖。
 function selfCheck() {
   const layout = {
-    header: { major: 1, minor: 2 },
-    version: { major: 1, minor: 2 },
+    header: { major: 1, minor: 3 },
+    version: { major: 1, minor: 3 },
     spine: 0,
     pages: [{
       index: 0,
@@ -150,6 +154,7 @@ function selfCheck() {
     },
     dirty: [],
     issues: [{ node: 4, code: 3, detail: "image pending" }],
+    truncated: true,
   };
   const bytes = encodeLayout(layout);
   const again = decodeLayout(bytes);
@@ -164,6 +169,7 @@ function selfCheck() {
   diff(layout.display.glyphs, again.display.glyphs, "glyphs");
   diff(layout.runs.lines, again.runs.lines, "lines");
   diff(layout.issues, again.issues, "issues");
+  diff(layout.truncated, again.truncated, "truncated");
   const reencoded = encodeLayout(again);
   if (reencoded.length !== bytes.length) {
     throw new Error(`synthetic: re-encode length ${reencoded.length} != ${bytes.length}`);

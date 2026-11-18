@@ -94,6 +94,7 @@ fn result() -> LayoutResult {
         runs: RunMap { lines },
         dirty: alloc::vec![],
         issues: alloc::vec![],
+        truncated: false,
     }
 }
 

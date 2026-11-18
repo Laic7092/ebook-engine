@@ -1,4 +1,4 @@
-//! IR 1.2 新增字段的编解码：链接 op、字形字节偏移、行盒索引、诊断条目。
+//! IR 1.3 新增字段的编解码：链接 op、字形字节偏移、行盒索引、诊断条目。
 
 use ebook_ir::{
     codec, Anchor, Dir, DisplayList, EdgesF, FontId, Glyph, GlyphRun, Issue, IssueCode, Limits,
@@ -67,6 +67,7 @@ fn ir() -> ebook_ir::LayoutResult {
             code: IssueCode::MissingImage,
             detail: Some(String::from("image pending")),
         }],
+        truncated: false,
     }
 }
 
@@ -75,7 +76,7 @@ fn new_fields_survive_the_byte_contract() {
     let ir = ir();
     let bytes = codec::to_bytes(&ir).expect("encode");
     assert_eq!(&bytes[..4], &codec::MAGIC);
-    assert_eq!(&bytes[4..8], &[1, 0, 2, 0], "1.2 header");
+    assert_eq!(&bytes[4..8], &[1, 0, 3, 0], "1.3 header");
     let back: ebook_ir::LayoutResult = codec::decode(&bytes).expect("decode");
     assert_eq!(back, ir);
     assert_eq!(back.version, IR_VERSION);

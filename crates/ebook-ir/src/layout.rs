@@ -2,7 +2,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
-use crate::doc::{Anchor, Dir, ImageId, NodeId, Span};
+use crate::doc::{Anchor, Dir, ImageId, NodeId, Span, StyledDoc};
 use crate::font::FontId;
 use crate::geom::{EdgesF, PointF, RectF, Rgba8, SidesF, SizeF};
 
@@ -12,7 +12,7 @@ pub struct IrVersion {
     pub minor: u16,
 }
 
-pub const IR_VERSION: IrVersion = IrVersion { major: 1, minor: 2 };
+pub const IR_VERSION: IrVersion = IrVersion { major: 1, minor: 3 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Rotate {
@@ -277,11 +277,77 @@ pub struct LayoutResult {
     pub dirty: Vec<DirtyBlock>,
     /// 排版过程中发现的可恢复问题（缺字、缺图、...）。本轮只收集，不拦截。
     pub issues: Vec<Issue>,
+    /// 是否因为 `Limits` 截断过。为真时结果仍是合法 IR（页覆盖、行不越界），
+    /// 只是内容不完整：调用方应把它当作“这份输入超出了本次预算”的信号。
+    pub truncated: bool,
+}
+
+/// 一份排版结果的规模快照。
+///
+/// `layout_bytes` 是**估算**：`size_of` 加上各个向量的容量，再加上 op / issue
+/// 里堆字符串的长度。它不精确，只用于预算与诊断，不参与任何序列化。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LayoutStats {
+    /// 文档节点数。`LayoutResult` 不持有文档，只有配合 `StyledDoc` 才有值。
+    pub nodes: usize,
+    /// 文档文本字节数。同上。
+    pub text_bytes: usize,
+    pub lines: usize,
+    pub pages: usize,
+    pub ops: usize,
+    pub glyphs: usize,
+    pub layout_bytes: usize,
 }
 
 impl LayoutResult {
     pub fn page(&self, index: u32) -> Option<&Page> {
         self.pages.get(index as usize)
+    }
+
+    /// 本次排版结果的规模。`nodes` / `text_bytes` 为 0：IR 不含文档本体，
+    /// 需要这两个字段时用 [`LayoutResult::stats_with_doc`]。
+    pub fn stats(&self) -> LayoutStats {
+        self.collect_stats(0, 0)
+    }
+
+    /// 连同文档规模一起统计。`ebook-cli --stats` 走这里。
+    pub fn stats_with_doc(&self, doc: &StyledDoc) -> LayoutStats {
+        self.collect_stats(doc.nodes.len(), doc.text.len())
+    }
+
+    fn collect_stats(&self, nodes: usize, text_bytes: usize) -> LayoutStats {
+        LayoutStats {
+            nodes,
+            text_bytes,
+            lines: self.runs.lines.len(),
+            pages: self.pages.len(),
+            ops: self.display.ops.len(),
+            glyphs: self.display.glyphs.len(),
+            layout_bytes: self.estimate_bytes(),
+        }
+    }
+
+    /// 见 [`LayoutStats::layout_bytes`]：容量 × `size_of` 的估算，不是精确分配量。
+    fn estimate_bytes(&self) -> usize {
+        let mut bytes = core::mem::size_of::<Self>();
+        bytes += self.pages.capacity() * core::mem::size_of::<Page>();
+        bytes += self.display.ops.capacity() * core::mem::size_of::<Op>();
+        bytes += self.display.glyphs.capacity() * core::mem::size_of::<Glyph>();
+        bytes += self.runs.lines.capacity() * core::mem::size_of::<LineBox>();
+        bytes += self.dirty.capacity() * core::mem::size_of::<DirtyBlock>();
+        bytes += self.issues.capacity() * core::mem::size_of::<Issue>();
+        for op in &self.display.ops {
+            bytes += op_heap_bytes(op);
+        }
+        for issue in &self.issues {
+            bytes += issue.detail.as_ref().map_or(0, String::len);
+        }
+        for line in &self.runs.lines {
+            if let Some(anchor) = &line.anchor {
+                bytes += anchor.path.capacity() * core::mem::size_of::<u16>();
+            }
+        }
+        bytes
     }
 
     pub fn page_of_line(&self, line: u32) -> Option<&Page> {
@@ -398,13 +464,27 @@ impl LayoutResult {
         })
     }
 
-    /// 页内坐标 → 原文锚点。字节偏移会累加进锚点，所以能和 `location_of` 往返。
-    ///
+    /// 页内坐标 → 原文锚点。字节偏移会累加进锚点，所以能和 `location_of` 往返。    ///
     /// 跨多个文本节点的行只保留首节点路径；这是本轮的最小实现，多节点选区留给后续任务。
     pub fn anchor_at(&self, page: u32, p: PointF) -> Option<Anchor> {
         let location = self.hit_test(page, p)?;
         let line = self.runs.lines.get(location.line as usize)?;
         let anchor = line.anchor.as_ref()?;
         Some(anchor.with_offset(anchor.offset.saturating_add(location.byte)))
+    }
+}
+
+/// op 内部的堆数据长度（`String` 的 text / href、嵌套 `Clip` 的子 op）。
+/// 只统计文字本身；`Vec` 的容量单独按 `size_of` 估。
+fn op_heap_bytes(op: &Op) -> usize {
+    match op {
+        Op::GlyphRun(run) => run.text.len(),
+        Op::Link { href, .. } => href.len(),
+        Op::Clip { ops, .. } => ops
+            .iter()
+            .map(op_heap_bytes)
+            .sum::<usize>()
+            .saturating_add(ops.capacity() * core::mem::size_of::<Op>()),
+        Op::Rect { .. } | Op::Border(_) | Op::Image { .. } | Op::Unresolved(_) => 0,
     }
 }

@@ -1,0 +1,13 @@
+[package]
+name = "ebook-cache"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+ebook-ir.workspace = true
+ebook-layout.workspace = true
+
+[dev-dependencies]
+# 测试要覆盖真正的线程路径；wasm 侧（ebook-web）仍然不启用 parallel。
+ebook-layout = { workspace = true, features = ["parallel"] }

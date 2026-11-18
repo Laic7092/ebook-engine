@@ -36,6 +36,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ebook-cache"
+version = "0.1.0"
+dependencies = [
+ "ebook-ir",
+ "ebook-layout",
+]
+
+[[package]]
 name = "ebook-cli"
 version = "0.1.0"
 dependencies = [
