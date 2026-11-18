@@ -12,7 +12,7 @@ pub use codec::{decode, encode, hash_of, read_header, to_bytes, CodecError, MAGI
 pub use doc::{
     Anchor, Break, BreakPolicy, Border, ComputedStyle, Dir, Display, DocMeta, ImageId, ImageMeta,
     Len, LineHeight, ListStyle, Node, NodeId, NodeKind, Span, StyledDoc, Tag, TextAlign, TextStyle,
-    TextTransform, WhiteSpace, WordBreak, WritingMode,
+    TextTransform, VerticalAlign, WhiteSpace, WordBreak, WritingMode,
 };
 pub use font::{FontData, FontDesc, FontId, FontSet, FontStyle};
 pub use geom::{EdgesF, PointF, RectF, Rgba8, Sided, Sides, SidesF, SizeF};

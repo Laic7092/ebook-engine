@@ -132,3 +132,132 @@ fn missing_glyphs_are_unresolved_and_dirty() {
         .expect("glyph");
     assert_ne!(glyph.gid, 'a' as u16);
 }
+
+fn run_y(result: &LayoutResult, needle: &str) -> f32 {
+    result
+        .display
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            Op::GlyphRun(run) if run.text == needle => Some(run.origin.y),
+            _ => None,
+        })
+        .expect("glyph run")
+}
+
+#[test]
+fn mixed_font_sizes_share_one_line_box() {
+    let result = run(
+        200.0,
+        "p{line-height:normal} .big{font-size:20px} .small{font-size:10px}",
+        "<p>a<span class=\"big\">b</span><span class=\"small\">c</span></p>",
+    );
+    assert_eq!(result.runs.lines.len(), 1);
+    let line = &result.runs.lines[0];
+    assert!((line.rect.h - 30.0).abs() < 0.01);
+    assert!((line.baseline - 19.0).abs() < 0.01);
+    assert!((run_y(&result, "a") - 19.0).abs() < 0.01);
+    assert!((run_y(&result, "b") - 19.0).abs() < 0.01);
+    assert!((run_y(&result, "c") - 19.0).abs() < 0.01);
+}
+
+#[test]
+fn superscript_and_subscript_shift_baselines_and_grow_the_line() {
+    let result = run(
+        200.0,
+        ".sup{vertical-align:super} .sub{vertical-align:sub}",
+        "<p>a<span class=\"sup\">b</span><span class=\"sub\">c</span>d</p>",
+    );
+    assert_eq!(result.runs.lines.len(), 1);
+    let line = &result.runs.lines[0];
+    assert!(line.rect.h > 20.0);
+    let base = run_y(&result, "a");
+    assert!(run_y(&result, "b") < base);
+    assert!(run_y(&result, "c") > base);
+    assert!((base - run_y(&result, "d")).abs() < 0.01);
+    assert!((run_y(&result, "b") - (base - 16.0 / 3.0)).abs() < 0.01);
+    assert!((run_y(&result, "c") - (base + 16.0 / 5.0)).abs() < 0.01);
+}
+
+#[test]
+fn vertical_align_length_raises_the_baseline() {
+    let result = run(
+        200.0,
+        ".up{vertical-align:5px}",
+        "<p>a<span class=\"up\">b</span></p>",
+    );
+    let base = run_y(&result, "a");
+    assert!((run_y(&result, "b") - (base - 5.0)).abs() < 0.01);
+}
+
+#[test]
+fn parent_strut_keeps_a_small_inline_from_collapsing_the_line() {
+    let result = run(
+        200.0,
+        "p{line-height:normal} span{font-size:8px;line-height:normal}",
+        "<p><span>a</span></p>",
+    );
+    assert_eq!(result.runs.lines.len(), 1);
+    let line = &result.runs.lines[0];
+    assert!((line.rect.h - 24.0).abs() < 0.01);
+    assert!((line.baseline - 16.0).abs() < 0.01);
+    assert!((run_y(&result, "a") - 16.0).abs() < 0.01);
+}
+
+#[test]
+fn parent_and_first_child_top_margins_collapse() {
+    let result = run(
+        200.0,
+        ".parent{margin-top:20px}.child{margin-top:10px;line-height:10px}",
+        "<div class=\"parent\">\n <div class=\"child\">x</div>\n</div>",
+    );
+    assert_eq!(result.runs.lines.len(), 1);
+    assert!((result.runs.lines[0].rect.y - 20.0).abs() < 0.01);
+}
+
+#[test]
+fn border_top_prevents_parent_child_margin_collapse() {
+    let result = run(
+        200.0,
+        ".parent{margin-top:20px;border:1px solid}.child{margin-top:10px;line-height:10px}",
+        "<div class=\"parent\"><div class=\"child\">x</div></div>",
+    );
+    assert_eq!(result.runs.lines.len(), 1);
+    assert!((result.runs.lines[0].rect.y - 31.0).abs() < 0.01);
+}
+
+#[test]
+fn adjacent_positive_and_negative_margins_collapse() {
+    let result = run(
+        200.0,
+        ".a{line-height:10px;margin-bottom:-5px}.b{line-height:10px;margin-top:10px}",
+        "<div class=\"a\">a</div><div class=\"b\">b</div>",
+    );
+    assert_eq!(result.runs.lines.len(), 2);
+    let gap = result.runs.lines[1].rect.y - result.runs.lines[0].rect.bottom();
+    assert!((gap - 5.0).abs() < 0.01);
+}
+
+#[test]
+fn empty_block_collapses_its_own_margins() {
+    let result = run(
+        200.0,
+        ".empty{margin-top:30px;margin-bottom:10px}.line{line-height:10px}",
+        "<div class=\"empty\"></div><div class=\"line\">x</div>",
+    );
+    assert_eq!(result.runs.lines.len(), 1);
+    assert!((result.runs.lines[0].rect.y - 30.0).abs() < 0.01);
+}
+
+#[test]
+fn empty_block_keeps_negative_margins_in_the_collapsed_chain() {
+    let result = run(
+        200.0,
+        ".a{line-height:10px;margin-bottom:-5px}.empty{margin-top:10px;margin-bottom:20px}\
+         .b{line-height:10px}",
+        "<div class=\"a\">a</div><div class=\"empty\"></div><div class=\"b\">b</div>",
+    );
+    assert_eq!(result.runs.lines.len(), 2);
+    let gap = result.runs.lines[1].rect.y - result.runs.lines[0].rect.bottom();
+    assert!((gap - 15.0).abs() < 0.01);
+}

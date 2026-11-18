@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use ebook_ir::{
     Anchor, Break, ComputedStyle, Dir, DirtyBlock, Display, Fit, FontId, Glyph, ImageId, NodeId,
     NodeKind, Op, PointF, RectF, Rotate, Span, TextAlign, TextTransform, Unresolved,
-    UnresolvedReason, WhiteSpace,
+    UnresolvedReason, VerticalAlign, WhiteSpace,
 };
 
 use crate::resolve;
@@ -76,6 +76,53 @@ struct Ch {
     piece: u16,
 }
 
+#[derive(Clone, Copy, Default)]
+struct CollapsedMargin {
+    positive: f32,
+    negative: f32,
+}
+
+impl CollapsedMargin {
+    const ZERO: Self = Self { positive: 0.0, negative: 0.0 };
+
+    fn new(value: f32) -> Self {
+        Self { positive: value.max(0.0), negative: value.min(0.0) }
+    }
+
+    fn add(self, value: f32) -> Self {
+        Self {
+            positive: self.positive.max(value.max(0.0)),
+            negative: self.negative.min(value.min(0.0)),
+        }
+    }
+
+    fn merge(self, other: Self) -> Self {
+        Self {
+            positive: self.positive.max(other.positive),
+            negative: self.negative.min(other.negative),
+        }
+    }
+
+    fn value(self) -> f32 {
+        self.positive + self.negative
+    }
+}
+
+#[derive(Clone, Copy)]
+struct BlockFlow {
+    margin: CollapsedMargin,
+    empty: bool,
+}
+
+#[derive(Clone, Copy)]
+struct LineBoxEntry {
+    owner: Option<NodeId>,
+    align: VerticalAlign,
+    shift: f32,
+    top_dist: f32,
+    bottom_dist: f32,
+}
+
 struct FlowCtx<'a> {
     doc: &'a ebook_ir::StyledDoc,
     env: &'a LayoutEnv<'a>,
@@ -97,7 +144,7 @@ pub(crate) fn flow(doc: &ebook_ir::StyledDoc, env: &LayoutEnv<'_>, c: &PageConst
     };
     let mut y = 0.0;
     let root_w = ctx.content_w;
-    ctx.block(doc.root, 0.0, &mut y, root_w, 0.0);
+    let _ = ctx.block(doc.root, 0.0, &mut y, root_w, CollapsedMargin::ZERO);
     ctx.flow
 }
 
@@ -107,22 +154,67 @@ impl<'a> FlowCtx<'a> {
         node.kind.is_text() || node.style.is_inline()
     }
 
-    fn block(&mut self, id: NodeId, x: f32, y: &mut f32, avail_w: f32, prev_mb: f32) -> f32 {
+    fn text_is_collapsible_blank(&self, id: NodeId) -> bool {
+        let node = self.doc.node(id);
+        let NodeKind::Text(span) = node.kind else {
+            return false;
+        };
+        if !matches!(node.style.text.white_space, WhiteSpace::Normal | WhiteSpace::Nowrap) {
+            return false;
+        }
+        self.doc
+            .text_of(span)
+            .chars()
+            .all(|c| matches!(c, ' ' | '\n' | '\r' | '\t'))
+    }
+
+    fn first_child_is_block(&self, id: NodeId) -> bool {
+        let node = self.doc.node(id);
+        for index in 0..node.child_len {
+            let kid = self.doc.children[(node.first_child + index) as usize];
+            let style = self.doc.node(kid).style;
+            if style.display == Display::None || self.text_is_collapsible_blank(kid) {
+                continue;
+            }
+            return matches!(style.display, Display::Block | Display::ListItem);
+        }
+        false
+    }
+
+    fn block(
+        &mut self,
+        id: NodeId,
+        x: f32,
+        y: &mut f32,
+        avail_w: f32,
+        prev_mb: CollapsedMargin,
+    ) -> BlockFlow {
         self.depth += 1;
         if self.depth > 128 {
             self.depth -= 1;
-            return 0.0;
+            return BlockFlow { margin: CollapsedMargin::ZERO, empty: true };
         }
 
         let node = self.doc.node(id);
         let style = node.style;
         let kind = node.kind.clone();
         let em = style.font.size;
-        let margin = resolve::sides(&style.margin, avail_w, em);
+        let margin = resolve::margins(&style.margin, avail_w, em);
         let padding = resolve::sides(&style.padding, avail_w, em);
         let border = resolve::sides(&style.border.width, avail_w, em);
-
-        *y += margin.top.max(prev_mb);
+        let can_collapse_top = border.top <= 0.0 && padding.top <= 0.0;
+        let can_collapse_bottom =
+            border.bottom <= 0.0 && padding.bottom <= 0.0 && style.height.is_auto();
+        let deferred_top = can_collapse_top && self.first_child_is_block(id);
+        let mut last_mb;
+        let mut applied_top = CollapsedMargin::ZERO;
+        if deferred_top {
+            last_mb = prev_mb.add(margin.top);
+        } else {
+            applied_top = prev_mb.add(margin.top);
+            *y += applied_top.value();
+            last_mb = CollapsedMargin::ZERO;
+        }
 
         let mut cy = *y + border.top + padding.top;
         let inner_x = x + margin.left + border.left + padding.left;
@@ -131,14 +223,20 @@ impl<'a> FlowCtx<'a> {
             None => (avail_w - margin.horizontal() - border.horizontal() - padding.horizontal())
                 .max(0.0),
         };
+        let mut content_empty = true;
 
         match kind {
             NodeKind::Text(_) => {
+                let before = self.flow.items.len();
                 self.inline_from(&[id], inner_x, &mut cy, inner_w, style);
+                if self.flow.items.len() > before {
+                    content_empty = false;
+                }
             }
             NodeKind::LineBreak => {}
             NodeKind::Image(img) => {
                 self.image(id, img, style, inner_x, &mut cy, inner_w);
+                content_empty = false;
             }
             NodeKind::Ruby { base, .. } => {
                 let mut pieces = Vec::new();
@@ -148,15 +246,18 @@ impl<'a> FlowCtx<'a> {
                     node: id,
                     kind: PieceKind::Text,
                 });
+                let before = self.flow.items.len();
                 self.break_lines(&pieces, inner_x, &mut cy, inner_w, style);
+                if self.flow.items.len() > before {
+                    content_empty = false;
+                }
             }
             NodeKind::Element(_) => {
-                let child_len = self.doc.node(id).child_len;
-                let first_child = self.doc.node(id).first_child;
+                let child_len = node.child_len;
+                let first_child = node.first_child;
                 let mut buf: Vec<NodeId> = Vec::new();
-                let mut last_mb = 0.0;
-                for i in 0..child_len {
-                    let kid = self.doc.children[(first_child + i) as usize];
+                for index in 0..child_len {
+                    let kid = self.doc.children[(first_child + index) as usize];
                     let kid_style = self.doc.node(kid).style;
                     if kid_style.display == Display::None {
                         continue;
@@ -166,21 +267,68 @@ impl<'a> FlowCtx<'a> {
                         continue;
                     }
                     if !buf.is_empty() {
+                        let pending = last_mb;
+                        cy += pending.value();
+                        last_mb = CollapsedMargin::ZERO;
+                        let before = self.flow.items.len();
                         self.inline_from(&buf, inner_x, &mut cy, inner_w, style);
+                        if self.flow.items.len() > before {
+                            content_empty = false;
+                        } else {
+                            cy -= pending.value();
+                            last_mb = pending;
+                        }
                         buf.clear();
-                        last_mb = 0.0;
                     }
-                    last_mb = self.block(kid, inner_x, &mut cy, inner_w, last_mb);
+                    let child = self.block(kid, inner_x, &mut cy, inner_w, last_mb);
+                    last_mb = child.margin;
+                    if !child.empty {
+                        content_empty = false;
+                    }
                 }
                 if !buf.is_empty() {
+                    let pending = last_mb;
+                    cy += pending.value();
+                    last_mb = CollapsedMargin::ZERO;
+                    let before = self.flow.items.len();
                     self.inline_from(&buf, inner_x, &mut cy, inner_w, style);
+                    if self.flow.items.len() > before {
+                        content_empty = false;
+                    } else {
+                        cy -= pending.value();
+                        last_mb = pending;
+                    }
                 }
             }
         }
 
+        let empty =
+            content_empty && can_collapse_top && can_collapse_bottom && style.height.is_auto();
+        if empty {
+            if !deferred_top {
+                *y -= applied_top.value();
+            }
+            let carried = if deferred_top {
+                last_mb
+            } else {
+                prev_mb.add(margin.top).merge(last_mb)
+            };
+            self.depth -= 1;
+            return BlockFlow {
+                margin: carried.add(margin.bottom),
+                empty: true,
+            };
+        }
+
+        let margin_bottom = if can_collapse_bottom {
+            last_mb.add(margin.bottom)
+        } else {
+            cy += last_mb.value();
+            CollapsedMargin::new(margin.bottom)
+        };
         *y = cy + border.bottom + padding.bottom;
         self.depth -= 1;
-        margin.bottom
+        BlockFlow { margin: margin_bottom, empty: false }
     }
 
     fn image(
@@ -193,7 +341,7 @@ impl<'a> FlowCtx<'a> {
         avail_w: f32,
     ) {
         let em = style.font.size;
-        let margin = resolve::sides(&style.margin, avail_w, em);
+        let margin = resolve::margins(&style.margin, avail_w, em);
         let size = self.image_size(img, &style, avail_w);
         let rect = match size {
             Some(s) => RectF::new(x + margin.left, *y, s.w, s.h),
@@ -571,6 +719,131 @@ impl<'a> FlowCtx<'a> {
         }
     }
 
+    fn metrics(&self, style: &ComputedStyle) -> (f32, f32, f32, f32) {
+        let size = style.font.size;
+        let ascent = self.env.measurer.ascent(style.font.font, size);
+        let descent = self.env.measurer.descent(style.font.font, size);
+        let line_height = resolve::line_px(style.line_height, size);
+        let half = (line_height - ascent - descent) * 0.5;
+        (ascent, descent, ascent + half, descent + half)
+    }
+
+    fn relative_shift(
+        &self,
+        style: &ComputedStyle,
+        parent: &ComputedStyle,
+        align: VerticalAlign,
+    ) -> f32 {
+        match align {
+            VerticalAlign::Baseline | VerticalAlign::Top | VerticalAlign::Bottom => 0.0,
+            VerticalAlign::Len(len) => {
+                let line_height = resolve::line_px(style.line_height, style.font.size);
+                -len.resolve(line_height, style.font.size).unwrap_or(0.0)
+            }
+            VerticalAlign::Super => -parent.font.size / 3.0,
+            VerticalAlign::Sub => parent.font.size / 5.0,
+            VerticalAlign::Middle => {
+                let (ascent, descent, _, _) = self.metrics(style);
+                self.env.measurer.x_height(parent.font.font, parent.font.size) * 0.5
+                    + (ascent - descent) * 0.5
+            }
+            VerticalAlign::TextTop => {
+                let (ascent, _, _, _) = self.metrics(style);
+                let (parent_ascent, _, _, _) = self.metrics(parent);
+                ascent - parent_ascent
+            }
+            VerticalAlign::TextBottom => {
+                let (_, descent, _, _) = self.metrics(style);
+                let (_, parent_descent, _, _) = self.metrics(parent);
+                parent_descent - descent
+            }
+        }
+    }
+
+    fn owner_id(&self, id: NodeId) -> Option<NodeId> {
+        let mut current = Some(id);
+        while let Some(node_id) = current {
+            let node = self.doc.node(node_id);
+            if !node.kind.is_text() && node.style.display == Display::Inline {
+                return Some(node_id);
+            }
+            current = node.parent;
+        }
+        None
+    }
+
+    fn owner_chain(&self, owner: NodeId) -> Vec<NodeId> {
+        let mut chain = Vec::new();
+        let mut current = Some(owner);
+        while let Some(id) = current {
+            let node = self.doc.node(id);
+            chain.push(id);
+            current = node.parent.filter(|&parent| {
+                let node = self.doc.node(parent);
+                !node.kind.is_text() && node.style.display == Display::Inline
+            });
+        }
+        chain.reverse();
+        chain
+    }
+
+    fn line_entries(
+        &self,
+        pieces: &[Piece],
+        line: &[Ch],
+        base_style: ComputedStyle,
+    ) -> Vec<LineBoxEntry> {
+        let (_, _, top_dist, bottom_dist) = self.metrics(&base_style);
+        let mut entries = Vec::new();
+        entries.push(LineBoxEntry {
+            owner: None,
+            align: VerticalAlign::Baseline,
+            shift: 0.0,
+            top_dist,
+            bottom_dist,
+        });
+
+        let mut owners: Vec<NodeId> = Vec::new();
+        for ch in line {
+            if let Some(owner) = self.owner_id(pieces[ch.piece as usize].node) {
+                for id in self.owner_chain(owner) {
+                    if !owners.contains(&id) {
+                        owners.push(id);
+                    }
+                }
+            }
+        }
+
+        for owner in owners {
+            let mut parent_style = base_style;
+            let mut parent_shift = 0.0;
+            let mut entry = None;
+            for id in self.owner_chain(owner) {
+                let style = self.doc.node(id).style;
+                let align = style.text.vertical_align;
+                let (_, _, top_dist, bottom_dist) = self.metrics(&style);
+                let shift = parent_shift + self.relative_shift(&style, &parent_style, align);
+                let current = LineBoxEntry {
+                    owner: Some(id),
+                    align,
+                    shift,
+                    top_dist,
+                    bottom_dist,
+                };
+                parent_style = style;
+                parent_shift = shift;
+                entry = Some(current);
+            }
+            if let Some(entry) = entry {
+                if entry.owner == Some(owner) {
+                    entries.push(entry);
+                }
+            }
+        }
+
+        entries
+    }
+
     fn emit_line(
         &mut self,
         pieces: &[Piece],
@@ -590,22 +863,34 @@ impl<'a> FlowCtx<'a> {
         *order = index.saturating_add(1);
         let brk = base_style.brk;
 
-        let mut max_size = 0.0f32;
-        let mut max_ascent = 0.0f32;
-        let mut max_descent = 0.0f32;
         let mut line_w = 0.0f32;
         for ch in line {
-            let style = pieces[ch.piece as usize].style;
-            max_size = max_size.max(style.font.size);
-            max_ascent = max_ascent.max(self.env.measurer.ascent(style.font.font, style.font.size));
-            max_descent =
-                max_descent.max(self.env.measurer.descent(style.font.font, style.font.size));
             line_w += self.advance(ch, pieces);
         }
 
-        let line_h = resolve::line_px(base_style.line_height, max_size)
-            .max(max_ascent + max_descent)
-            .max(1.0);
+        let mut entries = self.line_entries(pieces, line, base_style);
+        let mut base_top = f32::INFINITY;
+        let mut base_bottom = f32::NEG_INFINITY;
+        let mut tallest = 0.0f32;
+        for entry in &entries {
+            if matches!(entry.align, VerticalAlign::Top | VerticalAlign::Bottom) {
+                tallest = tallest.max(entry.top_dist + entry.bottom_dist);
+            } else {
+                base_top = base_top.min(entry.shift - entry.top_dist);
+                base_bottom = base_bottom.max(entry.shift + entry.bottom_dist);
+            }
+        }
+        let line_h = (base_bottom - base_top).max(tallest).max(1.0);
+        let line_top = base_top;
+        let line_bottom = line_top + line_h;
+        for entry in &mut entries {
+            entry.shift = match entry.align {
+                VerticalAlign::Top => line_top + entry.top_dist,
+                VerticalAlign::Bottom => line_bottom - entry.bottom_dist,
+                _ => entry.shift,
+            };
+        }
+
         let align_pad = match base_style.text.align {
             TextAlign::Center => (w - line_w) * 0.5,
             TextAlign::End => w - line_w,
@@ -615,7 +900,7 @@ impl<'a> FlowCtx<'a> {
 
         let start_x = x0 + indent + align_pad;
         let top = *y;
-        let baseline = top + max_ascent;
+        let baseline = top - line_top;
         let mut cx = start_x;
         let mut runs: Vec<LaidRun> = Vec::new();
         let mut missing: Vec<(NodeId, RectF)> = Vec::new();
@@ -625,6 +910,16 @@ impl<'a> FlowCtx<'a> {
             let piece_id = line[k].piece;
             let piece = &pieces[piece_id as usize];
             let style = piece.style;
+            let shift = self
+                .owner_id(piece.node)
+                .and_then(|owner| {
+                    entries
+                        .iter()
+                        .find(|entry| entry.owner == Some(owner))
+                        .map(|entry| entry.shift)
+                })
+                .unwrap_or(0.0);
+            let run_baseline = baseline + shift;
             let covered = self.env.measurer.covers(line[k].c, style.font.font);
             let glyph_start = self.flow.glyphs.len() as u32;
             let run_x = cx;
@@ -652,7 +947,7 @@ impl<'a> FlowCtx<'a> {
                     color: style.color,
                     dir: style.dir,
                     rotate: Rotate::None,
-                    origin: PointF::new(run_x, baseline),
+                    origin: PointF::new(run_x, run_baseline),
                     glyphs: Span::new(glyph_start, self.flow.glyphs.len() as u32 - glyph_start),
                     text,
                 });

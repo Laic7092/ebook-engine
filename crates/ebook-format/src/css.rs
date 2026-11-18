@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 
 use ebook_ir::{
     Break, Display, Len, LineHeight, ListStyle, NodeId, Rgba8, StyledDoc, Tag, TextAlign,
-    TextTransform, WhiteSpace, WordBreak, WritingMode,
+    TextTransform, VerticalAlign, WhiteSpace, WordBreak, WritingMode,
 };
 
 type Spec = (u16, u16, u16);
@@ -144,11 +144,13 @@ pub fn cascade(doc: &mut StyledDoc, keys: &[ElemKey], sheet: &StyleSheet) {
 }
 
 fn inherit(parent: &ebook_ir::ComputedStyle) -> ebook_ir::ComputedStyle {
+    let mut text = parent.text;
+    text.vertical_align = VerticalAlign::Baseline;
     ebook_ir::ComputedStyle {
         font: parent.font,
         color: parent.color,
         line_height: parent.line_height,
-        text: parent.text,
+        text,
         writing_mode: parent.writing_mode,
         dir: parent.dir,
         ..ebook_ir::ComputedStyle::default()
@@ -298,6 +300,19 @@ fn apply(style: &mut ebook_ir::ComputedStyle, decl: &Decl, parent_size: f32) {
                 "uppercase" => TextTransform::Uppercase,
                 "lowercase" => TextTransform::Lowercase,
                 _ => TextTransform::None,
+            }
+        }
+        "vertical-align" => {
+            style.text.vertical_align = match value {
+                "baseline" => VerticalAlign::Baseline,
+                "super" => VerticalAlign::Super,
+                "sub" => VerticalAlign::Sub,
+                "top" => VerticalAlign::Top,
+                "middle" => VerticalAlign::Middle,
+                "bottom" => VerticalAlign::Bottom,
+                "text-top" => VerticalAlign::TextTop,
+                "text-bottom" => VerticalAlign::TextBottom,
+                other => parse_len(other).map(VerticalAlign::Len).unwrap_or_default(),
             }
         }
         "writing-mode" => {

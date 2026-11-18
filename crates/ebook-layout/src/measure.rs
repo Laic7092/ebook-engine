@@ -5,6 +5,10 @@ pub trait TextMeasurer {
     fn ascent(&self, font: FontId, size: f32) -> f32;
     fn descent(&self, font: FontId, size: f32) -> f32;
 
+    fn x_height(&self, _font: FontId, size: f32) -> f32 {
+        size * 0.5
+    }
+
     fn covers(&self, _ch: char, _font: FontId) -> bool {
         true
     }

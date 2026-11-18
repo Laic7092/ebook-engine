@@ -229,6 +229,20 @@ pub enum Break {
     Avoid,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum VerticalAlign {
+    #[default]
+    Baseline,
+    Super,
+    Sub,
+    Top,
+    Middle,
+    Bottom,
+    TextTop,
+    TextBottom,
+    Len(Len),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BreakPolicy {
     pub before: Break,
@@ -273,6 +287,7 @@ pub struct TextStyle {
     pub word_break: WordBreak,
     pub hyphens: bool,
     pub transform: TextTransform,
+    pub vertical_align: VerticalAlign,
 }
 
 impl Default for TextStyle {
@@ -286,6 +301,7 @@ impl Default for TextStyle {
             word_break: WordBreak::Normal,
             hyphens: false,
             transform: TextTransform::None,
+            vertical_align: VerticalAlign::Baseline,
         }
     }
 }
