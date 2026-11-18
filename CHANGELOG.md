@@ -7,19 +7,80 @@
 
 ### Added
 
-- `scripts/check.sh`：fmt、clippy（只报告 warning）、test、`xtask all` 一键闸门。
+**IR 1.2 / 1.3**
+
+- `Glyph.ch`：字形到原文字节的映射，命中测试与选区不再靠宽度反推。
+- `Op::Link`：链接热区按行发射，与 `LineBox` 同形；渲染默认不画，SVG 输出 `<a>`。
+- `Issue` / `IssueCode`：可恢复问题的诊断流（缺字、缺图、尺寸依赖内容、超限），
+  与 `Op::Unresolved` / `DirtyBlock` 互补。
+- `Limits`（`max_nodes` / `max_depth` / `max_text_bytes` / `max_pages` /
+  `max_lines` / `max_image_pixels`）与 `LayoutResult.truncated`：超限返回合法截断 IR。
+- `LayoutStats` 与 `LayoutResult::stats` / `stats_with_doc`；CLI `--stats` 打印页数、
+  行数、字形数、op 数、IR 字节与估算内存。
+
+**排版**
+
+- `Layout::layout_with`（带 `LayoutOptions`）与 `Layout::layout_parallel`：
+  一次调用内的 `thread::scope`，输出与串行逐字节相同；`parallel` feature 在 wasm 关闭。
+- `Reader`：命中、最近行回退、行/页查询、进度、锚点、链接、越界夹取。
+- `Selection` / `SelectionRect` / `Reader::selection_text`：跨行跨页选区，矩形是页内坐标，
+  反向选择自动 normalize，原文按 UTF-8 边界吸附。
+- `TextMeasurer::shape` 与 `ShapeGlyph`：同字体文本整形成字形序列（默认逐字实现，
+  `FontBook` 用 rustybuzz：kerning / ligature / 簇首字节偏移）。
+- 双向文本：`unicode-bidi` 按 UAX #9 求段内级，按簇做视觉重排；`GlyphRun.dir` 与
+  `LineBox.dir` 分离。
+- 断字：`Hyphenator` 接口 + 内置英文 ushyphmax（Liang 算法），由宿主通过
+  `TextMeasurer::hyphenator()` 注入；没有词典时 `hyphens: auto` 等同 `none`。
+- `TextRules`：成对标点挤压、行末标点悬挂、中西文自动间距三个独立开关，默认全关；
+  出处与浏览器差异见 [docs/text-rules.md](docs/text-rules.md)。
+- 行内图片与 ruby：不再静默丢节点；尺寸未知时占位并记诊断。
+
+**缓存与并发**
+
+- 新增 `ebook-cache`：以输入指纹为键的有界 LRU（`LayoutCache`），
+  `CacheStats { hits, misses, evictions }`；指纹覆盖文档/样式/文本/图片/字体/约束/策略版本。
+- 确定性并行：任务只写自己的结果槽，按输入下标拼回；没有线程池、全局队列或 `thread_local`。
+
+**格式层**
+
+- TOC（EPUB3 nav / EPUB2 NCX）、章节链接、资源清单（图片/字体/样式）、
+  书目元数据（作者/出版者/语言/日期/标识符）。
+- 格式层诊断：`EpubIssueCode`（缺 spine 项、缺资源、XHTML 损坏、未支持 CSS、
+  nav/ncx 损坏、重复 id、越界路径、重复 manifest、TOC 目标缺失）。
+
+**质量与文档**
+
+- `scripts/check.sh`：fmt、clippy `-D warnings`、test、`xtask all` 一键闸门。
 - `scripts/bench.sh` 与 `scripts/bench_baseline.txt`：layout / raster / IR codec 的
-  中位耗时基线，超过 `BENCH_TOL`（默认 1.15×）退出 1。
+  中位耗时基线，超过 `BENCH_TOL`（默认 1.15×）退出 1；基线记录采集机器与 rustc 版本。
 - `xtask bench`：`std::time::Instant` 采样，输出 `name<TAB>median_ns`。
 - `.github/workflows/ci.yml`：stable + wasm32，缓存 `~/.cargo` 与 `target`，
-  跑 fmt / clippy / test / `xtask all` / `xtask size`。
-- `docs/api.md`、`docs/design.md`、`docs/limits.md`：公开契约、不变量与限额。
+  跑 fmt / clippy `-D warnings` / test / `xtask all` / `xtask size`。
+- `docs/api.md`、`docs/design.md`、`docs/limits.md`、`docs/text-rules.md`：
+  公开契约、两遍式设计、限额与中文文本政策。
+- `crates/ebook-layout/tests/fuzz.rs`（1000 份随机文档）、
+  `crates/ebook-raster/tests/fuzz.rs`（1000 页随机 op）、
+  `crates/ebook-format/tests/fuzz_like.rs`（1000 次变异）：
+  不 panic、不越界、重复执行逐字节/逐像素相同。
 
 ### Changed
 
-- README 增加 CI badge、脚本入口、验证矩阵与“不做”边界。
-- clippy 暂不启用 `-D warnings`，warning 数量作为指标；crate 源码统一清理
-  留给后续提交。
+- IR 1.1 → 1.3：新字段只在结构体末尾追加；IR 仍是 native 与 wasm 之间唯一的字节契约，
+  `web/decode.js` / `web/encode.js` 与 `xtask contract` 同步。
+- 分页改为明确的两遍式：flow 只做断行，paginate 只做页起点与切片；
+  `Page.origin` 仍是排版流坐标，改分页不重写 op。
+- 整形从“逐字 advance”改为可选 `shape`：`StubMeasurer` 走默认实现，golden 不受影响。
+- clippy 在全 workspace 清零并启用 `-D warnings`；少数属于并行分支路径的
+  风格 warning 用带理由的包级 `allow` 收口。
+- README 增加 CI badge、脚本入口、验证矩阵、能力清单与“不做”边界，
+  并把文档入口补到 `docs/text-rules.md`。
+- bench 基线按 rustybuzz 之后的实现重新采集。
+
+### Fixed
+
+- 选区文本按 UTF-8 边界向外吸附，不再切出半个字符。
+- 超限结果不再产生悬空字形区间：截断后 `display.glyphs` 收敛到仍被行引用的最大下标。
+- 链接/选区/进度的 wasm 查询在页号或位置越界时返回 `null` 字段，而不是 panic。
 
 ## [0.1.0] - 2026-11-18
 
