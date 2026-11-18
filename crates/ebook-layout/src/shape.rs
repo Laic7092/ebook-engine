@@ -30,6 +30,8 @@ pub(crate) struct Cluster {
     pub(crate) advance: f32,
     /// 簇首字符在原文里的绝对字节偏移。
     pub(crate) ch: u32,
+    /// 自动间距加在这个簇之后的空隙；行末会被收回，不计入行宽。
+    pub(crate) gap: f32,
 }
 
 /// 逐字 advance 的整形实现：默认行为，也是没有字体时的兜底。
@@ -117,6 +119,7 @@ pub(crate) fn shape_run(
             glyph_len: (end - index).min(u16::MAX as usize) as u16,
             advance,
             ch: abs_head,
+            gap: 0.0,
         });
         let cluster_index = (clusters.len() - 1) as u32;
         for _ in first_char..next_head.min(starts.len()) {
@@ -134,6 +137,7 @@ pub(crate) fn shape_run(
             glyph_len: 0,
             advance: 0.0,
             ch: abs.get(head).copied().unwrap_or(0),
+            gap: 0.0,
         });
         char_cluster.push((clusters.len() - 1) as u32);
     }

@@ -312,6 +312,20 @@ impl FontSpec {
     }
 }
 
+/// 中文/日文排版政策。零值 = 规范默认：可选政策一律关闭。
+///
+/// 出处见 `crates/ebook-layout/src/punct.rs`：CSS Text Module Level 4
+/// (`text-spacing-trim` / `hanging-punctuation`)、CLREQ §3.2/§3.3、JLREQ §3.1/§3.2。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextRules {
+    /// 成对标点各收半宽（`text-spacing-trim: normal` 的可判定部分）。
+    pub spacing_trim: bool,
+    /// 行末标点悬挂（`hanging-punctuation: allow-end`）。
+    pub hanging_punctuation: bool,
+    /// 中西文/中数字之间加 1/4 em 空隙（CLREQ §3.3 建议项，不是 CSS 初始值）。
+    pub autospacing: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TextStyle {
     pub align: TextAlign,
@@ -323,6 +337,9 @@ pub struct TextStyle {
     pub hyphens: bool,
     pub transform: TextTransform,
     pub vertical_align: VerticalAlign,
+    /// 中文排版政策。旧数据缺这个字段时按规范默认（全关）解码。
+    #[serde(default)]
+    pub rules: TextRules,
 }
 
 impl Default for TextStyle {
@@ -337,6 +354,7 @@ impl Default for TextStyle {
             hyphens: false,
             transform: TextTransform::None,
             vertical_align: VerticalAlign::Baseline,
+            rules: TextRules::default(),
         }
     }
 }

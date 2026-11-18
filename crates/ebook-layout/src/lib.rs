@@ -6,6 +6,7 @@ mod linebreak;
 mod linebreak_table;
 mod measure;
 mod paginate;
+mod punct;
 mod resolve;
 mod shape;
 

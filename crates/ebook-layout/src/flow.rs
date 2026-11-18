@@ -636,6 +636,7 @@ impl<'a> FlowCtx<'a> {
                         glyph_len: 0,
                         advance,
                         ch: pieces[ch.piece as usize].span.start + ch.off,
+                        gap: 0.0,
                     });
                 }
                 map.extend((0..(j - i) as u32).map(|local| base + local));
@@ -646,6 +647,64 @@ impl<'a> FlowCtx<'a> {
                 ch.head = k == 0 || map[k] != map[k - 1];
             }
             i = j;
+        }
+    }
+
+    /// 给一个簇减半宽：改簇宽，并把差值写回末字形，量到的和画出来的同步。
+    fn trim_cluster(shaped: &mut Shaped, cluster: u32, delta: f32) {
+        let slot = &mut shaped.clusters[cluster as usize];
+        let delta = delta.min(slot.advance).max(0.0);
+        if delta <= 0.0 {
+            return;
+        }
+        slot.advance -= delta;
+        let start = slot.glyph_start as usize;
+        let end = start + slot.glyph_len as usize;
+        crate::shape::pin_cluster(&mut shaped.glyphs[start..end], slot.advance);
+    }
+
+    /// 成对标点挤压：相邻两个全角标点之间收半宽，规则表在 `punct.rs`。
+    ///
+    /// 只压拥有空白半边的那一个（开标点压左、闭标点压右），所以一对最多少
+    /// 半宽；这里不挪字形墨迹，`Glyph.dx` 只表达前进宽度。
+    fn apply_trim(&self, chars: &[Ch], shaped: &mut Shaped, em: f32) {
+        let half = em * 0.5;
+        for pair in chars.windows(2) {
+            let (left, right) = (pair[0], pair[1]);
+            if !left.head || !right.head || left.c == '\n' || right.c == '\n' {
+                continue;
+            }
+            let Some(target) = crate::punct::trim_target(left.c, right.c) else {
+                continue;
+            };
+            let trimmed = match target {
+                crate::punct::Trim::Left => left,
+                crate::punct::Trim::Right => right,
+            };
+            Self::trim_cluster(shaped, trimmed.cluster, half);
+        }
+    }
+
+    /// 中西文自动间距：在表意文字与拉丁字母/数字之间加 1/4 em。
+    ///
+    /// 空隙挂在**左**字符的簇上，所以行首永远不会有空隙；行末的空隙在
+    /// `emit_line` 里收回，保证"不插在行首行尾"。
+    fn apply_autospacing(&self, chars: &[Ch], shaped: &mut Shaped, em: f32) {
+        let gap = em * 0.25;
+        for pair in chars.windows(2) {
+            let (left, right) = (pair[0], pair[1]);
+            if !left.head || !right.head || left.c == '\n' || right.c == '\n' {
+                continue;
+            }
+            if !crate::punct::needs_autospacing(left.c, right.c) {
+                continue;
+            }
+            let slot = &mut shaped.clusters[left.cluster as usize];
+            slot.advance += gap;
+            slot.gap += gap;
+            let start = slot.glyph_start as usize;
+            let end = start + slot.glyph_len as usize;
+            crate::shape::pin_cluster(&mut shaped.glyphs[start..end], slot.advance);
         }
     }
 
@@ -684,6 +743,23 @@ impl<'a> FlowCtx<'a> {
 
         let base_style = container;
         let em = base_style.font.size;
+
+        // 中文排版政策是段落级的：块上没有就取任意一个内联片段上打开的开关
+        // （政策是文档级设置，宿主可能挂在 body 也可能挂在 span 上）。
+        let mut rules = base_style.text.rules;
+        for piece in pieces {
+            let piece_rules = piece.style.text.rules;
+            rules.spacing_trim |= piece_rules.spacing_trim;
+            rules.hanging_punctuation |= piece_rules.hanging_punctuation;
+            rules.autospacing |= piece_rules.autospacing;
+        }
+        if rules.spacing_trim {
+            self.apply_trim(&chars, &mut shaped, em);
+        }
+        if rules.autospacing {
+            self.apply_autospacing(&chars, &mut shaped, em);
+        }
+
         let indent = base_style
             .text
             .indent
@@ -728,7 +804,17 @@ impl<'a> FlowCtx<'a> {
             } else {
                 0.0
             };
-            if !nowrap && used + adv > w + 0.001 && i > line_start {
+            // 行末悬挂：闭标点最多探出右边界半宽，只影响"放没放下"，
+            // 字形坐标不动，所以这里只放宽 fit 判定。
+            let mut fits = used + adv <= w + 0.001;
+            if !fits && rules.hanging_punctuation && i > line_start && chars[i].head {
+                if let Some(hang) = crate::punct::hang_amount(chars[i].c, adv) {
+                    if used + adv - hang <= w + 0.001 {
+                        fits = true;
+                    }
+                }
+            }
+            if !nowrap && !fits && i > line_start {
                 let brk = last_break
                     .filter(|&b| b > line_start && b <= i)
                     .unwrap_or(i);
@@ -1091,6 +1177,12 @@ impl<'a> FlowCtx<'a> {
                 line_w += shaped.clusters[ch.cluster as usize].advance;
             }
         }
+        // 自动间距不插在行尾：最后一个簇的空隙在行宽里收回。
+        let end_cluster = line.iter().rev().find(|ch| ch.head).map(|ch| ch.cluster);
+        let gap_cut = end_cluster
+            .map(|cluster| shaped.clusters[cluster as usize].gap)
+            .unwrap_or(0.0);
+        line_w -= gap_cut;
 
         let mut entries = self.line_entries(pieces, line, base_style);
         let mut base_top = f32::INFINITY;
@@ -1177,6 +1269,11 @@ impl<'a> FlowCtx<'a> {
                 }
                 if line[current].head {
                     let cluster = shaped.clusters[line[current].cluster as usize];
+                    let cut = if Some(line[current].cluster) == end_cluster {
+                        gap_cut
+                    } else {
+                        0.0
+                    };
                     if covered {
                         let start = cluster.glyph_start as usize;
                         let end = start + cluster.glyph_len as usize;
@@ -1190,9 +1287,14 @@ impl<'a> FlowCtx<'a> {
                         }
                         if cluster.glyph_len > 0 {
                             ends.push((self.flow.glyphs.len() as u32 - 1, line[current].c == ' '));
+                            if cut != 0.0 {
+                                if let Some(last) = self.flow.glyphs.last_mut() {
+                                    last.dx -= cut;
+                                }
+                            }
                         }
                     }
-                    cx += cluster.advance;
+                    cx += cluster.advance - cut;
                 }
                 logical.push(current);
                 k += 1;
