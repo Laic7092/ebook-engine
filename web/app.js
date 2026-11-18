@@ -81,27 +81,23 @@ function drawUnresolved(item, ox, oy) {
 function drawImage(item, ox, oy) {
   const r = shifted(item.rect, ox, oy);
   ctx.save();
-  ctx.fillStyle = "#edf1f4";
-  ctx.fillRect(r.x, r.y, r.w, r.h);
-  ctx.strokeStyle = "#98a5b1";
-  ctx.lineWidth = 1;
-  ctx.strokeRect(r.x + 0.5, r.y + 0.5, Math.max(0, r.w - 1), Math.max(0, r.h - 1));
-  ctx.fillStyle = "#74818e";
-  ctx.font = fontOf(11);
-  ctx.textAlign = "center";
-  ctx.fillText(`image ${item.id}`, r.x + r.w / 2, r.y + r.h / 2 + 4);
-  ctx.restore();
-}
-
-function drawLink(item, ox, oy) {
-  const r = shifted(item.rect, ox, oy);
-  ctx.save();
-  ctx.strokeStyle = "rgba(35,95,150,0.45)";
+  ctx.beginPath();
+  ctx.rect(r.x, r.y, r.w, r.h);
+  ctx.clip();
+  ctx.strokeStyle = "#d0d0d0";
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(r.x, r.y + r.h - 1);
-  ctx.lineTo(r.x + r.w, r.y + r.h - 1);
+  const first = Math.floor((r.x + r.y) / 8) * 8;
+  const last = r.x + r.y + r.w + r.h;
+  for (let line = first; line <= last; line += 8) {
+    ctx.moveTo(line - r.y, r.y);
+    ctx.lineTo(line - (r.y + r.h), r.y + r.h);
+  }
   ctx.stroke();
+  ctx.strokeStyle = "#999999";
+  ctx.setLineDash([4, 4]);
+  ctx.strokeRect(r.x + 0.5, r.y + 0.5, Math.max(0, r.w - 1), Math.max(0, r.h - 1));
+  ctx.setLineDash([]);
   ctx.restore();
 }
 
@@ -160,8 +156,16 @@ function drawOp(op, ox, oy) {
     drawImage(op, ox, oy);
   } else if (op.type === "unresolved") {
     drawUnresolved(op.unresolved, ox, oy);
-  } else if (op.type === "link") {
-    drawLink(op, ox, oy);
+  } else if (op.type === "clip") {
+    const r = shifted(op.rect, ox, oy);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(r.x, r.y, r.w, r.h);
+    ctx.clip();
+    for (const child of op.ops) {
+      drawOp(child, ox, oy);
+    }
+    ctx.restore();
   }
 }
 

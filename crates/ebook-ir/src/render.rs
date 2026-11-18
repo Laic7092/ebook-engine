@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use crate::doc::ImageId;
 use crate::font::FontId;
 use crate::geom::{RectF, Rgba8, SizeF};
-use crate::layout::{BorderBox, Fit, Glyph, GlyphRun, LayoutResult, LinkTarget, Unresolved};
+use crate::layout::{BorderBox, Fit, Glyph, GlyphRun, LayoutResult, Unresolved};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct GlyphBitmap {
@@ -57,7 +57,8 @@ pub trait Surface {
     fn border(&mut self, border: &BorderBox);
     fn image(&mut self, id: ImageId, rect: RectF, fit: Fit, res: &mut dyn Resources);
     fn unresolved(&mut self, unresolved: &Unresolved);
-    fn link(&mut self, rect: RectF, target: &LinkTarget);
+    fn push_clip(&mut self, _rect: RectF) {}
+    fn pop_clip(&mut self) {}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

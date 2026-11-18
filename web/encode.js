@@ -166,20 +166,6 @@ function writeUnresolved(w, value) {
   w.varint(value.reason);
 }
 
-function writeLinkTarget(w, value) {
-  if (value.type === "spine") {
-    w.varint(0);
-    w.varint(value.spine);
-    return;
-  }
-  if (value.type === "external") {
-    w.varint(1);
-    w.string(value.href);
-    return;
-  }
-  throw new Error(`bad link target ${value.type}`);
-}
-
 function writeOp(w, value) {
   if (value.type === "glyphRun") {
     w.varint(0);
@@ -209,10 +195,10 @@ function writeOp(w, value) {
     writeUnresolved(w, value.unresolved);
     return;
   }
-  if (value.type === "link") {
+  if (value.type === "clip") {
     w.varint(5);
     writeRect(w, value.rect);
-    writeLinkTarget(w, value.target);
+    w.vec(value.ops, writeOp);
     return;
   }
   throw new Error(`bad op type ${value.type}`);
