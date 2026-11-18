@@ -84,6 +84,8 @@ struct Ch {
     cluster: u32,
     /// 簇首字符：只有它贡献行宽，也只有它产字形。
     head: bool,
+    /// UAX #9 的嵌入级：偶数 LTR、奇数 RTL。
+    level: u8,
 }
 
 const NO_CLUSTER: u32 = u32::MAX;
@@ -478,6 +480,7 @@ impl<'a> FlowCtx<'a> {
                         piece: pi as u16,
                         cluster: NO_CLUSTER,
                         head: true,
+                        level: 0,
                     });
                     prev_space = false;
                 }
@@ -510,6 +513,7 @@ impl<'a> FlowCtx<'a> {
                                 piece: pi as u16,
                                 cluster: NO_CLUSTER,
                                 head: true,
+                                level: 0,
                             }),
                             TextTransform::Uppercase => {
                                 for t in c.to_uppercase() {
@@ -519,6 +523,7 @@ impl<'a> FlowCtx<'a> {
                                         piece: pi as u16,
                                         cluster: NO_CLUSTER,
                                         head: true,
+                                        level: 0,
                                     });
                                 }
                             }
@@ -530,6 +535,7 @@ impl<'a> FlowCtx<'a> {
                                         piece: pi as u16,
                                         cluster: NO_CLUSTER,
                                         head: true,
+                                        level: 0,
                                     });
                                 }
                             }
@@ -562,8 +568,13 @@ impl<'a> FlowCtx<'a> {
             let style = pieces[piece_id as usize].style;
             let font = self.font_for(&chars[i], pieces);
             let covered = self.env.measurer.covers(chars[i].c, font);
+            let level = chars[i].level;
             let mut j = i + 1;
-            while j < chars.len() && chars[j].c != '\n' && chars[j].piece == piece_id {
+            while j < chars.len()
+                && chars[j].c != '\n'
+                && chars[j].piece == piece_id
+                && chars[j].level == level
+            {
                 let next = self.font_for(&chars[j], pieces);
                 if next != font || self.env.measurer.covers(chars[j].c, next) != covered {
                     break;
@@ -651,8 +662,20 @@ impl<'a> FlowCtx<'a> {
         if chars.is_empty() {
             return;
         }
+        self.resolve_bidi(&mut chars, container.dir);
         let mut shaped = Shaped::default();
         self.shape_chars(pieces, &mut chars, &mut shaped);
+        // 一个簇必须同级：跨级簇在重排时会被拆散，取簇首的级并灌回整簇。
+        let mut index = 0usize;
+        while index < chars.len() {
+            let head = chars[index].level;
+            let cluster = chars[index].cluster;
+            index += 1;
+            while index < chars.len() && chars[index].cluster == cluster {
+                chars[index].level = head;
+                index += 1;
+            }
+        }
 
         let block = self.next_block;
         self.next_block += 1;
@@ -982,11 +1005,64 @@ impl<'a> FlowCtx<'a> {
         entries
     }
 
-    /// 行的绘制顺序：逻辑下标序列。
+    /// 按 UAX #9 的级给整段文本定方向（L1 的行尾空白复位由库负责）。
     ///
-    /// 本轮（双向文本接入前）就是自然顺序；UAX #9 重排在这里替换成按级重排。
+    /// 段落方向来自 `Dir`，逐字符的级存进 `Ch.level`，后面的整形分组和
+    /// 行内重排都只看这一个值，不再回头看样式。
+    fn resolve_bidi(&self, chars: &mut [Ch], base: Dir) {
+        if chars.is_empty() {
+            return;
+        }
+        let mut text = String::with_capacity(chars.len());
+        let mut starts: Vec<usize> = Vec::with_capacity(chars.len());
+        for ch in chars.iter() {
+            starts.push(text.len());
+            text.push(ch.c);
+        }
+        let level = if base == Dir::Rtl {
+            unicode_bidi::Level::rtl()
+        } else {
+            unicode_bidi::Level::ltr()
+        };
+        let info = unicode_bidi::BidiInfo::new(&text, Some(level));
+        for (index, ch) in chars.iter_mut().enumerate() {
+            ch.level = info
+                .levels
+                .get(starts[index])
+                .map(|level| level.number())
+                .unwrap_or(level.number());
+        }
+    }
+
+    /// 行的绘制顺序：逻辑下标按 UAX #9 L2 重排成视觉顺序。
+    ///
+    /// 重排以**簇**为单位，所以合字/组合字符不会被拆开；展开时簇内仍按逻辑
+    /// 顺序，`Glyph.dx` 依次累加就是行内视觉位置。
     fn visual_order(&self, line: &[Ch]) -> Vec<usize> {
-        (0..line.len()).collect()
+        let mut heads: Vec<(usize, unicode_bidi::Level)> = Vec::new();
+        for (index, ch) in line.iter().enumerate() {
+            if ch.head {
+                let level = unicode_bidi::Level::new(ch.level)
+                    .unwrap_or_else(|_| unicode_bidi::Level::ltr());
+                heads.push((index, level));
+            }
+        }
+        if heads.len() <= 1 {
+            return (0..line.len()).collect();
+        }
+        let levels: Vec<unicode_bidi::Level> = heads.iter().map(|(_, level)| *level).collect();
+        let order = unicode_bidi::BidiInfo::reorder_visual(&levels);
+        let mut out = Vec::with_capacity(line.len());
+        for &unit in &order {
+            let head = heads[unit].0;
+            let cluster = line[head].cluster;
+            let mut index = head;
+            while index < line.len() && line[index].cluster == cluster {
+                out.push(index);
+                index += 1;
+            }
+        }
+        out
     }
 
     fn emit_line(
@@ -1082,6 +1158,7 @@ impl<'a> FlowCtx<'a> {
             let run_baseline = baseline + shift;
             let font = self.font_for(&line[at], pieces);
             let covered = self.env.measurer.covers(line[at].c, font);
+            let rtl = line[at].level % 2 == 1;
             let glyph_start = self.flow.glyphs.len() as u32;
             let run_x = cx;
             let mut logical: Vec<usize> = Vec::new();
@@ -1092,7 +1169,10 @@ impl<'a> FlowCtx<'a> {
                 }
                 let next_font = self.font_for(&line[current], pieces);
                 let next_covered = self.env.measurer.covers(line[current].c, next_font);
-                if next_font != font || next_covered != covered {
+                if next_font != font
+                    || next_covered != covered
+                    || (line[current].level % 2 == 1) != rtl
+                {
                     break;
                 }
                 if line[current].head {
@@ -1127,7 +1207,7 @@ impl<'a> FlowCtx<'a> {
                     font,
                     size: style.font.size,
                     color: style.color,
-                    dir: style.dir,
+                    dir: if rtl { Dir::Rtl } else { Dir::Ltr },
                     rotate: Rotate::None,
                     origin: PointF::new(run_x, run_baseline),
                     glyphs: Span::new(glyph_start, self.flow.glyphs.len() as u32 - glyph_start),
