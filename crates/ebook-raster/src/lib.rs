@@ -306,6 +306,8 @@ impl Renderer for RgbaSurface {
         surface: &mut dyn Surface,
         res: &mut dyn Resources,
     ) -> Result<(), RenderError> {
+        let size = surface.size();
+        surface.rect(ebook_ir::RectF::new(0.0, 0.0, size.w, size.h), Rgba8::WHITE);
         ebook_render::paint(ir, page, surface, res)
     }
 }

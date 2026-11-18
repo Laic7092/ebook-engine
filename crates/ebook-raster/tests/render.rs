@@ -1,7 +1,7 @@
 use ebook_format::xhtml::{build, NoAssets};
 use ebook_ir::{
     BorderBox, EdgesF, Fit, FontId, GlyphBitmap, GlyphRun, ImageData, ImageId, LayoutResult, Op,
-    RectF, Resources, Rgba8, SidesF, StyledDoc, Unresolved, UnresolvedReason,
+    RectF, Renderer, Resources, Rgba8, SidesF, StyledDoc, Unresolved, UnresolvedReason,
 };
 use ebook_layout::{layout, LayoutEnv, NoImageSizes, PageConstraint, StubMeasurer};
 use ebook_raster::RgbaSurface;
@@ -76,6 +76,20 @@ fn first_run(ir: &LayoutResult) -> GlyphRun {
 fn render(ir: &LayoutResult, surface: &mut RgbaSurface) {
     let mut res = FixedResources::new();
     surface.render_page(ir, 0, &mut res).expect("render");
+}
+
+#[test]
+fn renderer_fills_target_white() {
+    let ir = document_ir("A");
+    let mut target = RgbaSurface::new(200, 200);
+    target.clear(Rgba8::BLACK);
+    let mut renderer = RgbaSurface::new(200, 200);
+    let mut res = FixedResources::new();
+    renderer
+        .render(&ir, 0, &mut target, &mut res)
+        .expect("render");
+    assert_eq!(target.pixel(199, 199), Some(Rgba8::WHITE));
+    assert!(target.pixels().iter().any(|pixel| *pixel != Rgba8::WHITE));
 }
 
 #[test]
@@ -154,6 +168,50 @@ fn border_and_image_are_painted() {
     assert_eq!(surface.pixel(64, 40), Some(Rgba8::new(0, 255, 0, 255)));
     assert_eq!(surface.pixel(60, 44), Some(Rgba8::new(0, 0, 255, 255)));
     assert_eq!(surface.pixel(64, 44), Some(Rgba8::new(255, 255, 255, 255)));
+}
+
+#[test]
+fn offscreen_ops_leave_the_canvas_white() {
+    let mut ir = document_ir("A");
+    ir.display.ops.clear();
+    ir.display.glyphs.clear();
+    ir.runs.lines.clear();
+    ir.pages.truncate(1);
+    ir.pages[0].ops = ebook_ir::Span::EMPTY;
+    ir.pages[0].lines = ebook_ir::Span::EMPTY;
+
+    let ops = [
+        Op::Rect {
+            rect: RectF::new(-100.0, -100.0, 10.0, 10.0),
+            color: Rgba8::new(255, 0, 0, 255),
+        },
+        Op::Rect {
+            rect: RectF::new(100.0, 100.0, 10.0, 10.0),
+            color: Rgba8::new(0, 255, 0, 255),
+        },
+        Op::Border(BorderBox {
+            rect: RectF::new(-50.0, -50.0, 20.0, 20.0),
+            width: SidesF::all(2.0),
+            color: Rgba8::new(0, 0, 255, 255),
+        }),
+        Op::Image {
+            id: 0,
+            rect: RectF::new(100.0, 100.0, 5.0, 5.0),
+            fit: Fit::Fill,
+        },
+        Op::Unresolved(Unresolved {
+            node: 0,
+            rect: RectF::new(-100.0, -100.0, 50.0, 50.0),
+            reason: UnresolvedReason::ImagePending,
+        }),
+    ];
+    for op in ops {
+        append_op(&mut ir, op);
+    }
+
+    let mut surface = RgbaSurface::new(32, 32);
+    render(&ir, &mut surface);
+    assert!(surface.pixels().iter().all(|pixel| *pixel == Rgba8::WHITE));
 }
 
 #[test]

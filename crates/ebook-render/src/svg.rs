@@ -5,6 +5,8 @@ use ebook_ir::{
     Renderer, Resources, Rgba8, SizeF, Surface, Unresolved,
 };
 
+pub use crate::paint::paint;
+
 pub struct SvgRenderer;
 
 impl Renderer for SvgRenderer {
