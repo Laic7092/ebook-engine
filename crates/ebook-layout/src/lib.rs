@@ -2,6 +2,7 @@
 extern crate alloc;
 
 mod flow;
+mod hyphen;
 mod linebreak;
 mod linebreak_table;
 mod measure;
@@ -17,6 +18,7 @@ use ebook_ir::{
     LineBox, Op, RectF, RunMap, SizeF, StyledDoc, UnresolvedReason, WritingMode, IR_VERSION,
 };
 
+pub use hyphen::{English, Hyphenator};
 pub use measure::{ShapeGlyph, StubMeasurer, TextMeasurer};
 pub use shape::shape_per_char;
 

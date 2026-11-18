@@ -3,6 +3,7 @@ use alloc::vec::Vec;
 use ebook_ir::{FontId, FontSpec};
 
 pub use crate::shape::ShapeGlyph;
+use crate::Hyphenator;
 
 pub trait TextMeasurer {
     fn advance(&self, ch: char, font: FontId, size: f32) -> f32;
@@ -32,6 +33,14 @@ pub trait TextMeasurer {
         } else {
             0xFFFD
         }
+    }
+
+    /// 断字词典。默认没有：`hyphens: auto` 只有在宿主注入词典后才生效。
+    ///
+    /// 放在 `TextMeasurer` 上而不是新增 `LayoutEnv` 字段，是为了不改变
+    /// `LayoutEnv` 的形状（宿主侧只实现一次度量接口就够）。
+    fn hyphenator(&self) -> Option<&dyn Hyphenator> {
+        None
     }
 
     fn select(&self, spec: &FontSpec) -> FontId {

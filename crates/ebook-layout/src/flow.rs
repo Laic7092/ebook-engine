@@ -708,6 +708,98 @@ impl<'a> FlowCtx<'a> {
         }
     }
 
+    /// 找出可断字的词内断点，并给词内每个字符记一个"预留连字符宽度"。
+    ///
+    /// 预留让断行时不必回头重排：只要在词内断行，行末的 `-` 一定放得下。
+    fn hyphen_points(
+        &self,
+        pieces: &[Piece],
+        chars: &[Ch],
+        hyphenator: &dyn crate::Hyphenator,
+        points: &mut Vec<usize>,
+        reserve: &mut [f32],
+    ) {
+        let mut word = String::new();
+        let mut word_start = 0usize;
+        let mut i = 0usize;
+        let mut breaks: Vec<u16> = Vec::new();
+        loop {
+            let inside = i < chars.len() && chars[i].c.is_ascii_alphabetic();
+            if inside {
+                if word.is_empty() {
+                    word_start = i;
+                }
+                word.push(chars[i].c);
+                i += 1;
+                continue;
+            }
+            if !word.is_empty() {
+                if word.len() >= 5 {
+                    hyphenator.breaks(&word, &mut breaks);
+                    if !breaks.is_empty() {
+                        let style = pieces[chars[word_start].piece as usize].style;
+                        let font = self.font_for(&chars[word_start], pieces);
+                        let dash = self
+                            .env
+                            .measurer
+                            .advance('-', font, style.font.size)
+                            .max(0.0);
+                        if dash > 0.0 {
+                            for slot in &mut reserve[word_start..i] {
+                                *slot = dash;
+                            }
+                        }
+                        for at in &breaks {
+                            let index = word_start + *at as usize;
+                            if index < i && chars[index].head {
+                                points.push(index);
+                            }
+                        }
+                    }
+                }
+                word.clear();
+            }
+            if i >= chars.len() {
+                break;
+            }
+            i += 1;
+        }
+    }
+
+    /// 在 `line_start..=want` 里找最靠后、且"文本 + 连字符"放得下的断字点。
+    ///
+    /// 连字符的宽度取词内预留值（`reserve`），它是按词首字符的样式量的。
+    fn fit_hyphen(
+        chars: &[Ch],
+        shaped: &Shaped,
+        points: &[usize],
+        reserve: &[f32],
+        line_start: usize,
+        want: usize,
+        w: f32,
+    ) -> Option<usize> {
+        let mut candidates: Vec<usize> = Vec::new();
+        candidates.push(want);
+        for &point in points.iter().rev() {
+            if point < want && point > line_start {
+                candidates.push(point);
+            }
+        }
+        for at in candidates {
+            let mut width = 0.0f32;
+            for ch in &chars[line_start..at] {
+                if ch.head {
+                    width += shaped.clusters[ch.cluster as usize].advance;
+                }
+            }
+            let dash = reserve.get(at.saturating_sub(1)).copied().unwrap_or(0.0);
+            if width + dash <= w + 0.001 {
+                return Some(at);
+            }
+        }
+        None
+    }
+
     fn break_lines(
         &mut self,
         pieces: &[Piece],
@@ -760,6 +852,25 @@ impl<'a> FlowCtx<'a> {
             self.apply_autospacing(&chars, &mut shaped, em);
         }
 
+        // 断字：只有 hyphens:auto 且宿主注入了词典才找断点。断点落在字符边界、
+        // 不拆簇；词典是入参，所以同一份输入必然得到同一组断点。
+        let hyphens_on = (base_style.text.hyphens
+            || pieces.iter().any(|piece| piece.style.text.hyphens))
+            && self.env.measurer.hyphenator().is_some();
+        let mut hyphen_points: Vec<usize> = Vec::new();
+        let mut hyphen_reserve: Vec<f32> = alloc::vec![0.0; chars.len()];
+        if hyphens_on {
+            if let Some(hyphenator) = self.env.measurer.hyphenator() {
+                self.hyphen_points(
+                    pieces,
+                    &chars,
+                    hyphenator,
+                    &mut hyphen_points,
+                    &mut hyphen_reserve,
+                );
+            }
+        }
+        let hyphen_points = hyphen_points;
         let indent = base_style
             .text
             .indent
@@ -788,6 +899,7 @@ impl<'a> FlowCtx<'a> {
                     y,
                     w,
                     pad,
+                    false,
                     base_style,
                     block,
                     &mut order,
@@ -815,9 +927,44 @@ impl<'a> FlowCtx<'a> {
                 }
             }
             if !nowrap && !fits && i > line_start {
-                let brk = last_break
-                    .filter(|&b| b > line_start && b <= i)
-                    .unwrap_or(i);
+                let normal = last_break.filter(|&b| b > line_start && b <= i);
+                let hyphen = hyphen_points
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|&b| b > line_start && b <= i);
+                let (brk, hyphenated) = match (normal, hyphen) {
+                    (Some(n), Some(h)) if h > n => {
+                        match Self::fit_hyphen(
+                            &chars,
+                            &shaped,
+                            &hyphen_points,
+                            &hyphen_reserve,
+                            line_start,
+                            h,
+                            w,
+                        ) {
+                            Some(at) => (at, true),
+                            None => (n, false),
+                        }
+                    }
+                    (Some(n), _) => (n, false),
+                    (None, Some(h)) => {
+                        match Self::fit_hyphen(
+                            &chars,
+                            &shaped,
+                            &hyphen_points,
+                            &hyphen_reserve,
+                            line_start,
+                            h,
+                            w,
+                        ) {
+                            Some(at) => (at, true),
+                            None => (i, false),
+                        }
+                    }
+                    (None, None) => (i, false),
+                };
                 let pad = if first { indent } else { 0.0 };
                 self.emit_line(
                     pieces,
@@ -827,6 +974,7 @@ impl<'a> FlowCtx<'a> {
                     y,
                     w,
                     pad,
+                    hyphenated,
                     base_style,
                     block,
                     &mut order,
@@ -865,6 +1013,7 @@ impl<'a> FlowCtx<'a> {
                 y,
                 w,
                 pad,
+                false,
                 base_style,
                 block,
                 &mut order,
@@ -1160,6 +1309,7 @@ impl<'a> FlowCtx<'a> {
         y: &mut f32,
         w: f32,
         indent: f32,
+        hyphen: bool,
         base_style: ComputedStyle,
         block: u32,
         order: &mut u16,
@@ -1183,6 +1333,20 @@ impl<'a> FlowCtx<'a> {
             .map(|cluster| shaped.clusters[cluster as usize].gap)
             .unwrap_or(0.0);
         line_w -= gap_cut;
+
+        // 行末连字符：独立一个 run，跟在最后一个字形后面。
+        let last_char = line[line.len() - 1];
+        let hyphen_style = pieces[last_char.piece as usize].style;
+        let hyphen_font = self.font_for(&last_char, pieces);
+        let hyphen_advance = if hyphen {
+            self.env
+                .measurer
+                .advance('-', hyphen_font, hyphen_style.font.size)
+                .max(0.0)
+        } else {
+            0.0
+        };
+        line_w += hyphen_advance;
 
         let mut entries = self.line_entries(pieces, line, base_style);
         let mut base_top = f32::INFINITY;
@@ -1321,6 +1485,45 @@ impl<'a> FlowCtx<'a> {
                     RectF::new(run_x, top, (cx - run_x).max(0.0), line_h),
                 ));
             }
+        }
+
+        if hyphen {
+            let piece = &pieces[last_char.piece as usize];
+            let shift = self
+                .owner_id(piece.node)
+                .and_then(|owner| {
+                    entries
+                        .iter()
+                        .find(|entry| entry.owner == Some(owner))
+                        .map(|entry| entry.shift)
+                })
+                .unwrap_or(0.0);
+            let run_x = cx;
+            let covered = self.env.measurer.covers('-', hyphen_font);
+            if covered {
+                let glyph_start = self.flow.glyphs.len() as u32;
+                // 连字符不属于原文：`ch` 停在行末最后一个字符上，选区不会越界。
+                let ch = (src_end - src_start).saturating_sub(1);
+                self.flow.glyphs.push(Glyph {
+                    gid: self.env.measurer.glyph_id('-', hyphen_font),
+                    dx: hyphen_advance,
+                    dy: 0.0,
+                    ch,
+                });
+                runs.push(LaidRun {
+                    font: hyphen_font,
+                    size: hyphen_style.font.size,
+                    color: hyphen_style.color,
+                    dir: Dir::Ltr,
+                    rotate: Rotate::None,
+                    origin: PointF::new(run_x, baseline + shift),
+                    glyphs: Span::new(glyph_start, 1),
+                    text: String::from("-"),
+                });
+            } else {
+                missing.push((piece.node, RectF::new(run_x, top, hyphen_advance, line_h)));
+            }
+            cx += hyphen_advance;
         }
 
         let anchor = self
