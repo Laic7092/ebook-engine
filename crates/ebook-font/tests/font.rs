@@ -232,3 +232,30 @@ fn centroid(bitmap: &ebook_ir::GlyphBitmap, start: usize, end: usize) -> Option<
         Some((sum / weight as f64) as f32)
     }
 }
+
+#[test]
+fn ligature_merges_glyphs() {
+    let (book, id) = fixture();
+    let mut out = Vec::new();
+    book.shape("fi", id, 32.0, &mut out);
+    // test.ttf 有 fi 合字：两个字符合成一个字形。
+    assert_eq!(out.len(), 1, "fi should be one ligature glyph");
+
+    let mut ffi = Vec::new();
+    let total = book.shape("ffi", id, 32.0, &mut ffi);
+    let naive = book.advance('f', id, 32.0) * 2.0 + book.advance('i', id, 32.0);
+    assert_eq!(ffi.len(), 1, "ffi should be one ligature glyph");
+    assert!(
+        total < naive - 0.01,
+        "ffi {total} should be narrower than {naive}"
+    );
+}
+
+#[test]
+fn kerning_tightens_pairs() {
+    let (book, id) = fixture();
+    let mut out = Vec::new();
+    let total = book.shape("AV", id, 32.0, &mut out);
+    let naive = book.advance('A', id, 32.0) + book.advance('V', id, 32.0);
+    assert!(total < naive - 0.01, "AV {total} should kern below {naive}");
+}

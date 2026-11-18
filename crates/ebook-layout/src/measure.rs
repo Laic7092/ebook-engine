@@ -1,9 +1,21 @@
+use alloc::vec::Vec;
+
 use ebook_ir::{FontId, FontSpec};
+
+pub use crate::shape::ShapeGlyph;
 
 pub trait TextMeasurer {
     fn advance(&self, ch: char, font: FontId, size: f32) -> f32;
     fn ascent(&self, font: FontId, size: f32) -> f32;
     fn descent(&self, font: FontId, size: f32) -> f32;
+
+    /// 把一段同字体文本整形成字形序列，返回总前进宽度。
+    ///
+    /// 默认实现逐字 advance（即升级前的行为），所以没有字体的 `StubMeasurer`
+    /// 仍然能排版。字形按逻辑顺序追加到 `out`，`ch` 是簇首字符的字节偏移。
+    fn shape(&self, text: &str, font: FontId, size: f32, out: &mut Vec<ShapeGlyph>) -> f32 {
+        crate::shape::shape_per_char(self, text, font, size, out)
+    }
 
     fn x_height(&self, _font: FontId, size: f32) -> f32 {
         size * 0.5

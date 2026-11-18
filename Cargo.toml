@@ -26,6 +26,8 @@ ebook-font = { path = "crates/ebook-font" }
 ebook-raster = { path = "crates/ebook-raster" }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
+rustybuzz = { version = "0.20", default-features = false, features = ["std"] }
+unicode-bidi = { version = "0.3", default-features = false, features = ["hardcoded-data"] }
 
 [profile.release]
 opt-level = "z"

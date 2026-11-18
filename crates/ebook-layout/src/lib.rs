@@ -7,6 +7,7 @@ mod linebreak_table;
 mod measure;
 mod paginate;
 mod resolve;
+mod shape;
 
 use alloc::vec::Vec;
 
@@ -15,7 +16,8 @@ use ebook_ir::{
     LineBox, Op, RectF, RunMap, SizeF, StyledDoc, UnresolvedReason, WritingMode, IR_VERSION,
 };
 
-pub use measure::{StubMeasurer, TextMeasurer};
+pub use measure::{ShapeGlyph, StubMeasurer, TextMeasurer};
+pub use shape::shape_per_char;
 
 pub trait ResourceView {
     fn image_size(&self, id: ImageId) -> Option<SizeF>;
