@@ -290,6 +290,18 @@ impl LayoutResult {
             .find(|p| line >= p.lines.start && line < p.lines.end())
     }
 
+    /// 全局行号 → 行盒。越界返回 `None`。
+    pub fn line(&self, index: u32) -> Option<&LineBox> {
+        self.runs.lines.get(index as usize)
+    }
+
+    /// 一页里的所有行盒（按行号顺序）。页越界时返回空切片。
+    pub fn page_lines(&self, page: u32) -> &[LineBox] {
+        self.page(page)
+            .and_then(|p| self.runs.lines.get(p.lines.as_range()))
+            .unwrap_or(&[])
+    }
+
     /// 页内坐标 → 排版流坐标。逆着 `paint` 的平移：
     /// `页内 = 流 - origin + inset`，所以 `流 = 页内 + origin - inset`。
     fn flow_point(&self, page: u32, p: PointF) -> Option<PointF> {
