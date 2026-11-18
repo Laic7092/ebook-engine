@@ -4,6 +4,19 @@ pub trait TextMeasurer {
     fn advance(&self, ch: char, font: FontId, size: f32) -> f32;
     fn ascent(&self, font: FontId, size: f32) -> f32;
     fn descent(&self, font: FontId, size: f32) -> f32;
+
+    fn covers(&self, _ch: char, _font: FontId) -> bool {
+        true
+    }
+
+    fn glyph_id(&self, ch: char, _font: FontId) -> u16 {
+        let v = ch as u32;
+        if v <= 0xFFFF {
+            v as u16
+        } else {
+            0xFFFD
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]

@@ -71,6 +71,7 @@ pub struct GlyphRun {
     pub color: Rgba8,
     pub origin: PointF,
     pub glyphs: Span,
+    pub text: String,
     pub dir: Dir,
     pub rotate: Rotate,
 }

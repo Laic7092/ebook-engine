@@ -1,15 +1,15 @@
+use alloc::string::String;
 use alloc::vec::Vec;
 use ebook_ir::{
     Anchor, Break, ComputedStyle, Dir, Display, DirtyBlock, Fit, FontId, Glyph, ImageId, NodeId,
     NodeKind, Op, PointF, RectF, Rotate, Span, TextAlign, Unresolved, UnresolvedReason,
-    WhiteSpace, WordBreak,
+    WhiteSpace,
 };
 
-use crate::measure::is_wide;
 use crate::resolve;
 use crate::{LayoutEnv, PageConstraint};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct LaidRun {
     pub(crate) font: FontId,
     pub(crate) size: f32,
@@ -18,6 +18,7 @@ pub(crate) struct LaidRun {
     pub(crate) rotate: Rotate,
     pub(crate) origin: PointF,
     pub(crate) glyphs: Span,
+    pub(crate) text: String,
 }
 
 #[derive(Clone, Debug)]
@@ -327,27 +328,6 @@ impl<'a> FlowCtx<'a> {
         (base + spacing).max(0.0)
     }
 
-    fn can_break(&self, chars: &[Ch], i: usize, pieces: &[Piece]) -> bool {
-        let a = chars[i];
-        let b = chars[i + 1];
-        if b.c == '\n' {
-            return true;
-        }
-        if pieces[a.piece as usize].style.text.word_break == WordBreak::BreakAll {
-            return true;
-        }
-        if a.c == ' ' {
-            return true;
-        }
-        if b.c == ' ' {
-            return false;
-        }
-        if is_wide(a.c) || is_wide(b.c) {
-            return !no_start(b.c) && !no_end(a.c);
-        }
-        matches!(a.c, '-' | '/' | '\u{2013}' | '\u{2014}')
-    }
-
     fn break_lines(
         &mut self,
         pieces: &[Piece],
@@ -408,7 +388,13 @@ impl<'a> FlowCtx<'a> {
                 continue;
             }
             used += adv;
-            if i + 1 < chars.len() && self.can_break(&chars, i, pieces) {
+            if i + 1 < chars.len()
+                && crate::linebreak::can_break(
+                    chars[i].c,
+                    chars[i + 1].c,
+                    pieces[chars[i].piece as usize].style.text.word_break,
+                )
+            {
                 last_break = Some(i + 1);
             }
             i += 1;
@@ -487,6 +473,7 @@ impl<'a> FlowCtx<'a> {
             let style = pieces[piece_id as usize].style;
             let glyph_start = self.flow.glyphs.len() as u32;
             let run_x = cx;
+            let mut text = String::new();
             while k < line.len() && line[k].piece == piece_id {
                 let adv = self.advance(&line[k], pieces);
                 self.flow.glyphs.push(Glyph {
@@ -494,6 +481,7 @@ impl<'a> FlowCtx<'a> {
                     dx: adv,
                     dy: 0.0,
                 });
+                text.push(line[k].c);
                 cx += adv;
                 k += 1;
             }
@@ -505,6 +493,7 @@ impl<'a> FlowCtx<'a> {
                 rotate: Rotate::None,
                 origin: PointF::new(run_x, baseline),
                 glyphs: Span::new(glyph_start, self.flow.glyphs.len() as u32 - glyph_start),
+                text,
             });
         }
 
@@ -551,22 +540,4 @@ fn glyph_id(c: char) -> u16 {
     } else {
         0xFFFD
     }
-}
-
-fn no_start(c: char) -> bool {
-    matches!(
-        c,
-        '\u{3001}' | '\u{3002}' | '\u{FF0C}' | '\u{FF0E}' | '\u{FF1A}' | '\u{FF1B}' | '\u{FF1F}'
-            | '\u{FF01}' | '\u{FF09}' | '\u{300D}' | '\u{300F}' | '\u{3011}' | '\u{300B}'
-            | '\u{3009}' | '\u{201D}' | '\u{2019}' | '\u{2026}' | '\u{2014}' | '\u{00B7}'
-            | '\u{FF05}' | '\u{FF3D}' | '\u{FF5D}'
-    )
-}
-
-fn no_end(c: char) -> bool {
-    matches!(
-        c,
-        '\u{FF08}' | '\u{300C}' | '\u{300E}' | '\u{3010}' | '\u{300A}' | '\u{3008}' | '\u{201C}'
-            | '\u{2018}' | '\u{FF3B}' | '\u{FF5B}'
-    )
 }

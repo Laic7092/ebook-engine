@@ -98,16 +98,8 @@ impl Surface for SvgSurface {
         self.size
     }
 
-    fn glyph_run(&mut self, run: &GlyphRun, glyphs: &[Glyph], _res: &mut dyn Resources) {
-        let mut text = alloc::string::String::new();
-        for glyph in glyphs {
-            if let Some(c) = core::char::from_u32(glyph.gid as u32) {
-                if !c.is_control() {
-                    text.push(c);
-                }
-            }
-        }
-        if text.is_empty() {
+    fn glyph_run(&mut self, run: &GlyphRun, _glyphs: &[Glyph], _res: &mut dyn Resources) {
+        if run.text.is_empty() {
             return;
         }
         let _ = write!(
@@ -117,7 +109,7 @@ impl Surface for SvgSurface {
         );
         self.push_color(run.color);
         self.out.push_str(" font-family=\"sans-serif\">");
-        push_escaped(&mut self.out, &text);
+        push_escaped(&mut self.out, &run.text);
         self.out.push_str("</text>");
     }
 

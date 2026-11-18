@@ -7,6 +7,8 @@ members = [
   "crates/ebook-render",
   "crates/ebook-cli",
   "crates/ebook-web",
+  "crates/ebook-font",
+  "crates/ebook-raster",
   "xtask",
 ]
 
@@ -20,6 +22,8 @@ ebook-ir = { path = "crates/ebook-ir" }
 ebook-layout = { path = "crates/ebook-layout" }
 ebook-format = { path = "crates/ebook-format" }
 ebook-render = { path = "crates/ebook-render" }
+ebook-font = { path = "crates/ebook-font" }
+ebook-raster = { path = "crates/ebook-raster" }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 

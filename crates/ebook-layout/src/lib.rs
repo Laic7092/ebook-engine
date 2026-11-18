@@ -2,6 +2,7 @@
 extern crate alloc;
 
 mod flow;
+mod linebreak;
 mod measure;
 mod paginate;
 mod resolve;
@@ -104,6 +105,7 @@ impl Layout {
                             color: run.color,
                             origin: run.origin,
                             glyphs: run.glyphs,
+                            text: run.text.clone(),
                             dir: run.dir,
                             rotate: run.rotate,
                         }));

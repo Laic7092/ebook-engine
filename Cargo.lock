@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "ab_glyph_rasterizer"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -40,6 +46,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ebook-font"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph_rasterizer",
+ "ebook-ir",
+ "ebook-layout",
+ "ttf-parser",
+]
+
+[[package]]
 name = "ebook-format"
 version = "0.1.0"
 dependencies = [
@@ -61,6 +77,13 @@ name = "ebook-layout"
 version = "0.1.0"
 dependencies = [
  "ebook-format",
+ "ebook-ir",
+]
+
+[[package]]
+name = "ebook-raster"
+version = "0.1.0"
+dependencies = [
  "ebook-ir",
 ]
 
@@ -212,6 +235,12 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "ttf-parser"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 
 [[package]]
 name = "unicode-ident"
