@@ -4,6 +4,7 @@ extern crate alloc;
 pub mod css;
 mod entities;
 pub mod epub;
+pub mod image;
 pub mod txt;
 pub mod xhtml;
 pub mod zip;
@@ -11,7 +12,7 @@ pub mod zip;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use ebook_ir::{FontStyle, ImageId, NodeId, StyledDoc};
+use ebook_ir::{Anchor, FontStyle, NodeId, StyledDoc};
 
 /// 目录项。`spine` 是 `Book::spine` 的下标；目标不在阅读顺序里时等于
 /// [`TocEntry::NO_SPINE`]（例如封面或 `linear="no"` 的注释页）。
@@ -51,6 +52,14 @@ pub struct ChapterLinks {
     pub href: String,
 }
 
+/// 章节里收集到的一个带 `id` 的元素。fragment 跳转靠它把 `#id` 换成
+/// `Anchor`；IR 里没有 id 表，所以由格式层在解析这一章时一并返回。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChapterAnchor {
+    pub id: String,
+    pub anchor: Anchor,
+}
+
 /// OPF manifest 里的一个资产。`href` 是归档内路径（相对路径已解析）。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Asset {
@@ -58,11 +67,13 @@ pub struct Asset {
     pub media_type: String,
 }
 
-/// 图片资产。`ImageMeta` 目前没有 `src` 字段，所以图片路径由格式层单独维护；
-/// `id` 按 manifest 中图片项的出现顺序分配，等 IR 补上 `src` 后按 id 对回。
+/// manifest 里的一个图片资产。
+///
+/// 这里**没有** `ImageId`：`ImageId` 是章内 `StyledDoc::images` 的下标，只有
+/// 章节上下文才知道；manifest 顺序与章内出现顺序是两套编号，混用会让同一张图
+/// 指向另一张。图片字节统一按 `ImageMeta::src`（归档内路径）查找。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ImageAsset {
-    pub id: ImageId,
     pub href: String,
     pub media_type: String,
 }
@@ -153,8 +164,15 @@ impl Book {
         })
     }
 
-    pub fn image(&self, id: ImageId) -> Option<&ImageAsset> {
-        self.images.iter().find(|image| image.id == id)
+    pub fn image(&self, href: &str) -> Option<&ImageAsset> {
+        self.images
+            .iter()
+            .find(|image| image.href == href)
+            .or_else(|| {
+                self.images
+                    .iter()
+                    .find(|image| image.href.eq_ignore_ascii_case(href))
+            })
     }
 
     pub fn spine_index(&self, href: &str) -> Option<usize> {

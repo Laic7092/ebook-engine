@@ -461,6 +461,12 @@ pub struct ImageMeta {
     pub size: Option<SizeF>,
     pub mime: Option<String>,
     pub alt: Option<String>,
+    /// 图片在归档内的路径（由格式层的 resolver 解析，通常是相对包根的路径）。
+    ///
+    /// 这是 `ImageId` 指向本章 `images` 表的唯一标识：宿主按 `src` 找到字节，
+    /// 再交给渲染后端。旧数据缺这个字段时是 `None`（无法定位字节）。
+    #[serde(default)]
+    pub src: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
