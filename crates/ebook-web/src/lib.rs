@@ -3,12 +3,59 @@ pub mod protocol;
 #[cfg(target_arch = "wasm32")]
 mod glue;
 
+use std::fmt::Write as _;
+use std::sync::Mutex;
+
+use ebook_font::FontBook;
+use ebook_format::epub::EpubReader;
+use ebook_format::Book;
 use ebook_ir::{codec, EdgesF};
 use ebook_layout::{Layout, LayoutEnv, NoImageSizes, PageConstraint, StubMeasurer};
+
+static BOOK: Mutex<Option<EpubReader<'static>>> = Mutex::new(None);
+static FONT: Mutex<Option<FontBook>> = Mutex::new(None);
 
 pub fn layout_text(text: &str, width: f32, height: f32, margin: f32) -> Vec<u8> {
     let doc = ebook_format::txt::build(text.as_bytes());
     layout_doc(&doc, width, height, margin)
+}
+
+pub fn open_book(bytes: &[u8]) -> String {
+    let leaked: &'static [u8] = Box::leak(bytes.to_vec().into_boxed_slice());
+    match EpubReader::open(leaked) {
+        Ok(reader) => {
+            let json = book_json(reader.book());
+            *BOOK.lock().unwrap() = Some(reader);
+            json
+        }
+        Err(error) => error_json(&format!("open: {error:?}")),
+    }
+}
+
+pub fn register_font(bytes: &[u8]) -> u32 {
+    let mut font = FontBook::new();
+    match font.add(bytes.to_vec()) {
+        Some(id) => {
+            *FONT.lock().unwrap() = Some(font);
+            id.0 as u32
+        }
+        None => u32::MAX,
+    }
+}
+
+pub fn layout_cached(spine: u32, width: f32, height: f32, margin: f32) -> Vec<u8> {
+    let books = BOOK.lock().unwrap();
+    let Some(reader) = books.as_ref() else {
+        return Vec::new();
+    };
+    let Ok(doc) = reader.chapter(spine as usize) else {
+        return Vec::new();
+    };
+    let font = FONT.lock().unwrap();
+    match font.as_ref() {
+        Some(font) => layout_doc_with(&doc, font, width, height, margin),
+        None => layout_doc(&doc, width, height, margin),
+    }
 }
 
 #[cfg(feature = "epub")]
@@ -32,8 +79,80 @@ pub fn layout_chapter(
 }
 
 fn layout_doc(doc: &ebook_ir::StyledDoc, width: f32, height: f32, margin: f32) -> Vec<u8> {
-    let env = LayoutEnv { measurer: &StubMeasurer, resources: &NoImageSizes };
+    layout_doc_with(doc, &StubMeasurer, width, height, margin)
+}
+
+fn layout_doc_with(
+    doc: &ebook_ir::StyledDoc,
+    measurer: &dyn ebook_layout::TextMeasurer,
+    width: f32,
+    height: f32,
+    margin: f32,
+) -> Vec<u8> {
+    let env = LayoutEnv { measurer, resources: &NoImageSizes };
     let constraint = PageConstraint::new(width, height).with_margin(EdgesF::all(margin));
     let ir = Layout::new().layout(doc, &env, &constraint);
     codec::to_bytes(&ir).unwrap_or_default()
+}
+
+fn error_json(message: &str) -> String {
+    let mut out = String::from("{\"error\":");
+    push_json_str(&mut out, message);
+    out.push('}');
+    out
+}
+
+fn book_json(book: &Book) -> String {
+    let mut out = String::from("{\"title\":");
+    push_json_opt(&mut out, book.title.as_deref());
+    out.push_str(",\"language\":");
+    push_json_opt(&mut out, book.lang.as_deref());
+    out.push_str(",\"lang\":");
+    push_json_opt(&mut out, book.lang.as_deref());
+    out.push_str(",\"spine\":[");
+    for (index, item) in book.spine.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"index\":");
+        let _ = write!(out, "{index}");
+        out.push_str(",\"id\":");
+        push_json_str(&mut out, &item.id);
+        out.push_str(",\"href\":");
+        push_json_str(&mut out, &item.href);
+        out.push_str(",\"mediaType\":");
+        push_json_str(&mut out, &item.media_type);
+        out.push_str(",\"media\":");
+        push_json_str(&mut out, &item.media_type);
+        out.push_str(",\"linear\":");
+        out.push_str(if item.linear { "true" } else { "false" });
+        out.push('}');
+    }
+    out.push_str("]}");
+    out
+}
+
+fn push_json_opt(out: &mut String, value: Option<&str>) {
+    match value {
+        Some(value) => push_json_str(out, value),
+        None => out.push_str("null"),
+    }
+}
+
+fn push_json_str(out: &mut String, value: &str) {
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if (ch as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", ch as u32);
+            }
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
 }

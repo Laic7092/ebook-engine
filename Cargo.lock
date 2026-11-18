@@ -101,6 +101,7 @@ dependencies = [
 name = "ebook-web"
 version = "0.1.0"
 dependencies = [
+ "ebook-font",
  "ebook-format",
  "ebook-ir",
  "ebook-layout",

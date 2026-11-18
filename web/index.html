@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ebook demo</title>
+<style>
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: system-ui, sans-serif; background: #e9edf1; color: #20242a; }
+header { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 12px 18px; background: #ffffff; border-bottom: 1px solid #cbd4dd; }
+header h1 { margin: 0 12px 0 0; font-size: 16px; font-weight: 600; }
+header .book { font-weight: 600; }
+header .meta { color: #65717f; font-size: 13px; }
+header button, header select { font: inherit; padding: 6px 10px; border: 1px solid #aab6c2; background: #f7f9fb; border-radius: 6px; cursor: pointer; }
+header button:hover { background: #eef3f7; }
+main { display: flex; justify-content: center; padding: 24px 12px 40px; }
+canvas { max-width: 100%; height: auto; background: #ffffff; box-shadow: 0 8px 30px rgba(20,30,45,0.16); }
+footer { text-align: center; color: #5e6b78; font-size: 14px; padding-bottom: 28px; }
+#status { color: #65717f; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ebook</h1>
+  <span class="book" id="book-title">loading</span>
+  <span class="meta" id="book-meta"></span>
+  <select id="chapter" aria-label="chapter"></select>
+  <button id="prev">Prev</button>
+  <button id="next">Next</button>
+  <input id="file" type="file" accept=".epub,application/epub+zip">
+  <span id="status"></span>
+</header>
+<main><canvas id="page"></canvas></main>
+<footer id="page-label"></footer>
+<script type="module" src="./app.js"></script>
+</body>
+</html>

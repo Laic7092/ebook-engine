@@ -9,6 +9,29 @@ use crate::{Book, ByteSource, FormatAdapter, FormatError, Probe, SpineItem};
 
 pub struct Epub;
 
+pub struct EpubReader<'a> {
+    zip: ZipArchive<'a>,
+    book: Book,
+}
+
+impl<'a> EpubReader<'a> {
+    pub fn open(raw: &'a [u8]) -> Result<Self, FormatError> {
+        let zip = ZipArchive::parse(raw).map_err(|_| FormatError::Malformed("zip"))?;
+        let opf_path = container_opf(&zip).ok_or(FormatError::Missing("container.xml"))?;
+        let opf = zip.read_text(&opf_path).ok_or(FormatError::Missing("opf"))?;
+        let book = parse_opf(&opf, &opf_path)?;
+        Ok(Self { zip, book })
+    }
+
+    pub fn book(&self) -> &Book {
+        &self.book
+    }
+
+    pub fn chapter(&self, index: usize) -> Result<StyledDoc, FormatError> {
+        chapter_from_zip(&self.zip, &self.book, index)
+    }
+}
+
 impl FormatAdapter for Epub {
     fn name(&self) -> &'static str {
         "epub"
@@ -44,22 +67,30 @@ impl FormatAdapter for Epub {
         book: &Book,
         index: usize,
     ) -> Result<StyledDoc, FormatError> {
-        let item = book.spine.get(index).ok_or(FormatError::OutOfRange)?;
         let raw = src.document().ok_or(FormatError::Missing("epub"))?;
         let zip = ZipArchive::parse(&raw).map_err(|_| FormatError::Malformed("zip"))?;
-        let text = zip
-            .read_text(&item.href)
-            .ok_or(FormatError::Missing("chapter"))?;
-        let mut resolver = ZipAssets {
-            zip: &zip,
-            base: dirname(&item.href).to_string(),
-        };
-        let mut doc = xhtml::build(&text, index as u32, &mut resolver)
-            .map_err(|_| FormatError::Malformed("xhtml"))?;
-        doc.meta.title = book.title.clone();
-        doc.meta.lang = book.lang.clone();
-        Ok(doc)
+        chapter_from_zip(&zip, book, index)
     }
+}
+
+fn chapter_from_zip(
+    zip: &ZipArchive<'_>,
+    book: &Book,
+    index: usize,
+) -> Result<StyledDoc, FormatError> {
+    let item = book.spine.get(index).ok_or(FormatError::OutOfRange)?;
+    let text = zip
+        .read_text(&item.href)
+        .ok_or(FormatError::Missing("chapter"))?;
+    let mut resolver = ZipAssets {
+        zip,
+        base: dirname(&item.href).to_string(),
+    };
+    let mut doc = xhtml::build(&text, index as u32, &mut resolver)
+        .map_err(|_| FormatError::Malformed("xhtml"))?;
+    doc.meta.title = book.title.clone();
+    doc.meta.lang = book.lang.clone();
+    Ok(doc)
 }
 
 struct ZipAssets<'a, 'b> {
