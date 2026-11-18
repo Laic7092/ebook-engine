@@ -1,4 +1,13 @@
 #![cfg_attr(not(test), no_std)]
+// flow.rs 由另一条并行分支持有（硬化任务不改它），下面三条是那里的纯风格
+// warning：拆参数结构体、去掉手写 push 都需要改调用点。等该分支合入后
+// 统一修复，再删掉这段 allow；新代码不要依赖它。
+#![allow(
+    clippy::too_many_arguments,
+    clippy::vec_init_then_push,
+    clippy::neg_cmp_op_on_partial_ord
+)]
+
 extern crate alloc;
 #[cfg(feature = "parallel")]
 extern crate std;

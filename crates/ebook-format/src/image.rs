@@ -208,7 +208,7 @@ pub fn decode_png(bytes: &[u8]) -> Option<ImageData> {
                 });
             }
             b"PLTE" => {
-                for chunk in body.chunks_exact(3) {
+                for chunk in body.chunks(3).take_while(|chunk| chunk.len() == 3) {
                     palette.push([chunk[0], chunk[1], chunk[2]]);
                 }
             }
@@ -248,30 +248,26 @@ pub fn decode_png(bytes: &[u8]) -> Option<ImageData> {
     let count = header.width as usize * header.height as usize;
     match header.color {
         0 => {
-            for index in 0..count {
-                let g = pixels[index];
+            for &g in pixels.iter().take(count) {
                 rgba.extend_from_slice(&[g, g, g, 255]);
             }
         }
         2 => {
-            for index in 0..count {
-                let at = index * 3;
-                rgba.extend_from_slice(&[pixels[at], pixels[at + 1], pixels[at + 2], 255]);
+            for px in pixels.as_chunks::<3>().0.iter().take(count) {
+                rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
             }
         }
         3 => {
-            for index in 0..count {
-                let entry = pixels[index] as usize;
+            for &entry in pixels.iter().take(count) {
+                let entry = entry as usize;
                 let rgb = palette.get(entry).copied().unwrap_or([0, 0, 0]);
                 let a = alpha.get(entry).copied().unwrap_or(255);
                 rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], a]);
             }
         }
         4 => {
-            for index in 0..count {
-                let at = index * 2;
-                let g = pixels[at];
-                rgba.extend_from_slice(&[g, g, g, pixels[at + 1]]);
+            for px in pixels.as_chunks::<2>().0.iter().take(count) {
+                rgba.extend_from_slice(&[px[0], px[0], px[0], px[1]]);
             }
         }
         6 => rgba.append(&mut pixels),

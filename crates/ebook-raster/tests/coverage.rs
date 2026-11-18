@@ -158,7 +158,7 @@ fn supersample(contours: &[Vec<[f32; 2]>], w: usize, h: usize, left: i32, top: i
             crossings.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
             let mut winding = 0i32;
             let mut next = 0usize;
-            for px in 0..w {
+            for (px, hit) in hits.iter_mut().enumerate() {
                 for sx in 0..SS {
                     let x = left as f32 + px as f32 + (sx as f32 + 0.5) * step;
                     while next < crossings.len() && crossings[next].0 <= x {
@@ -166,7 +166,7 @@ fn supersample(contours: &[Vec<[f32; 2]>], w: usize, h: usize, left: i32, top: i
                         next += 1;
                     }
                     if winding != 0 {
-                        hits[px] += 1;
+                        *hit += 1;
                     }
                 }
             }
@@ -222,8 +222,8 @@ fn coverage_matches_supersampling_reference() {
             let w = bitmap.w as usize;
             let h = bitmap.h as usize;
             let want = supersample(&contours, w, h, bitmap.left as i32, bitmap.top as i32);
-            for i in 0..w * h {
-                let err = bitmap.alpha[i].abs_diff(want[i]);
+            for (got, want) in bitmap.alpha.iter().zip(want.iter()).take(w * h) {
+                let err = got.abs_diff(*want);
                 sum_err += err as f64;
                 max_err = max_err.max(err);
             }

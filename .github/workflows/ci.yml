@@ -53,37 +53,19 @@ jobs:
       - name: cargo fmt --all --check
         run: cargo fmt --all --check
 
-      # clippy 不加 -D warnings：warning 数量作为指标，避免并行开发期间
-      # 因机械修复制造无谓冲突。真正阻断的是 error 与后续测试。
-      - name: cargo clippy --workspace --all-targets
-        run: |
-          set -o pipefail
-          cargo clippy --workspace --all-targets 2>&1 | tee clippy.log
-          warnings=$(grep -cE '^warning: ' clippy.log || true)
-          {
-            echo "### clippy warnings: ${warnings}"
-            echo ""
-            echo "只报告，不阻断（本轮不改 crates/ 源码）。"
-          } >>"$GITHUB_STEP_SUMMARY"
+      # clippy 与本地 scripts/check.sh 一致：warning 也阻断。
+      # 少数属于其他并行分支路径的风格 warning 在源码/清单里用带理由的
+      # allow 收口，不在 CI 上放宽。
+      - name: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo test --workspace
         run: cargo test --workspace
 
-      # tests/golden/*.ir 被 *.ir 排除，干净 checkout 里没有快照。
-      # 先生成，再由 contract 用同一批字节验证 JS 解码器。
-      - name: prepare golden IR
-        run: cargo run -p xtask -- bless
-
+      # tests/golden/*.ir 与 tests/golden/pixels.txt 已入库，干净 checkout
+      # 上直接逐字节比较；这里不跑 bless，否则回归会被覆盖成“通过”。
       - name: xtask all (golden / contract / app / pixel / size / parity)
         run: cargo run -p xtask -- all
 
       - name: xtask size
         run: cargo run -p xtask -- size
-
-      - name: upload clippy log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: clippy-log
-          path: clippy.log
-          if-no-files-found: ignore

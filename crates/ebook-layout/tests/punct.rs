@@ -4,8 +4,8 @@
 
 use ebook_ir::doc::FontSpec;
 use ebook_ir::{
-    Anchor, ComputedStyle, Dir, Display, FontId, LayoutResult, Len, LineHeight, Node, NodeId,
-    NodeKind, Op, Rgba8, Span, StyledDoc, Tag, TextRules, TextStyle,
+    Anchor, ComputedStyle, Dir, FontId, LayoutResult, LineHeight, Node, NodeId, NodeKind, Op,
+    Rgba8, Span, StyledDoc, Tag, TextRules, TextStyle,
 };
 use ebook_layout::{layout, LayoutEnv, NoImageSizes, PageConstraint, TextMeasurer};
 
@@ -32,18 +32,16 @@ impl TextMeasurer for Fixed {
 }
 
 fn block_style() -> ComputedStyle {
-    let mut style = ComputedStyle::default();
-    style.display = Display::Block;
-    style.font = FontSpec {
-        font: FontId(0),
-        size: 10.0,
-        weight: 400,
-        ..FontSpec::default()
-    };
-    style.line_height = LineHeight::Px(20.0);
-    style.margin.top = Len::ZERO;
-    style.margin.bottom = Len::ZERO;
-    style
+    ComputedStyle {
+        font: FontSpec {
+            font: FontId(0),
+            size: 10.0,
+            weight: 400,
+            ..FontSpec::default()
+        },
+        line_height: LineHeight::Px(20.0),
+        ..ComputedStyle::default()
+    }
 }
 
 fn inline_style(rules: TextRules) -> ComputedStyle {
@@ -139,8 +137,10 @@ fn trimming_halves_the_quote_pairs() {
     // 他说：“走。”——`：`+`“` 压 `“` 的左半宽，`。`+`”` 压 `”` 的右半宽。
     let body = "他说：“走。”";
     let plain = run(&doc(body, TextRules::default()), 400.0);
-    let mut rules = TextRules::default();
-    rules.spacing_trim = true;
+    let rules = TextRules {
+        spacing_trim: true,
+        ..TextRules::default()
+    };
     let trimmed = run(&doc(body, rules), 400.0);
 
     assert_eq!(plain.runs.lines.len(), 1);
@@ -165,8 +165,10 @@ fn adjacent_brackets_do_not_trim_without_a_pair() {
     // 「你好」没有相邻标点对：挤压开关打开也不改宽度（规则表只压引号类）。
     let body = "「你好」";
     let plain = run(&doc(body, TextRules::default()), 400.0);
-    let mut rules = TextRules::default();
-    rules.spacing_trim = true;
+    let rules = TextRules {
+        spacing_trim: true,
+        ..TextRules::default()
+    };
     let trimmed = run(&doc(body, rules), 400.0);
     assert!((plain.runs.lines[0].rect.w - trimmed.runs.lines[0].rect.w).abs() < 0.01);
 }
@@ -178,8 +180,10 @@ fn hanging_keeps_the_closing_mark_on_the_line() {
     let plain = run(&doc(body, TextRules::default()), 35.0);
     assert_eq!(plain.runs.lines.len(), 2, "不开悬挂时标点被挤到下一行");
 
-    let mut rules = TextRules::default();
-    rules.hanging_punctuation = true;
+    let rules = TextRules {
+        hanging_punctuation: true,
+        ..TextRules::default()
+    };
     let hanging = run(&doc(body, rules), 35.0);
     assert_eq!(hanging.runs.lines.len(), 1);
     // 行盒右边界跟着探出，字形坐标不变。
@@ -194,8 +198,10 @@ fn autospacing_inserts_a_quarter_em_between_cjk_and_latin() {
     // 中(10) 文(10) E n g l i s h(7×5) 混(10) 排(10)
     assert!((plain.runs.lines[0].rect.w - 75.0).abs() < 0.01);
 
-    let mut rules = TextRules::default();
-    rules.autospacing = true;
+    let rules = TextRules {
+        autospacing: true,
+        ..TextRules::default()
+    };
     let spaced = run(&doc(body, rules), 400.0);
     // 两处 1/4 em = 2 × 2.5。
     assert!((spaced.runs.lines[0].rect.w - 80.0).abs() < 0.01);
@@ -203,8 +209,10 @@ fn autospacing_inserts_a_quarter_em_between_cjk_and_latin() {
 
 #[test]
 fn autospacing_is_not_left_at_the_line_end() {
-    let mut rules = TextRules::default();
-    rules.autospacing = true;
+    let rules = TextRules {
+        autospacing: true,
+        ..TextRules::default()
+    };
     let spaced = run(&doc("中a", rules), 10.0);
     assert_eq!(spaced.runs.lines.len(), 2);
     // 行末的空隙收回：中文行仍是 10，不是 12.5。

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# build.sh — 编译 wasm 并生成 web/pkg。
+#
+# 跟随 CARGO_TARGET_DIR：并行 worktree 与 CI 各自指定构建目录时，
+# wasm-bindgen 仍然能找到产物。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # 和 xtask 一致：尊重 CARGO_TARGET_DIR，否则每个 worktree 都得建符号链接。

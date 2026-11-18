@@ -29,7 +29,7 @@ fn page_ir() -> (ebook_ir::LayoutResult, FontBook) {
 #[test]
 fn full_page_render_time_is_printed() {
     let (ir, mut fonts) = page_ir();
-    assert!(ir.pages.len() > 0);
+    assert!(!ir.pages.is_empty());
     let page = ir.page(0).expect("page");
     let mut surface = RgbaSurface::from_page(page);
 

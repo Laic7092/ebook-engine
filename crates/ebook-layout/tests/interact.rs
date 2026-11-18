@@ -13,8 +13,8 @@
 //! margin 10 的变体只用于坐标换算：页内坐标 = 流坐标 + inset。
 
 use ebook_ir::{
-    Anchor, ComputedStyle, Dir, Display, FontId, FontSpec, LayoutResult, Len, LineHeight, Location,
-    Node, NodeId, NodeKind, PointF, RectF, Rgba8, Span, StyledDoc, Tag,
+    Anchor, ComputedStyle, Dir, FontId, FontSpec, LayoutResult, LineHeight, Location, Node, NodeId,
+    NodeKind, PointF, RectF, Rgba8, Span, StyledDoc, Tag,
 };
 use ebook_layout::{
     layout, LayoutEnv, NoImageSizes, PageConstraint, Reader, Selection, SelectionRect, TextMeasurer,
@@ -68,19 +68,17 @@ impl TextMeasurer for Holey {
 }
 
 fn block_style(dir: Dir) -> ComputedStyle {
-    let mut style = ComputedStyle::default();
-    style.display = Display::Block;
-    style.font = FontSpec {
-        font: FontId(0),
-        size: 10.0,
-        weight: 400,
-        ..FontSpec::default()
-    };
-    style.line_height = LineHeight::Px(20.0);
-    style.margin.top = Len::ZERO;
-    style.margin.bottom = Len::ZERO;
-    style.dir = dir;
-    style
+    ComputedStyle {
+        font: FontSpec {
+            font: FontId(0),
+            size: 10.0,
+            weight: 400,
+            ..FontSpec::default()
+        },
+        line_height: LineHeight::Px(20.0),
+        dir,
+        ..ComputedStyle::default()
+    }
 }
 
 fn inline_style(dir: Dir) -> ComputedStyle {

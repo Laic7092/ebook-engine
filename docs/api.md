@@ -5,8 +5,9 @@
 但下面列出的语义（越界返回什么、空输入产出什么、错误如何分类）保持稳定。
 
 - `ebook-ir`：数据结构、IR 编解码、渲染 trait
-- `ebook-layout`：纯排版入口、字体度量与图片尺寸注入
-- `ebook-format`：字节源、格式适配器、章节读取
+- `ebook-layout`：纯排版入口、字体度量与图片尺寸注入、限额、命中/选区/阅读器外观
+- `ebook-cache`：以输入指纹为键的有界 LRU 排版缓存
+- `ebook-format`：字节源、格式适配器、章节读取与诊断
 - `ebook-font`：真实字体度量与光栅化
 - `ebook-render`：op 遍历、SVG 后端
 - `ebook-raster`：整数混合光栅后端
@@ -57,12 +58,14 @@ ByteSource ──format──> StyledDoc ──layout──> LayoutResult ──
 
 ```
 LayoutResult
-├── version: IrVersion       // 1.1
+├── version: IrVersion       // 1.3
 ├── spine: u32               // 与 StyledDoc.meta.spine 一致
 ├── pages: Vec<Page>
 ├── display: DisplayList { ops: Vec<Op>, glyphs: Vec<Glyph> }
 ├── runs: RunMap { lines: Vec<LineBox> }
-└── dirty: Vec<DirtyBlock>
+├── dirty: Vec<DirtyBlock>
+├── issues: Vec<Issue>       // 可恢复问题的诊断流（见 2.3）
+└── truncated: bool          // 因 Limits 截断过；结果仍是合法 IR
 ```
 
 | 结构 | 约定 |
@@ -73,8 +76,10 @@ LayoutResult
 | `Page.inset` | 页边距；`box_size()` = 内容尺寸 + 四边 |
 | `Page.anchor` | 页首锚点，可能为空 |
 | `GlyphRun.glyphs` | 指向 `display.glyphs` 的连续切片 |
-| `LineBox.src` | 对应 `StyledDoc.text` 的源区间，用于选区 |
-| `DirtyBlock` | 需要宿主重排/换字体的块，`reason` 同下 |
+| `LineBox.src` | 对应 `StyledDoc.text` 的源区间，用于选区；整行只有行内图片时该区间没有意义 |
+| `DirtyBlock` | 需要宿主重排/换字体的块，`reason` 见 2.3 |
+| `Issue` | 排版过程中记录的可恢复问题；只记录，不拦截 |
+| `truncated` | `true` 表示命中 `Limits`，内容不完整；页覆盖与行不越界仍然成立 |
 
 页是按顺序切出来的，不是过滤结果。正常排版下：
 
@@ -83,16 +88,43 @@ LayoutResult
 - 所有页的 op 并集恰好覆盖 `display.ops`，行同理
 - 每页至少有一行；空文档可以没有页
 
-### 2.3 问题码表（IssueCode / `UnresolvedReason`）
+### 2.3 问题码表（`UnresolvedReason` / `IssueCode`）
 
-当前版本没有单独的 `IssueCode` 枚举。IR 用 `UnresolvedReason` 同时标记 op
-与脏块，它承担的就是 IssueCode 的角色；其变体顺序就是 postcard/JS 解码的 tag：
+IR 里有两个互补的枚举：
 
-| tag | 变体 | 含义 | 宿主应该做什么 |
+- `UnresolvedReason` 挂在 op 与 `DirtyBlock` 上，告诉**渲染层/宿主**这块内容为什么
+  画不出来；变体顺序就是 postcard/JS 解码的 tag。
+- `IssueCode` 挂在 `LayoutResult.issues` 上，是给**诊断面板**看的分类；它不影响
+  渲染，也不改变几何。
+
+| tag | `UnresolvedReason` | 含义 | 宿主应该做什么 |
 |---:|---|---|---|
 | 0 | `ImagePending` | 图片固有尺寸未知，先按占位盒排版 | 图片到达后带尺寸重排；不要由渲染层猜 |
 | 1 | `FontMissing` | 字体不覆盖该字符（`glyph_id == 0`） | 换字体、回退字体或标记缺字 |
 | 2 | `SizeFromContent` | 尺寸依赖内容，当前无法结算 | 提供尺寸后重排 |
+
+| tag | `IssueCode` | 何时出现 |
+|---:|---|---|
+| 0 | `Other` | 保留给宿主/适配器，排版层当前不产 |
+| 1 | `MissingFont` | 保留；排版层用 `MissingGlyph` 表达缺字 |
+| 2 | `MissingGlyph` | 对应 `UnresolvedReason::FontMissing` 的占位 |
+| 3 | `MissingImage` | 对应 `UnresolvedReason::ImagePending` 的占位 |
+| 4 | `SizeFromContent` | 对应 `UnresolvedReason::SizeFromContent` |
+| 5 | `UnsupportedCss` | 保留给格式层的诊断映射 |
+| 6 | `LimitExceeded` | `detail` 写命中了哪条限额（`max_nodes` / `max_pages` / ...） |
+
+`truncated` 与 `IssueCode` 的关系：
+
+- `truncated == true` 一定伴随至少一条 `IssueCode::LimitExceeded`，`detail` 是限额名。
+- 头部限额（`max_nodes` / `max_depth` / `max_text_bytes`）直接返回**空结果**：
+  没有页、没有 op、没有行，`truncated == true`。
+- 产出侧限额（`max_pages` / `max_lines`）返回已产出部分的**前缀**：页覆盖、
+  行不越界、每行仍在自己的页高内都成立；`display.glyphs` 会截到仍被行引用的
+  最大下标，不留悬空字形。
+- `max_image_pixels` 超预算的图片降级为 `Op::Unresolved{SizeFromContent}` 并记
+  一条 `LimitExceeded`，同样置 `truncated`；其余内容继续排。
+- `truncated == false` 时仍可能有 `MissingGlyph` / `MissingImage` 占位：
+  “不完整”与“超预算”是两件事。
 
 `UnresolvedReason` 出现在两处：
 
@@ -111,6 +143,15 @@ LayoutResult
 | 3 | `Image { id, rect, fit }` | 内容盒，排版流坐标 |
 | 4 | `Unresolved(Unresolved)` | 占位盒，排版流坐标 |
 | 5 | `Clip { rect, ops }` | 裁剪矩形 + 嵌套 op |
+| 6 | `Link { rect, href }` | 链接热区，与行盒同形，排版流坐标 |
+
+`Link` 的语义：
+
+- 排版层只在带 `Node.link` 的行上发射，一行一个（换行就把链接切成多个热区）。
+- `rect` 是**行盒矩形**（`LineBox.rect`），不是文字的墨迹范围；点行间空白不算命中。
+- `href` 是原始属性值，排版层不解析、不改写、不拼基址。
+- 渲染层默认不画（光栅保持透明），SVG 后端输出 `<a>`；命中查询用
+  `Reader::link_at`（页内坐标）。
 
 `Fit`：`Contain=0`、`Cover=1`、`Fill=2`。
 `Rotate`：`None=0`、`Cw90=1`。
@@ -128,6 +169,17 @@ LayoutResult
 | `DisplayList::glyph_slice(span)` | 有效 span | 切片；`span` 越界会 panic |
 | `StyledDoc::node(id)` | 有效 id | 引用；越界会 panic |
 | `Renderer::render(ir, page, ...)` | 任意页号 | 越界 `Err(RenderError::NoSuchPage(page))` |
+| `Reader::hit(page, p)` | 任意页号/坐标 | 页不存在或页内没有行才 `None`；落空时退回本页最近的行 |
+| `Reader::link_at(page, p)` | 任意页号/坐标 | 没命中 `Op::Link` 则 `None` |
+| `Reader::progress(loc)` | 任意位置 | 夹到合法位置后返回 `0..=1`；空文档 `0` |
+| `Reader::page_progress(page)` | 任意页号 | 页不存在或空文档 `0` |
+| `Reader::locate(anchor)` | 任意锚点 | 找不到则 `None` |
+| `Reader::clamp(loc)` | 任意位置 | 夹到最近合法位置；空文档返回 `Location::default()` |
+| `Reader::selection_rects(sel)` | 任意选区 | 空选区返回空 `Vec`；矩形是页内坐标 |
+| `Reader::selection_text(doc, sel)` | 任意选区 | 空选区/空文档返回空串 |
+| `LayoutCache::layout(doc, env, c)` | 任意输入 | 总返回 `&LayoutResult`；容量 0 按 1 处理 |
+| `Hyphenator::breaks(word, out)` | 任意词 | 非字母词得到空 `out`；偏移在 `(0, word.len())`、升序 |
+| `IssueCode` / `Issue.detail` | 任意 | `detail` 是 `Option<String>`；限额名写在这里 |
 
 排版结果是**全函数**：`ebook-layout::layout` 不返回 `Result`，任何文档都会得到
 一个可序列化的 `LayoutResult`。空文档得到零页或最多一页；极小页面被夹到
@@ -168,13 +220,19 @@ LayoutResult
 
 ### 3.3 版本与兼容策略
 
-当前 `IR_VERSION = 1.1`。
+当前 `IR_VERSION = 1.3`。
 
 - **major 表示字节布局。** 增删字段、改字段顺序、增删/重排枚举变体、改整数宽度，
-  都必须升 major。旧解码器遇到不同 major 直接拒绝。
-- **minor 表示布局不变、语义澄清或文档修正。** `read_header` 不因 minor 不同而
-  拒绝。由于 postcard 是位置编码而不是自描述格式，任何真实字段变化都不能只升
-  minor。
+  必须升 major。旧解码器遇到不同 major 直接拒绝。
+- **minor 表示相容的字段增补。** 新字段只在结构体**末尾追加**，旧版本语义不变：
+  1.2 加 `Glyph.ch` / `Op::Link` / `Issue` / `Limits`（`Limits` 不进字节流），
+  1.3 加 `LayoutResult.truncated`（`LayoutStats` 只是内存里的估算，不序列化）。
+  `read_header` 不因 minor 不同而拒绝。
+- **但 postcard 是位置编码，不是自描述格式。** 旧解码器无法“跳过未知字段”，
+  所以 minor 增补后 native 与 JS 必须**一起**升级；`decode` 依赖结构体形状，
+  JS 侧额外把 header 与 body 的 `(major, minor)` 逐字段比对。把 minor 当
+  “解码器可以不管”的信号是错误的。
+- **重命名/重新排序/改语义必须升 major。** 仅改文档措辞不需要。
 - **JS 侧是手写解码器。** 改 `crates/ebook-ir` 的结构体必须同步改
   `web/decode.js`、`web/encode.js`，并让 `xtask contract` 通过。contract 的做法
   是把 golden IR 解出来再编回去，要求逐字节还原。
@@ -188,10 +246,19 @@ LayoutResult
 
 ```rust
 pub fn layout(doc: &StyledDoc, env: &LayoutEnv<'_>, c: &PageConstraint) -> LayoutResult
+
+impl Layout {
+    pub fn layout(&mut self, doc, env, c) -> LayoutResult;
+    pub fn layout_with(&mut self, doc, env, c, opts: &LayoutOptions) -> LayoutResult;
+    pub fn layout_parallel(&mut self, doc, env, c, workers: usize,
+                           opts: &LayoutOptions) -> LayoutResult;
+}
 ```
 
-`Layout::new().layout(...)` 等价。没有 I/O、没有全局状态、没有时钟与随机数。
-同一个 `(doc, env, c)` 必须逐字节产出同一个 `LayoutResult`。
+`Layout::new().layout(...)` 等价于 `layout(...)`。没有 I/O、没有全局状态、没有
+时钟与随机数。同一个 `(doc, env, c)` 必须逐字节产出同一个 `LayoutResult`。
+`layout_with` 只多一层预算；`layout_parallel` 的输出必须是串行结果的逐字节副本
+（详见 [design.md §12](design.md#12-并发只在一次调用内)）。
 
 ### 4.2 `TextMeasurer`
 
@@ -200,13 +267,24 @@ pub fn layout(doc: &StyledDoc, env: &LayoutEnv<'_>, c: &PageConstraint) -> Layou
 | `advance(ch, font, size)` | 无 | 返回逻辑宽度，单位 px |
 | `ascent(font, size)` | 无 | 基线以上高度 |
 | `descent(font, size)` | 无 | 基线以下高度 |
+| `shape(text, font, size, out)` | 逐字 `advance`（`shape_per_char`） | 把一段**同字体**文本整形成字形序列，返回总前进宽度；字形按逻辑顺序追加，`ShapeGlyph.ch` 是簇首字符在该段文本内的字节偏移 |
 | `x_height(font, size)` | `0.5 * size` | `vertical-align: middle` 用 |
 | `covers(ch, font)` | `true` | 字体是否覆盖字符 |
 | `glyph_id(ch, font)` | Unicode 低 16 位，超出用 `0xFFFD` | 缺字返回 0 |
+| `hyphenator()` | `None` | 返回断字词典；`hyphens: auto` 只在非 `None` 时生效 |
 | `select(spec)` | `spec.font` | 按字体栈选主字体 |
 | `select_char(spec, ch)` | `select(spec)` | 按字符选能覆盖的字体 |
 
-`FontBook` 实现了真实版本；`StubMeasurer` 只用于测试与确定性 golden。
+`shape` 的契约（实现真实整形时必须遵守）：
+
+- `out` 只追加，不要求调用方先清空；`ch` 落在簇首字符的**字节边界**上。
+- 字形按逻辑顺序：RTL 由实现内部翻回逻辑序，视觉重排由排版层的 `visual_order`
+  统一做（按簇，不拆合字）。
+- 返回的总宽必须等于 `out` 里字形前进宽度之和，否则量到的和画出来的会漂移。
+
+`FontBook` 实现了真实版本（rustybuzz：kerning / ligature，`ch` 是簇首字节偏移）；
+`StubMeasurer` 只用于测试与确定性 golden，走默认逐字实现，因此升级前后的
+`StubMeasurer` 路径逐字节一致。
 
 ### 4.3 `ResourceView`
 
@@ -216,6 +294,11 @@ fn image_size(&self, id: ImageId) -> Option<SizeF>;
 
 返回 `None` 表示图片尺寸未知。排版层不会等待加载，而是按占位尺寸排出
 `Op::Unresolved{ImagePending}` 与 `DirtyBlock`。`NoImageSizes` 永远返回 `None`。
+
+同一个查询也用于**块级与行内图片**的像素预算（`Limits::max_image_pixels`）：
+资源层不知道尺寸的图片不参与累加（它已经按 `ImagePending` 降级了）。
+`ResourceView` 不提供像素数据，只提供“固有尺寸”——真正的像素由渲染层的
+`Resources::image` 取得，两层不交叉。
 
 ### 4.4 `PageConstraint`
 
@@ -237,6 +320,144 @@ fn image_size(&self, id: ImageId) -> Option<SizeF>;
 3. 退不动就退回最满断点；约束冲突时宁可难看，也不产生空页。
 
 输出保证见 [design.md 的不变量清单](design.md#2-不变量清单)。
+
+### 4.6 `LayoutOptions` / `Limits`
+
+```rust
+pub struct LayoutOptions { pub limits: Limits }
+impl LayoutOptions { pub fn with_limits(limits: Limits) -> Self; }
+
+pub struct Limits {
+    pub max_nodes: u32,
+    pub max_depth: u16,
+    pub max_text_bytes: u32,
+    pub max_pages: u32,
+    pub max_lines: u32,
+    pub max_image_pixels: u32,
+}
+```
+
+`Limits` 的字段为 0 时由 `Limits::resolved()` 换成默认值；`LayoutOptions::default()`
+就是“全部用默认”。默认值：
+
+| 字段 | 默认 | 拦截位置 | 超限结果 |
+|---|---:|---|---|
+| `max_nodes` | `1_048_576` | flow 之前看 `doc.nodes.len()` | 空结果 + `LimitExceeded("max_nodes")` |
+| `max_depth` | `256` | flow 之前按 parent 链记忆化算深度 | 空结果 + `LimitExceeded("max_depth")` |
+| `max_text_bytes` | `20_000_000` | flow 之前看 `doc.text.len()` | 空结果 + `LimitExceeded("max_text_bytes")` |
+| `max_pages` | `100_000` | 分页计划；需要开新页但已到上限 | 保留已计划的页，丢掉尾部 |
+| `max_lines` | `2_000_000` | 组装侧累加行数 | 保留已产出的行前缀 |
+| `max_image_pixels` | `67_108_864`（8192²） | 组装侧按 `ResourceView::image_size` 累加 | 超预算的图片降级为 `SizeFromContent` |
+
+拦截顺序是固定的：先头部限额（O(1) 量级），再 flow，最后产出侧限额。所有超限
+结果都是合法 IR：页覆盖、行不越界、编解码往返都成立；`truncated == true` 是唯一
+的信号。逐字段的“0=默认 / 恰好等于 / 超一”测试在
+`crates/ebook-layout/tests/limits.rs`。
+
+`max_image_pixels` 是**像素数**不是字节数（`w × h`，按资源给出的固有尺寸）。
+
+### 4.7 `LayoutCache`（`ebook-cache`）
+
+```rust
+pub struct LayoutCache { /* private */ }
+impl LayoutCache {
+    pub fn new(capacity: usize) -> Self;
+    pub fn with_policy_rev(self, rev: u32) -> Self;
+    pub fn set_policy_rev(&mut self, rev: u32);
+    pub fn set_fonts(&mut self, fonts: &FontSet);
+    pub fn layout(&mut self, doc: &StyledDoc, env: &LayoutEnv<'_>,
+                  c: &PageConstraint) -> &LayoutResult;
+    pub fn stats(&self) -> CacheStats;   // hits / misses / evictions
+    pub fn len / is_empty / capacity / clear
+}
+```
+
+- 有界 LRU（`VecDeque + HashMap`），缓存完全在 IR 之外：`LayoutResult` 没有缓存字段。
+- 键是**输入指纹**：文档结构 + 每个 `ComputedStyle` 字段 + 文本字节 + 图片元数据 +
+  字体身份 + `PageConstraint` + 调用方 `policy_rev`。同一个输入永远得到同一个键，
+  所以没有失效逻辑。
+- `set_fonts` 把字体身份显式交给缓存：`LayoutEnv` 里只有 `TextMeasurer`，拿不到
+  `FontSet`。忘了登记就意味着换字体不会使旧条目失效。
+- `layout` 固定用默认 `Limits`（没有 `opts` 变体）；需要预算时先用
+  `fingerprint(...)` + 自己持有结果。
+- 缓存是 caller-owned：没有全局单例、没有 `thread_local`。
+
+### 4.8 `Reader` / `Selection` / `SelectionRect`
+
+```rust
+pub struct Reader<'a> { /* &LayoutResult */ }
+impl<'a> Reader<'a> {
+    pub fn new(ir: &'a LayoutResult) -> Self;
+    pub fn ir(&self) -> &'a LayoutResult;
+    pub fn hit(&self, page: u32, p: PointF) -> Option<Location>;
+    pub fn line_of(&self, loc: Location) -> Option<&LineBox>;
+    pub fn page_of_line(&self, line: u32) -> Option<u32>;
+    pub fn progress(&self, loc: Location) -> f32;
+    pub fn page_progress(&self, page: u32) -> f32;
+    pub fn anchor_at(&self, page: u32, p: PointF) -> Option<Anchor>;
+    pub fn locate(&self, anchor: &Anchor) -> Option<Location>;
+    pub fn link_at(&self, page: u32, p: PointF) -> Option<&str>;
+    pub fn clamp(&self, loc: Location) -> Location;
+    pub fn selection(&self, a: Location, b: Location) -> Selection;
+    pub fn selection_rects(&self, sel: &Selection) -> Vec<SelectionRect>;
+    pub fn selection_text(&self, doc: &StyledDoc, sel: &Selection) -> String;
+}
+```
+
+`Location { page, line, byte }`：
+
+- `line` 是**全局行号**（`runs.lines` 下标），不是页内行号；`page` 由行号反查，
+  保证三元组自洽。两者不一致时以行号为准。
+- `byte` 是行内 `LineBox.src` 的字节偏移，落在 UTF-8 字符边界上（选区会在
+  该行范围内向外吸附）。
+- `Location::default()` 是 `(0, 0, 0)`；空文档也返回它。
+
+坐标：`hit` / `link_at` / `anchor_at` / `selection_rects` 里的 `PointF`、`RectF`
+都是**页内坐标**（`Page` 左上角为原点）。IR 里的 op/行盒是排版流坐标，`Reader`
+内部做一次与 `paint` 互逆的平移。
+
+`Selection { start, end }` 可以反向；`normalize()` 按 `(line, byte)` 排序，
+`is_empty()` 只看两端是否相同。`SelectionRect { page, rect }` 按页返回，同一页
+可能有多个矩形（跨行/跨段）。RTL 行的矩形按视觉顺序（右到左）返回，`byte`
+始终是逻辑序。
+
+`progress` 用“行号 + 行内字节占比”，不用像素：同一内容在任意页面尺寸下进度相同，
+页边界连续且单调不减。
+
+### 4.9 `Hyphenator`
+
+```rust
+pub trait Hyphenator {
+    fn breaks(&self, word: &str, out: &mut Vec<u16>);
+    fn name(&self) -> &str;
+}
+
+pub struct English; // ushyphmax（hyph-utf8）的 Liang 算法实现
+```
+
+排版层只定义接口，词典由宿主通过 `TextMeasurer::hyphenator()` 注入：
+
+- `breaks` 把允许插入连字符的**字节偏移**写进 `out`（升序、在 `(0, word.len())`），
+  非字母词得到空 `out`。用 `&mut Vec` 而不是返回切片，是为了保持 `&self` 与
+  “无内部可变性”的约束。
+- `hyphens: auto` + `Maybe`（`hyphens` 为真）且词典非 `None` 时，断行才能在词内
+  下刀；没有词典时行为与 `hyphens: none` 相同。
+- 换词典会改分页，所以它**不是**排版的默认政策：内置 `English` 也要宿主显式
+  返回 `Some(&english)` 才生效（见 `crates/ebook-layout/tests/hyphen.rs`）。
+- `name()` 用于缓存键与诊断；改词典必须改这个名字，否则缓存的旧分页会继续命中。
+
+### 4.10 `Op::Link` 与 `Location` 的分工
+
+| 问题 | 用什么 | 产出方 |
+|---|---|---|
+| 这一点在链接里吗？ | `Op::Link { rect, href }` + `Reader::link_at` | 排版层按行发射 |
+| 这一点对应原文哪里？ | `Reader::hit` → `Location` | 排版层从字形与行盒反算 |
+| 激活链接跳到哪？ | `href` 原文（宿主拼基址/解析 CFI） | 格式层原样保留 |
+| 把位置写进书签？ | `Location` + `Anchor` | `Reader::locate` / `anchor_at` |
+
+链接不参与分页几何：`Op::Link` 不占宽度、不推高行盒，只是行盒上的一个热区。
+`Location` 也不含 href，它只描述“第几行、行内第几字节”。两者能互相定位，
+因为 `Op::Link.rect` 与 `LineBox.rect` 同形。
 
 ---
 
@@ -370,7 +591,16 @@ trait Renderer {
 | `eb_font(bytes)` | `epub` | 注册字体，返回 id；失败 `u32::MAX` |
 | `eb_font_reset()` / `eb_font_count()` | `epub` | 字体槽管理 |
 | `eb_font_desc(id)` | `epub` | 返回给 canvas 的字体描述 JSON |
+| `eb_hit(page, x, y)` | 任意 | 页内坐标命中：`{"location":{...}|null}` |
+| `eb_link_at(page, x, y)` | 任意 | 页内坐标上的链接：`{"href":"..."|"null"}` |
+| `eb_selection(a_page,a_line,a_byte,b_page,b_line,b_byte)` | 任意 | 选区：`{start,end,rects:[{page,rect}],text}` |
+| `eb_progress(page, line, byte)` | 任意 | 全书进度：`{"progress":0..1}` |
 | `eb_version()` | 任意 | `(major << 16) | minor` |
+
+`eb_hit` / `eb_link_at` / `eb_selection` / `eb_progress` 都作用在**最近一次**
+`eb_layout*` 产生的 IR 上（宿主需先排版再查询），坐标是页内坐标；返回值是
+JSON 字符串，字段与 `ebook_ir::Location` / `SelectionRect` 一一对应。没有加载过
+IR 或页号越界时返回 `null` 字段，不 panic。
 
 JS 侧解码器是手写的，IR 版本、枚举 tag、字段顺序都见本文第 2、3 节。
 `web/pkg` 是构建产物，不提交；`web/build.sh` 与 `xtask app` 都会生成它。

@@ -1,9 +1,26 @@
 # 限额与默认值
 
-当前版本没有统一的 `Limits` 结构。限额分散在各层的常量与边界检查里；这张表是
-**实际行为**的汇总，改任何默认值都要同步本文与相关测试/golden。
+限额分两层：`ebook_ir::Limits`（可配置，随 `LayoutOptions` 传入，字段为 0 时用默认值）
+和各层内部的固定常量（不可配）。这张表是**实际行为**的汇总，改任何默认值都要
+同步本文与 `crates/ebook-layout/tests/limits.rs`。
 
 ## 1. 排版与 IR
+
+### 1.1 `Limits`（`LayoutOptions.limits`）
+
+| 字段 | 默认 | 超限行为 |
+|---|---:|---|
+| `max_nodes` | `1_048_576` | 空结果 + `LimitExceeded("max_nodes")`，`truncated` |
+| `max_depth` | `256` | 空结果 + `LimitExceeded("max_depth")`，`truncated` |
+| `max_text_bytes` | `20_000_000` | 空结果 + `LimitExceeded("max_text_bytes")`，`truncated` |
+| `max_pages` | `100_000` | 保留已计划的页，丢尾部；`truncated` |
+| `max_lines` | `2_000_000` | 保留已产出的行前缀；`truncated` |
+| `max_image_pixels` | `67_108_864` | 超预算的图降为 `SizeFromContent`；`truncated` |
+
+零值统一由 `Limits::resolved()` 换成默认值；`Limits::default()` 就是上表。
+超限结果仍是合法 IR（页覆盖、行不越界、编解码往返成立）。
+
+### 1.2 固定常量与几何边界
 
 | 项 | 默认/上限 | 超限行为 | 位置 |
 |---|---:|---|---|
@@ -16,7 +33,11 @@
 | `ImageId` | `u16 = 65535` | 超出无法编码；格式层应控制 | `ebook-ir::doc` |
 | `Span.start/len` | `u32` | 文本/op 索引；越界切片 panic | `ebook-ir::layout` |
 | 页号 | `u32` | 越界查询 `None` / 渲染 `NoSuchPage` | `LayoutResult::page` |
-| 页数 | 无硬上限 | 受内存限制 | `paginate.rs` |
+| 页数 | `100_000`（`max_pages`） | 超出截断，见 1.1 | `paginate.rs` |
+| 断字词长 | `65535` 字节（`u16` 偏移） | 更长的词不拆（按无词典处理） | `hyphen/en.rs` |
+
+“单行可表示”的上限来自 `u32` span（`Span.start/len`）；`max_text_bytes` 在断行之前
+生效，所以单行不可能先碰到 `u32::MAX`。
 
 ## 2. 字体
 
@@ -66,7 +87,7 @@ face 下标。`FontId::NONE = u16::MAX`。
 |---|---:|---|
 | IR magic | `EBIR` | 4 字节 |
 | IR header | `8` 字节 | magic + major/minor（LE u16） |
-| IR 版本 | `1.1` | 见 [api.md](api.md#33-版本与兼容策略) |
+| IR 版本 | `1.3` | 见 [api.md](api.md#33-版本与兼容策略) |
 | wasm gzip 预算 | `512 KiB` | `xtask size`；core 与 core+epub 分别卡 |
 | `wasm-bindgen` | `0.2.129` | 与 `ebook-web` 精确锁定 |
 | wasm target | `wasm32-unknown-unknown` | `rust-toolchain.toml` |

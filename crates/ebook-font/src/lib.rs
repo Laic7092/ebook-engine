@@ -329,7 +329,7 @@ impl FontBook {
         let bottom_edge = (bounds.min_y * scale - dy).floor();
         let width = right_edge - left_edge;
         let height = top_edge - bottom_edge;
-        if !(width >= 1.0) || !(height >= 1.0) {
+        if !(width >= 1.0 && height >= 1.0) {
             return None;
         }
         if width > u16::MAX as f32 || height > u16::MAX as f32 {
@@ -359,7 +359,6 @@ impl FontBook {
             current: point(0.0, 0.0),
         };
         face.outline_glyph(ttf_parser::GlyphId(gid), &mut outline)?;
-        drop(outline);
         let mut alpha = vec![0u8; w * h];
         rasterizer.for_each_pixel(|index, coverage| {
             alpha[index] = (coverage.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -561,7 +560,9 @@ fn distance(a: Point, b: Point) -> f32 {
 /// 按弦高误差选折线段数：四边形在参数 1/2 处离弦最远，约为控制多边形
 /// 超出量的四分之一；取 0.01 像素的目标误差，再夹到 [1, 64]。
 fn curve_steps(excess: f32) -> usize {
-    if !(excess > 0.0) {
+    // `!` 与 `<=` 对 NaN 的判定不同：这里把 NaN 也当作“没有超出量”，
+    // 与原来的 `!(excess > 0.0)` 完全等价。
+    if excess.is_nan() || excess <= 0.0 {
         return 1;
     }
     let steps = (excess * 200.0).sqrt().ceil() as usize;

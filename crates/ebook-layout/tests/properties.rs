@@ -104,29 +104,47 @@ impl Builder {
 
     fn block(&mut self, parent: u32, tag: Tag) -> u32 {
         let size = 10.0 + self.rng.unit() * 12.0;
-        let mut style = ComputedStyle::default();
-        style.display = Display::Block;
-        style.font = ebook_ir::doc::FontSpec {
-            font: FontId(0),
-            size,
-            weight: 400,
-            ..Default::default()
-        };
-        style.line_height = if self.rng.below(2) == 0 {
+        let line_height = if self.rng.below(2) == 0 {
             LineHeight::Normal
         } else {
             LineHeight::Mul(1.1 + self.rng.unit())
         };
-        style.margin.top = Len::Em(self.rng.pick());
-        style.margin.bottom = Len::Em(self.rng.pick());
-        style.brk.orphans = 1 + self.rng.below(4) as u16;
-        style.brk.widows = 1 + self.rng.below(4) as u16;
-        if self.rng.below(5) == 0 {
-            style.brk.before = Break::Always;
-        }
-        if self.rng.below(9) == 0 {
-            style.height = Len::Px(20.0 + self.rng.unit() * 200.0);
-        }
+        let margin_top = Len::Em(self.rng.pick());
+        let margin_bottom = Len::Em(self.rng.pick());
+        let orphans = 1 + self.rng.below(4) as u16;
+        let widows = 1 + self.rng.below(4) as u16;
+        let before = if self.rng.below(5) == 0 {
+            Break::Always
+        } else {
+            Break::Auto
+        };
+        let height = if self.rng.below(9) == 0 {
+            Len::Px(20.0 + self.rng.unit() * 200.0)
+        } else {
+            Len::Auto
+        };
+        let style = ComputedStyle {
+            font: ebook_ir::doc::FontSpec {
+                font: FontId(0),
+                size,
+                weight: 400,
+                ..Default::default()
+            },
+            line_height,
+            margin: Sides {
+                top: margin_top,
+                bottom: margin_bottom,
+                ..Sides::all(Len::ZERO)
+            },
+            brk: BreakPolicy {
+                before,
+                orphans,
+                widows,
+                ..BreakPolicy::default()
+            },
+            height,
+            ..ComputedStyle::default()
+        };
         let id = self.doc.push_node(Node {
             kind: NodeKind::Element(tag),
             style,
@@ -140,8 +158,10 @@ impl Builder {
         kids.push(id);
         self.doc.set_kids(parent, &kids);
         if self.rng.below(8) == 0 {
-            let mut span_style = ComputedStyle::default();
-            span_style.display = Display::None;
+            let span_style = ComputedStyle {
+                display: Display::None,
+                ..ComputedStyle::default()
+            };
             let hidden = self.doc.push_node(Node {
                 kind: NodeKind::Element(Tag::Div),
                 style: span_style,

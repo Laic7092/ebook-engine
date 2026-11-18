@@ -2,8 +2,8 @@
 
 use ebook_ir::doc::FontSpec;
 use ebook_ir::{
-    Anchor, ComputedStyle, Dir, Display, FontId, ImageId, LayoutResult, Len, LineHeight, Node,
-    NodeId, NodeKind, Op, Rgba8, SizeF, Span, StyledDoc, Tag, UnresolvedReason,
+    Anchor, ComputedStyle, Dir, FontId, ImageId, LayoutResult, LineHeight, Node, NodeId, NodeKind,
+    Op, Rgba8, SizeF, Span, StyledDoc, Tag, UnresolvedReason,
 };
 use ebook_layout::{layout, LayoutEnv, PageConstraint, ResourceView, TextMeasurer};
 
@@ -35,18 +35,16 @@ impl ResourceView for Sizes {
 }
 
 fn block_style() -> ComputedStyle {
-    let mut style = ComputedStyle::default();
-    style.display = Display::Block;
-    style.font = FontSpec {
-        font: FontId(0),
-        size: 10.0,
-        weight: 400,
-        ..FontSpec::default()
-    };
-    style.line_height = LineHeight::Px(12.0);
-    style.margin.top = Len::ZERO;
-    style.margin.bottom = Len::ZERO;
-    style
+    ComputedStyle {
+        font: FontSpec {
+            font: FontId(0),
+            size: 10.0,
+            weight: 400,
+            ..FontSpec::default()
+        },
+        line_height: LineHeight::Px(12.0),
+        ..ComputedStyle::default()
+    }
 }
 
 fn inline_style() -> ComputedStyle {
