@@ -2,7 +2,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { decodeLayout } from "../web/decode.js";
+import { decodeHit, decodeLayout, decodeLink, decodeProgress, decodeSelection } from "../web/decode.js";
 import { encodeLayout } from "../web/encode.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -176,6 +176,107 @@ function selfCheck() {
   console.log(`contract ok: synthetic link/issue round-trip (${bytes.length} bytes)`);
 }
 
+// 交互导出（eb_hit / eb_link_at / eb_selection / eb_progress）的往返检查。
+// 需要 ./web/build.sh 产出的 wasm 包；没构建就跳过，不把 contract 变成构建前置。
+async function interactionSelfCheck() {
+  let wasm;
+  try {
+    wasm = await import(new URL("../web/pkg/ebook_web.js", import.meta.url).href);
+  } catch (error) {
+    console.log(`contract skip: web/pkg not built (${error.message.split("\n")[0]}) — run ./web/build.sh`);
+    return null;
+  }
+  const raw = readFileSync(resolve(HERE, "../web/pkg/ebook_web_bg.wasm"));
+  await wasm.default({ module_or_path: raw });
+
+  const layout = decodeLayout(
+    wasm.eb_layout_text(
+      "hello world hello world hello world hello world hello world",
+      200,
+      300,
+      40,
+    ),
+  );
+  if (layout.runs.lines.length < 2) {
+    throw new Error(`interaction: text layout has ${layout.runs.lines.length} line(s)`);
+  }
+  const pageOfLine = (line) => {
+    const page = layout.pages.find((p) => line >= p.lines.start && line < p.lines.start + p.lines.len);
+    if (!page) {
+      throw new Error(`interaction: no page for line ${line}`);
+    }
+    return page.index;
+  };
+
+  // 行盒是流坐标，换成页内坐标才能喂给 eb_hit（流 = 页内 + origin - inset）。
+  const firstPage = layout.pages[0];
+  const toPage = (rect) => ({
+    x: rect.x - firstPage.origin.x + firstPage.inset.left,
+    y: rect.y - firstPage.origin.y + firstPage.inset.top,
+  });
+  const line0 = layout.runs.lines[0];
+  const line0Page = toPage(line0.rect);
+  const first = decodeHit(
+    wasm.eb_hit(firstPage.index, line0Page.x + line0.rect.w / 2, line0Page.y + line0.rect.h / 2),
+  );
+  if (!first || first.page !== firstPage.index || first.line !== 0) {
+    throw new Error(`interaction: hit on first line ${JSON.stringify(first)}`);
+  }
+  const miss = decodeHit(wasm.eb_hit(99, 0, 0));
+  if (miss !== null) {
+    throw new Error(`interaction: out-of-range hit ${JSON.stringify(miss)}`);
+  }
+  // txt 没有 <a href>，所以链接查询必须是 null 而不是空字符串。
+  const href = decodeLink(
+    wasm.eb_link_at(firstPage.index, line0Page.x + 2, line0Page.y + line0.rect.h / 2),
+  );
+  if (href !== null) {
+    throw new Error(`interaction: unexpected link ${href}`);
+  }
+
+  const byte0 = first.byte;
+  const byte1 = Math.min(line0.src.len, byte0 + 2);
+  if (byte1 <= byte0) {
+    throw new Error("interaction: first line too short for a selection");
+  }
+  const sel = decodeSelection(
+    wasm.eb_selection(first.page, first.line, byte0, first.page, first.line, byte1),
+  );
+  if (sel.text.length !== byte1 - byte0 || sel.rects.length !== 1) {
+    throw new Error(`interaction: selection ${JSON.stringify(sel)}`);
+  }
+  const rect = sel.rects[0];
+  if (rect.page !== first.page || !(rect.w > 0 && rect.h > 0)) {
+    throw new Error(`interaction: selection rect ${JSON.stringify(rect)}`);
+  }
+  const inside = decodeHit(wasm.eb_hit(rect.page, rect.x + rect.w / 2, rect.y + rect.h / 2));
+  if (!inside || inside.line !== first.line || inside.byte < byte0 || inside.byte > byte1) {
+    throw new Error(`interaction: hit inside selection rect ${JSON.stringify(inside)}`);
+  }
+  const reversed = decodeSelection(
+    wasm.eb_selection(first.page, first.line, byte1, first.page, first.line, byte0),
+  );
+  if (reversed.text !== sel.text || JSON.stringify(reversed.rects) !== JSON.stringify(sel.rects)) {
+    throw new Error("interaction: reversed selection differs from forward selection");
+  }
+
+  let prev = -1;
+  for (let line = 0; line < layout.runs.lines.length; line += 1) {
+    const progress = decodeProgress(wasm.eb_progress(pageOfLine(line), line, 0));
+    if (progress < prev || progress < 0 || progress > 1) {
+      throw new Error(`interaction: progress ${progress} at line ${line} (prev ${prev})`);
+    }
+    prev = progress;
+  }
+  const last = layout.runs.lines.length - 1;
+  const end = decodeProgress(wasm.eb_progress(pageOfLine(last), last, layout.runs.lines[last].src.len));
+  if (end !== 1) {
+    throw new Error(`interaction: final progress ${end}`);
+  }
+  console.log(`contract ok: interaction hit/link/selection/progress (${layout.runs.lines.length} lines)`);
+  return null;
+}
+
 const names = process.argv.length > 2
   ? process.argv.slice(2)
   : readdirSync(GOLDEN_DIR).filter((n) => n.endsWith(".ir")).sort().map((n) => resolve(GOLDEN_DIR, n));
@@ -183,6 +284,12 @@ const names = process.argv.length > 2
 let failed = 0;
 try {
   selfCheck();
+} catch (error) {
+  console.error(`contract broken: ${error.message}`);
+  failed += 1;
+}
+try {
+  await interactionSelfCheck();
 } catch (error) {
   console.error(`contract broken: ${error.message}`);
   failed += 1;

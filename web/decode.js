@@ -220,3 +220,73 @@ export function decodeLayout(input) {
   }
   return { header, ...layout };
 }
+
+// ---- 交互查询（wasm 导出的 JSON 信封）------------------------------------
+// `eb_hit` / `eb_link_at` / `eb_selection` / `eb_progress` 走 JSON，不走 postcard：
+// 查询是低频的人机交互，字段名比字节数重要。校验集中在这里，UI 侧只消费结果。
+
+function parseJson(input, what) {
+  const value = typeof input === "string" ? JSON.parse(input) : input;
+  if (value === null || typeof value !== "object") {
+    throw new Error(`${what}: not an object`);
+  }
+  return value;
+}
+
+function readLocation(value, what) {
+  const keys = ["page", "line", "byte"];
+  for (const key of keys) {
+    if (!Number.isInteger(value[key]) || value[key] < 0) {
+      throw new Error(`${what}: bad ${key} ${value[key]}`);
+    }
+  }
+  return { page: value.page, line: value.line, byte: value.byte };
+}
+
+export function decodeHit(input) {
+  const value = parseJson(input, "hit");
+  return value.location === null ? null : readLocation(value.location, "hit");
+}
+
+export function decodeLink(input) {
+  const value = parseJson(input, "link");
+  if (value.href !== null && typeof value.href !== "string") {
+    throw new Error("link: href is not a string");
+  }
+  return value.href;
+}
+
+export function decodeSelection(input) {
+  const value = parseJson(input, "selection");
+  const rects = Array.isArray(value.rects) ? value.rects : [];
+  const out = [];
+  for (const rect of rects) {
+    if (!Number.isInteger(rect.page) || rect.page < 0) {
+      throw new Error(`selection: bad page ${rect.page}`);
+    }
+    for (const key of ["x", "y", "w", "h"]) {
+      if (typeof rect[key] !== "number" || !Number.isFinite(rect[key])) {
+        throw new Error(`selection: bad ${key} ${rect[key]}`);
+      }
+    }
+    if (rect.w < 0 || rect.h < 0) {
+      throw new Error("selection: negative rect");
+    }
+    out.push({ page: rect.page, x: rect.x, y: rect.y, w: rect.w, h: rect.h });
+  }
+  const start = value.start === undefined || value.start === null
+    ? null
+    : readLocation(value.start, "selection start");
+  const end = value.end === undefined || value.end === null
+    ? null
+    : readLocation(value.end, "selection end");
+  return { start, end, rects: out, text: typeof value.text === "string" ? value.text : "" };
+}
+
+export function decodeProgress(input) {
+  const value = parseJson(input, "progress");
+  if (typeof value.progress !== "number" || !Number.isFinite(value.progress)) {
+    throw new Error(`progress: bad value ${value.progress}`);
+  }
+  return Math.min(1, Math.max(0, value.progress));
+}
