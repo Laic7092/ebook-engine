@@ -258,8 +258,10 @@ impl Default for BreakPolicy {
             before: Break::Auto,
             after: Break::Auto,
             inside: Break::Auto,
-            orphans: 1,
-            widows: 1,
+            // CSS Fragmentation 3 §4.4 的初始值是 2：单行落在页首/页尾要往回退。
+            // 想关闭保护就显式写 1（合法的等效关闭值）。
+            orphans: 2,
+            widows: 2,
         }
     }
 }
