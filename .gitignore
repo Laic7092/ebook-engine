@@ -6,3 +6,4 @@ Cargo.lock.bak
 /web/en.epub
 /web/test.ttf
 !tests/golden/*.ir
+/clippy.log

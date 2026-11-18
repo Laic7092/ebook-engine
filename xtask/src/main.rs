@@ -1,5 +1,7 @@
+use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::time::Instant;
 
 use ebook_font::FontBook;
 use ebook_ir::{codec, EdgesF, LayoutResult};
@@ -20,6 +22,9 @@ fn wasm_path() -> PathBuf {
 fn parity_dir() -> PathBuf {
     target_dir().join("parity")
 }
+
+const BENCH_WARMUP: usize = 3;
+const BENCH_ITERS: usize = 31;
 const PIXEL_GOLDEN: &str = "tests/golden/pixels.txt";
 const PIXEL_BOOK: &str = "fixtures/typography.epub";
 const PIXEL_FONT: &str = "fixtures/font/test.ttf";
@@ -37,6 +42,7 @@ fn main() -> ExitCode {
         "pixel-bless" => pixel(true),
         "contract" => contract(),
         "app" => app(),
+        "bench" => bench(),
         "all" => {
             let ok = [
                 golden(false),
@@ -55,7 +61,9 @@ fn main() -> ExitCode {
             }
         }
         _ => {
-            eprintln!("usage: xtask [all|golden|bless|contract|app|pixel|pixel-bless|size|parity]");
+            eprintln!(
+                "usage: xtask [all|golden|bless|contract|app|pixel|pixel-bless|size|parity|bench]"
+            );
             ExitCode::from(2)
         }
     }
@@ -238,13 +246,30 @@ fn contract() -> ExitCode {
 }
 
 fn app() -> ExitCode {
-    match run_script("tests/app.mjs") {
+    match build_web_pkg().and_then(|()| run_script("tests/app.mjs")) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("{message}");
             ExitCode::FAILURE
         }
     }
+}
+
+fn build_web_pkg() -> Result<(), String> {
+    build_wasm(&["epub"])?;
+    let pkg = Path::new("web/pkg");
+    let _ = std::fs::remove_dir_all(pkg);
+    std::fs::create_dir_all(pkg).map_err(|e| format!("web/pkg: {e}"))?;
+    let out = Command::new("wasm-bindgen")
+        .args(["--target", "web", "--out-dir"])
+        .arg(pkg)
+        .arg(wasm_path())
+        .output()
+        .map_err(|e| format!("wasm-bindgen: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+    }
+    Ok(())
 }
 
 fn run_script(path: &str) -> Result<(), String> {
@@ -376,4 +401,134 @@ fn gzip_len(path: &Path) -> Option<usize> {
     } else {
         None
     }
+}
+
+fn bench() -> ExitCode {
+    match run_bench() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("{message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn bench_iterations() -> usize {
+    std::env::var("BENCH_ITERS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(BENCH_ITERS)
+}
+
+fn run_bench() -> Result<(), String> {
+    let iterations = bench_iterations();
+    println!("# xtask bench: warmup={BENCH_WARMUP} iters={iterations} (median ns; codec 16 reps)");
+
+    let layout = bench_layout()?;
+    report("layout/en-epub-ch0", &layout);
+    let (encode, decode) = bench_codec()?;
+    report("ir/encode", &encode);
+    report("ir/decode", &decode);
+    let raster = bench_raster()?;
+    report("raster/page-480x640", &raster);
+    Ok(())
+}
+
+fn bench_layout() -> Result<Vec<u128>, String> {
+    let bytes = std::fs::read("fixtures/en.epub").map_err(|e| format!("fixtures/en.epub: {e}"))?;
+    let font = std::fs::read(PIXEL_FONT).map_err(|e| format!("{PIXEL_FONT}: {e}"))?;
+    let mut src = ebook_format::MemorySource::new();
+    src.insert("en.epub", bytes);
+    let opened = ebook_format::open(&src).map_err(|e| format!("format: {e:?}"))?;
+    let doc = opened
+        .chapter(&src, 0)
+        .map_err(|e| format!("chapter: {e:?}"))?;
+    let mut fonts = FontBook::new();
+    fonts
+        .add(font)
+        .ok_or_else(|| String::from("font parse failed"))?;
+    let env = LayoutEnv {
+        measurer: &fonts,
+        resources: &NoImageSizes,
+    };
+    let constraint = PageConstraint::new(600.0, 800.0).with_margin(EdgesF::all(24.0));
+    Ok(sample(1, || {
+        let ir = Layout::new().layout(&doc, &env, &constraint);
+        black_box(&ir);
+    }))
+}
+
+fn bench_codec() -> Result<(Vec<u128>, Vec<u128>), String> {
+    let bytes = std::fs::read("fixtures/en.epub").map_err(|e| format!("fixtures/en.epub: {e}"))?;
+    let font = std::fs::read(PIXEL_FONT).map_err(|e| format!("{PIXEL_FONT}: {e}"))?;
+    let mut src = ebook_format::MemorySource::new();
+    src.insert("en.epub", bytes);
+    let opened = ebook_format::open(&src).map_err(|e| format!("format: {e:?}"))?;
+    let doc = opened
+        .chapter(&src, 0)
+        .map_err(|e| format!("chapter: {e:?}"))?;
+    let mut fonts = FontBook::new();
+    fonts
+        .add(font)
+        .ok_or_else(|| String::from("font parse failed"))?;
+    let env = LayoutEnv {
+        measurer: &fonts,
+        resources: &NoImageSizes,
+    };
+    let constraint = PageConstraint::new(600.0, 800.0).with_margin(EdgesF::all(24.0));
+    let ir = Layout::new().layout(&doc, &env, &constraint);
+    let encoded = codec::to_bytes(&ir).map_err(|e| format!("encode: {e:?}"))?;
+    let mut out = Vec::new();
+    let encode = sample(16, || {
+        codec::encode(&ir, &mut out).expect("encode");
+        black_box(out.len());
+    });
+    let decode = sample(16, || {
+        let decoded: LayoutResult = codec::decode(&encoded).expect("decode");
+        black_box(&decoded);
+    });
+    Ok((encode, decode))
+}
+
+fn bench_raster() -> Result<Vec<u128>, String> {
+    let ir = pixel_ir();
+    let font = std::fs::read(PIXEL_FONT).map_err(|e| format!("{PIXEL_FONT}: {e}"))?;
+    let mut fonts = FontBook::new();
+    fonts
+        .add(font)
+        .ok_or_else(|| String::from("font parse failed"))?;
+    let page = ir
+        .page(0)
+        .ok_or_else(|| String::from("pixel book has no page"))?;
+    let mut surface = RgbaSurface::from_page(page);
+    Ok(sample(1, || {
+        surface.render_page(&ir, 0, &mut fonts).expect("render");
+        black_box(surface.pixel(0, 0));
+    }))
+}
+
+fn sample(reps: usize, mut run: impl FnMut()) -> Vec<u128> {
+    let iterations = bench_iterations();
+    for _ in 0..BENCH_WARMUP {
+        for _ in 0..reps {
+            run();
+        }
+    }
+    let mut samples = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        let start = Instant::now();
+        for _ in 0..reps {
+            run();
+        }
+        samples.push(start.elapsed().as_nanos() / reps as u128);
+    }
+    samples
+}
+
+fn report(name: &str, samples: &[u128]) {
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let median = sorted.get(sorted.len() / 2).copied().unwrap_or(0);
+    println!("{name}\t{median}");
 }
