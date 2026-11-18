@@ -10,8 +10,8 @@ use crate::css;
 use crate::xhtml::{self, AssetResolver};
 use crate::zip::ZipArchive;
 use crate::{
-    Asset, Book, ByteSource, ChapterLinks, EmbeddedFont, EpubIssue, EpubIssueCode, FormatAdapter,
-    FormatError, ImageAsset, LinkTarget, Probe, SpineItem, TocEntry,
+    Asset, Book, ByteSource, ChapterAnchor, ChapterLinks, EmbeddedFont, EpubIssue, EpubIssueCode,
+    FormatAdapter, FormatError, ImageAsset, LinkTarget, Probe, SpineItem, TocEntry,
 };
 
 /// 单个字体文件的上限。内嵌字体是排版入参，过大就直接当坏资产报告。
@@ -77,12 +77,12 @@ impl<'a> EpubReader<'a> {
         self.chapter_with_links(index).map(|(doc, _)| doc)
     }
 
-    /// 与 `chapter` 相同，但把 `<a href>` 的 side table 一起返回。IR 的 `Node`
-    /// 还没有链接字段，所以链接先由格式层保管。
-    pub fn chapter_with_links(
+    /// 与 `chapter` 相同，但把 `<a href>` 与 `id → Anchor` 的 side table 一起返回。
+    /// IR 里没有链接字段，也故意不存 id 表（那属于格式层），所以由这里一并带出。
+    pub fn chapter_with_anchors(
         &self,
         index: usize,
-    ) -> Result<(StyledDoc, Vec<ChapterLinks>), FormatError> {
+    ) -> Result<(StyledDoc, Vec<ChapterLinks>, Vec<ChapterAnchor>), FormatError> {
         let href = self.book.spine.get(index).map(|item| item.href.clone());
         let built = match build_chapter(&self.zip, &self.book, index) {
             Ok(built) => built,
@@ -111,7 +111,16 @@ impl<'a> EpubReader<'a> {
                 &format!("duplicate element id {id}"),
             );
         }
-        Ok((built.doc, built.links))
+        Ok((built.doc, built.links, built.anchors))
+    }
+
+    /// 与 `chapter` 相同，但把 `<a href>` 的 side table 一起返回。
+    pub fn chapter_with_links(
+        &self,
+        index: usize,
+    ) -> Result<(StyledDoc, Vec<ChapterLinks>), FormatError> {
+        self.chapter_with_anchors(index)
+            .map(|(doc, links, _)| (doc, links))
     }
 
     /// 读取一个 manifest 资产，返回字节与 media type。
@@ -303,6 +312,24 @@ fn build_chapter(
     };
     let mut built = xhtml::build_document(&text, index as u32, &mut resolver)
         .map_err(|_| FormatError::Malformed("xhtml"))?;
+    // 固有尺寸与 MIME 属于格式层：排版只认入参，不应该自己读图。
+    for meta in &mut built.doc.images {
+        let Some(src) = meta.src.clone() else {
+            continue;
+        };
+        let Some(bytes) = zip.read(&src) else {
+            continue;
+        };
+        if meta.size.is_none() {
+            meta.size = crate::image::image_size(&bytes);
+        }
+        if meta.mime.is_none() {
+            meta.mime = book
+                .asset(&src)
+                .map(|asset| asset.media_type.clone())
+                .or_else(|| crate::image::image_mime(&bytes).map(str::to_string));
+        }
+    }
     built.doc.meta.title = book.title.clone();
     built.doc.meta.lang = book.lang.clone();
     Ok(built)
@@ -316,6 +343,19 @@ struct ZipAssets<'a, 'b> {
 impl AssetResolver for ZipAssets<'_, '_> {
     fn css(&mut self, href: &str) -> Option<String> {
         self.zip.read_text(&join(&self.base, href))
+    }
+
+    fn resolve(&mut self, href: &str) -> Option<String> {
+        let href = href.trim();
+        if is_external(href) {
+            return None;
+        }
+        let path = href.split(['#', '?']).next().unwrap_or("");
+        let path = percent_decode(path);
+        if path.is_empty() {
+            return None;
+        }
+        Some(join(&self.base, &normalize_href(&path)))
     }
 }
 
@@ -521,9 +561,7 @@ fn collect_assets(
         });
         cells.insert(item.href.clone(), OnceCell::new());
         if item.media_type.to_ascii_lowercase().starts_with("image/") {
-            let id = book.images.len().min(u16::MAX as usize) as u16;
             book.images.push(ImageAsset {
-                id,
                 href: item.href.clone(),
                 media_type: item.media_type.clone(),
             });

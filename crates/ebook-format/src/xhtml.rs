@@ -7,10 +7,18 @@ use ebook_ir::{
 };
 
 use crate::css::{self, ElemKey, StyleSheet};
-use crate::{ChapterLinks, FormatError};
+use crate::{ChapterAnchor, ChapterLinks, FormatError};
 
 pub trait AssetResolver {
     fn css(&mut self, href: &str) -> Option<String>;
+
+    /// 把章节里的相对引用（`<img src>`）解析成归档内路径。
+    ///
+    /// 默认原样返回：没有归档上下文的调用方（txt、单元测试）拿到的是属性原文。
+    /// EPUB 的 resolver 会按章节所在目录展开 `../`。
+    fn resolve(&mut self, href: &str) -> Option<String> {
+        Some(href.to_string())
+    }
 }
 
 pub struct NoAssets;
@@ -31,6 +39,8 @@ enum CssSource {
 pub struct Built {
     pub doc: StyledDoc,
     pub links: Vec<ChapterLinks>,
+    /// 带 `id` 的元素 → Anchor，供 `#fragment` 跳转。
+    pub anchors: Vec<ChapterAnchor>,
     pub duplicate_ids: Vec<String>,
     pub unsupported_css: Vec<String>,
 }
@@ -40,6 +50,7 @@ struct Builder {
     keys: Vec<ElemKey>,
     sources: Vec<CssSource>,
     links: Vec<ChapterLinks>,
+    anchors: Vec<ChapterAnchor>,
     ids: Vec<String>,
     duplicate_ids: Vec<String>,
     spine: u32,
@@ -57,6 +68,7 @@ impl Builder {
         xml: roxmltree::Node<'_, '_>,
         parent: Option<NodeId>,
         path: &mut Vec<u16>,
+        resolver: &mut dyn AssetResolver,
     ) -> Option<NodeId> {
         if xml.is_text() {
             let text = xml.text().unwrap_or("");
@@ -143,10 +155,15 @@ impl Builder {
         }
         let image = if tag == Tag::Img {
             let id = self.doc.images.len() as ImageId;
+            // `src` 由 resolver 解析成归档内路径；解析不了就保留属性原文。
+            let src = xml
+                .attribute("src")
+                .map(|href| resolver.resolve(href).unwrap_or_else(|| href.to_string()));
             self.doc.images.push(ImageMeta {
                 size: None,
                 mime: None,
                 alt: xml.attribute("alt").map(|s| s.to_string()),
+                src,
             });
             Some(id)
         } else {
@@ -160,6 +177,8 @@ impl Builder {
         };
 
         // `<a href>` 是排版层发射 `Op::Link` 的唯一来源。空 href 忽略。
+        // 这里保存的是**属性原文**（相对本章的路径 + fragment），不做解析：
+        // 解析需要章节上下文，留给宿主的 `resolve_link_from`。
         let link = if tag == Tag::A {
             xml.attribute("href")
                 .map(str::to_string)
@@ -182,6 +201,16 @@ impl Builder {
             }),
         };
         let id = self.push(node, key);
+        if let Some(name) = self.keys[id as usize].id.clone() {
+            self.anchors.push(ChapterAnchor {
+                id: name,
+                anchor: Anchor {
+                    spine: self.spine,
+                    path: path.clone(),
+                    offset: 0,
+                },
+            });
+        }
         if tag == Tag::A {
             if let Some(href) = xml.attribute("href") {
                 if !href.trim().is_empty() {
@@ -201,7 +230,7 @@ impl Builder {
                 continue;
             }
             path.push(index);
-            if let Some(kid) = self.node(child, Some(id), path) {
+            if let Some(kid) = self.node(child, Some(id), path, resolver) {
                 kids.push(kid);
             }
             path.pop();
@@ -232,13 +261,14 @@ pub fn build_document(
         keys: Vec::new(),
         sources: Vec::new(),
         links: Vec::new(),
+        anchors: Vec::new(),
         ids: Vec::new(),
         duplicate_ids: Vec::new(),
         spine,
     };
     builder.doc.meta.spine = spine;
     let root = builder
-        .node(tree.root_element(), None, &mut Vec::new())
+        .node(tree.root_element(), None, &mut Vec::new(), resolver)
         .ok_or(FormatError::Malformed("xhtml"))?;
     builder.doc.root = root;
 
@@ -268,6 +298,7 @@ pub fn build_document(
     Ok(Built {
         doc: builder.doc,
         links: builder.links,
+        anchors: builder.anchors,
         duplicate_ids: builder.duplicate_ids,
         unsupported_css,
     })

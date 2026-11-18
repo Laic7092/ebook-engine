@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use ebook_font::FontBook;
 use ebook_format::epub::EpubReader;
-use ebook_format::Book;
+use ebook_format::{Book, ChapterAnchor};
 use ebook_ir::{codec, EdgesF, LayoutResult, Location, PointF, StyledDoc};
 use ebook_layout::{Layout, LayoutEnv, NoImageSizes, PageConstraint, Reader, StubMeasurer};
 
@@ -21,6 +21,8 @@ static LAST: Mutex<Option<LastLayout>> = Mutex::new(None);
 struct LastLayout {
     ir: LayoutResult,
     doc: StyledDoc,
+    /// 本章 `id → Anchor`。fragment 定位只对最近一次排版的那一章有效。
+    anchors: Vec<ChapterAnchor>,
 }
 
 impl LastLayout {
@@ -65,6 +67,169 @@ pub fn font_count() -> u32 {
         .as_ref()
         .map(|font| font.len() as u32)
         .unwrap_or(0)
+}
+
+/// 书里声明了多少个 `@font-face`。JS 用它决定要不要逐个调 `eb_font_face`。
+pub fn font_face_count() -> u32 {
+    let books = BOOK.lock().unwrap();
+    books
+        .as_ref()
+        .map(|reader| reader.book().fonts().len() as u32)
+        .unwrap_or(0)
+}
+
+/// 把第 `index` 个内嵌字体按 `@font-face` 的 family/weight/style 装进 `FontBook`，
+/// 返回 `FontId`；失败返回 `u32::MAX`。字体字节同时暴露给浏览器侧的 `FontFace`。
+pub fn load_font_face(index: usize) -> u32 {
+    let face = {
+        let books = BOOK.lock().unwrap();
+        books
+            .as_ref()
+            .and_then(|reader| reader.book().fonts().get(index).cloned())
+    };
+    let Some(face) = face else {
+        return u32::MAX;
+    };
+    let mut slot = FONT.lock().unwrap();
+    let font = slot.get_or_insert_with(FontBook::new);
+    match font.add_styled(&face.family, face.weight, face.style, face.bytes) {
+        Some(id) => id.0 as u32,
+        None => u32::MAX,
+    }
+}
+
+/// 内嵌字体的原始字节，用于浏览器 `new FontFace(family, bytes)`。
+pub fn load_font_face_bytes(index: usize) -> Vec<u8> {
+    let books = BOOK.lock().unwrap();
+    books
+        .as_ref()
+        .and_then(|reader| reader.book().fonts().get(index))
+        .map(|face| face.bytes.clone())
+        .unwrap_or_default()
+}
+
+/// 按归档路径取资产字节（图片、字体……）。找不到返回空数组，JS 侧按长度判空。
+pub fn asset_bytes(href: &str) -> Vec<u8> {
+    let books = BOOK.lock().unwrap();
+    books
+        .as_ref()
+        .and_then(|reader| reader.asset(href))
+        .map(|(bytes, _)| bytes.to_vec())
+        .unwrap_or_default()
+}
+
+/// 本章图片表：`[{"id":0,"href":"OEBPS/pics/a.png","mime":"image/png"}]`。
+/// `id` 是最近一次排版的 `StyledDoc::images` 下标，也就是 `Op::Image.id`。
+pub fn chapter_images_json() -> String {
+    with_last(|last| {
+        let mut out = String::from("[");
+        for (id, image) in last.doc.images.iter().enumerate() {
+            if id > 0 {
+                out.push(',');
+            }
+            let _ = write!(out, "{{\"id\":{id},\"href\":");
+            push_json_opt(&mut out, image.src.as_deref());
+            out.push_str(",\"mime\":");
+            push_json_opt(&mut out, image.mime.as_deref());
+            out.push('}');
+        }
+        out.push(']');
+        out
+    })
+    .unwrap_or_else(|| String::from("[]"))
+}
+
+/// 目录：`[{"label","spine","fragment","depth"}]`。
+/// `spine` 不在阅读顺序里（封面、注释页）时为 `null`。
+pub fn toc_json() -> String {
+    let books = BOOK.lock().unwrap();
+    let Some(reader) = books.as_ref() else {
+        return String::from("[]");
+    };
+    let mut out = String::from("[");
+    for (index, entry) in reader.book().toc().iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"label\":");
+        push_json_str(&mut out, &entry.label);
+        out.push_str(",\"spine\":");
+        if entry.in_spine() {
+            let _ = write!(out, "{}", entry.spine);
+        } else {
+            out.push_str("null");
+        }
+        out.push_str(",\"fragment\":");
+        push_json_opt(&mut out, entry.fragment.as_deref());
+        out.push_str(",\"depth\":");
+        let _ = write!(out, "{}", entry.depth);
+        out.push('}');
+    }
+    out.push(']');
+    out
+}
+
+/// 本章的 `id → Anchor`：`{"anchor":{"spine":0,"path":[3,9],"offset":0}}`
+/// 或 `{"anchor":null}`。切章之后要重新查。
+pub fn anchor_json(fragment: &str) -> String {
+    let anchor = with_last(|last| {
+        last.anchors
+            .iter()
+            .find(|entry| entry.id == fragment)
+            .map(|entry| entry.anchor.clone())
+    })
+    .flatten();
+    let mut out = String::from("{\"anchor\":");
+    match anchor {
+        Some(anchor) => {
+            let _ = write!(
+                out,
+                "{{\"spine\":{},\"path\":[{}],\"offset\":{}}}",
+                anchor.spine,
+                anchor
+                    .path
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+                anchor.offset
+            );
+        }
+        None => out.push_str("null"),
+    }
+    out.push('}');
+    out
+}
+
+/// 在**当前章节**的上下文里解析书内链接：
+/// `{"target":{"spine":1,"fragment":"n","external":false}}` 或 `{"target":null}`。
+pub fn resolve_link_json(href: &str) -> String {
+    // 先取 spine，释放 LAST 再锁 BOOK，避免与排版路径的加锁顺序相反。
+    let spine = with_last(|last| last.ir.spine);
+    let target = match spine {
+        Some(spine) => {
+            let books = BOOK.lock().unwrap();
+            books
+                .as_ref()
+                .and_then(|reader| reader.resolve_link_from(spine as usize, href))
+        }
+        None => None,
+    };
+    let mut out = String::from("{\"target\":");
+    match target {
+        Some(target) => {
+            out.push_str("{\"spine\":");
+            let _ = write!(out, "{}", target.spine);
+            out.push_str(",\"fragment\":");
+            push_json_opt(&mut out, target.fragment.as_deref());
+            out.push_str(",\"external\":");
+            out.push_str(if target.external { "true" } else { "false" });
+            out.push('}');
+        }
+        None => out.push_str("null"),
+    }
+    out.push('}');
+    out
 }
 
 pub fn font_desc(id: u32) -> String {
@@ -117,13 +282,17 @@ pub fn layout_cached(spine: u32, width: f32, height: f32, margin: f32) -> Vec<u8
     let Some(reader) = books.as_ref() else {
         return Vec::new();
     };
-    let Ok(doc) = reader.chapter(spine as usize) else {
+    let Ok((doc, _, anchors)) = reader.chapter_with_anchors(spine as usize) else {
         return Vec::new();
     };
-    let font = FONT.lock().unwrap();
+    let mut font = FONT.lock().unwrap();
+    // 语言是排版入参：文档语言要在 shape 前注入，locl 之类才会生效。
+    if let Some(font) = font.as_mut() {
+        font.set_language(doc.meta.lang.as_deref());
+    }
     match font.as_ref() {
-        Some(font) => layout_doc_with(&doc, font, width, height, margin),
-        None => layout_doc(&doc, width, height, margin),
+        Some(font) => layout_doc_with(&doc, font, width, height, margin, anchors),
+        None => layout_doc_full(&doc, &StubMeasurer, width, height, margin, anchors),
     }
 }
 
@@ -148,7 +317,7 @@ pub fn layout_chapter(
 }
 
 fn layout_doc(doc: &ebook_ir::StyledDoc, width: f32, height: f32, margin: f32) -> Vec<u8> {
-    layout_doc_with(doc, &StubMeasurer, width, height, margin)
+    layout_doc_full(doc, &StubMeasurer, width, height, margin, Vec::new())
 }
 
 fn layout_doc_with(
@@ -157,6 +326,18 @@ fn layout_doc_with(
     width: f32,
     height: f32,
     margin: f32,
+    anchors: Vec<ChapterAnchor>,
+) -> Vec<u8> {
+    layout_doc_full(doc, measurer, width, height, margin, anchors)
+}
+
+fn layout_doc_full(
+    doc: &ebook_ir::StyledDoc,
+    measurer: &dyn ebook_layout::TextMeasurer,
+    width: f32,
+    height: f32,
+    margin: f32,
+    anchors: Vec<ChapterAnchor>,
 ) -> Vec<u8> {
     let env = LayoutEnv {
         measurer,
@@ -167,6 +348,7 @@ fn layout_doc_with(
     *LAST.lock().unwrap() = Some(LastLayout {
         ir: ir.clone(),
         doc: doc.clone(),
+        anchors,
     });
     codec::to_bytes(&ir).unwrap_or_default()
 }
@@ -313,6 +495,21 @@ fn book_json(book: &Book) -> String {
         push_json_str(&mut out, &item.media_type);
         out.push_str(",\"linear\":");
         out.push_str(if item.linear { "true" } else { "false" });
+        out.push('}');
+    }
+    out.push_str("],\"fonts\":[");
+    for (index, face) in book.fonts().iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"family\":");
+        push_json_str(&mut out, &face.family);
+        out.push_str(",\"weight\":");
+        let _ = write!(out, "{}", face.weight);
+        out.push_str(",\"style\":");
+        push_json_str(&mut out, font_style_name(face.style));
+        out.push_str(",\"href\":");
+        push_json_str(&mut out, &face.href);
         out.push('}');
     }
     out.push_str("]}");

@@ -37,14 +37,17 @@ fn assets_expose_bytes_and_media_type() {
     assert!(reader.asset("missing.png").is_none());
     assert!(reader.asset("https://example.com/pic.png").is_none());
 
-    // manifest 图片按出现顺序编号，路径单独维护在格式层。
+    // manifest 图片按出现顺序列出，但它不是章内 `ImageId` 表：`ImageId` 由
+    // 每章的 `StyledDoc::images` 定义，两边都按 `src`/`href` 对字节。
     let images = &reader.book().images;
     assert_eq!(images.len(), 2);
-    assert_eq!(images[0].id, 0);
     assert_eq!(images[0].href, "OEBPS/img/pic.png");
     assert_eq!(images[1].href, "OEBPS/img/cover.png");
     assert_eq!(
-        reader.book().image(1).map(|image| image.href.as_str()),
+        reader
+            .book()
+            .image("OEBPS/img/cover.png")
+            .map(|image| image.href.as_str()),
         Some("OEBPS/img/cover.png")
     );
     assert_eq!(

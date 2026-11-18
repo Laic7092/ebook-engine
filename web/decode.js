@@ -291,3 +291,89 @@ export function decodeProgress(input) {
   }
   return Math.min(1, Math.max(0, value.progress));
 }
+
+// ---- 资源 / 目录 / fragment ----------------------------------------------
+// `eb_toc` 与 `eb_chapter_images` 返回裸数组；`eb_anchor` / `eb_resolve_link`
+// 返回带字段名的对象。校验仍然集中在这里。
+
+function parseList(input, what) {
+  const value = typeof input === "string" ? JSON.parse(input) : input;
+  if (!Array.isArray(value)) {
+    throw new Error(`${what}: not an array`);
+  }
+  return value;
+}
+
+function optionalString(value, what, key) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value !== "string") {
+    throw new Error(`${what}: bad ${key}`);
+  }
+  return value;
+}
+
+function nonNegativeInt(value, what, key) {
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`${what}: bad ${key} ${value}`);
+  }
+  return value;
+}
+
+export function decodeToc(input) {
+  return parseList(input, "toc").map((entry) => {
+    if (typeof entry.label !== "string") {
+      throw new Error("toc: label is not a string");
+    }
+    const spine = entry.spine === null || entry.spine === undefined
+      ? null
+      : nonNegativeInt(entry.spine, "toc", "spine");
+    return {
+      label: entry.label,
+      spine,
+      fragment: optionalString(entry.fragment, "toc", "fragment"),
+      depth: nonNegativeInt(entry.depth, "toc", "depth"),
+    };
+  });
+}
+
+export function decodeImages(input) {
+  return parseList(input, "images").map((entry) => ({
+    id: nonNegativeInt(entry.id, "images", "id"),
+    href: optionalString(entry.href, "images", "href"),
+    mime: optionalString(entry.mime, "images", "mime"),
+  }));
+}
+
+export function decodeAnchor(input) {
+  const value = parseJson(input, "anchor");
+  if (value.anchor === null || value.anchor === undefined) {
+    return null;
+  }
+  const anchor = value.anchor;
+  if (!Array.isArray(anchor.path)) {
+    throw new Error("anchor: path is not an array");
+  }
+  for (const step of anchor.path) {
+    nonNegativeInt(step, "anchor", "path step");
+  }
+  return {
+    spine: nonNegativeInt(anchor.spine, "anchor", "spine"),
+    path: anchor.path.slice(),
+    offset: nonNegativeInt(anchor.offset, "anchor", "offset"),
+  };
+}
+
+export function decodeResolvedLink(input) {
+  const value = parseJson(input, "resolve");
+  if (value.target === null || value.target === undefined) {
+    return null;
+  }
+  const target = value.target;
+  return {
+    spine: nonNegativeInt(target.spine, "resolve", "spine"),
+    fragment: optionalString(target.fragment, "resolve", "fragment"),
+    external: target.external === true,
+  };
+}
