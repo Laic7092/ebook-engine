@@ -7,7 +7,10 @@ pub fn paint(
     res: &mut dyn Resources,
 ) -> Result<(), RenderError> {
     let page = ir.page(page).ok_or(RenderError::NoSuchPage(page))?;
-    let origin = PointF::new(page.origin.x - page.inset.left, page.origin.y - page.inset.top);
+    let origin = PointF::new(
+        page.origin.x - page.inset.left,
+        page.origin.y - page.inset.top,
+    );
     paint_ops(ir, ir.display.op_slice(page.ops), surface, res, origin);
     Ok(())
 }

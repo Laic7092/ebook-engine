@@ -144,7 +144,10 @@ fn layout_doc_with(
     height: f32,
     margin: f32,
 ) -> Vec<u8> {
-    let env = LayoutEnv { measurer, resources: &NoImageSizes };
+    let env = LayoutEnv {
+        measurer,
+        resources: &NoImageSizes,
+    };
     let constraint = PageConstraint::new(width, height).with_margin(EdgesF::all(margin));
     let ir = Layout::new().layout(doc, &env, &constraint);
     codec::to_bytes(&ir).unwrap_or_default()

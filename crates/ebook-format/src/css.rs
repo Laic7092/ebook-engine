@@ -82,7 +82,11 @@ impl StyleSheet {
             for selector_text in selector_text.split(',') {
                 if let Some(selector) = parse_selector(selector_text) {
                     let spec = specificity(&selector);
-                    self.rules.push(Rule { selector, decls: decls.clone(), spec });
+                    self.rules.push(Rule {
+                        selector,
+                        decls: decls.clone(),
+                        spec,
+                    });
                 }
             }
         }
@@ -104,7 +108,10 @@ pub fn parse_decls(body: &str) -> Vec<Decl> {
             let name = name.trim().to_ascii_lowercase();
             let value = value.trim().trim_end_matches("!important").trim();
             if !name.is_empty() && !value.is_empty() {
-                out.push(Decl { name, value: value.to_string() });
+                out.push(Decl {
+                    name,
+                    value: value.to_string(),
+                });
             }
         }
     }
@@ -330,7 +337,11 @@ fn apply(style: &mut ebook_ir::ComputedStyle, decl: &Decl, parent_size: f32, par
             }
         }
         "direction" => {
-            style.dir = if value == "rtl" { ebook_ir::Dir::Rtl } else { ebook_ir::Dir::Ltr }
+            style.dir = if value == "rtl" {
+                ebook_ir::Dir::Rtl
+            } else {
+                ebook_ir::Dir::Ltr
+            }
         }
         "margin" => set_sides(&mut style.margin, value),
         "margin-top" => set_one(&mut style.margin.top, value),

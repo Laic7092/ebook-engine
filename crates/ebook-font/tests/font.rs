@@ -72,7 +72,11 @@ fn bytes() -> Vec<u8> {
 }
 
 fn desc(family: &str, weight: u16, style: ebook_ir::FontStyle) -> ebook_ir::FontDesc {
-    ebook_ir::FontDesc { family: family.into(), weight, style }
+    ebook_ir::FontDesc {
+        family: family.into(),
+        weight,
+        style,
+    }
 }
 
 fn spec(family: &str, weight: u16, style: ebook_ir::FontStyle) -> ebook_ir::FontSpec {
@@ -122,7 +126,10 @@ fn style_wins_over_weight_distance() {
     let chosen = book.select(&spec("Test", 400, ebook_ir::FontStyle::Italic));
     assert_eq!(chosen, italic);
     assert_ne!(chosen, normal);
-    assert_eq!(book.desc(chosen).map(|d| d.style), Some(ebook_ir::FontStyle::Italic));
+    assert_eq!(
+        book.desc(chosen).map(|d| d.style),
+        Some(ebook_ir::FontStyle::Italic)
+    );
 }
 
 #[test]
@@ -190,8 +197,14 @@ fn synthesis_keeps_advance_and_metrics() {
         .expect("regular");
     let bold = book.select(&spec("Test", 700, ebook_ir::FontStyle::Normal));
     let italic = book.select(&spec("Test", 400, ebook_ir::FontStyle::Italic));
-    assert_eq!(book.advance('M', regular, 32.0), book.advance('M', bold, 32.0));
-    assert_eq!(book.advance('M', regular, 32.0), book.advance('M', italic, 32.0));
+    assert_eq!(
+        book.advance('M', regular, 32.0),
+        book.advance('M', bold, 32.0)
+    );
+    assert_eq!(
+        book.advance('M', regular, 32.0),
+        book.advance('M', italic, 32.0)
+    );
     assert_eq!(book.ascent(regular, 32.0), book.ascent(bold, 32.0));
     assert_eq!(book.descent(regular, 32.0), book.descent(italic, 32.0));
     assert_eq!(book.glyph_id('M', regular), book.glyph_id('M', bold));

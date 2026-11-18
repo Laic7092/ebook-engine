@@ -43,7 +43,12 @@ impl<'a> ZipArchive<'a> {
             let name = core::str::from_utf8(raw_name)
                 .map_err(|_| ZipError::Unsupported)?
                 .into();
-            entries.push(Entry { name, method, compressed, offset });
+            entries.push(Entry {
+                name,
+                method,
+                compressed,
+                offset,
+            });
             p += 46 + name_len + extra_len + comment_len;
         }
         Ok(Self { data, entries })

@@ -53,15 +53,25 @@ impl Builder {
             }
             let start = self.doc.text.len() as u32;
             self.doc.text.push_str(text);
-            let key = ElemKey { is_element: false, ..ElemKey::default() };
+            let key = ElemKey {
+                is_element: false,
+                ..ElemKey::default()
+            };
             return Some(self.push(
                 Node {
                     kind: NodeKind::Text(Span::new(start, text.len() as u32)),
-                    style: ComputedStyle { display: Display::Inline, ..ComputedStyle::default() },
+                    style: ComputedStyle {
+                        display: Display::Inline,
+                        ..ComputedStyle::default()
+                    },
                     parent,
                     first_child: 0,
                     child_len: 0,
-                    src: Some(Anchor { spine: self.spine, path: path.clone(), offset: 0 }),
+                    src: Some(Anchor {
+                        spine: self.spine,
+                        path: path.clone(),
+                        offset: 0,
+                    }),
                     link: None,
                 },
                 key,
@@ -101,7 +111,9 @@ impl Builder {
         }
         if tag == Tag::Link {
             let rel = xml.attribute("rel").unwrap_or("");
-            let is_style = rel.split_whitespace().any(|part| part.eq_ignore_ascii_case("stylesheet"));
+            let is_style = rel
+                .split_whitespace()
+                .any(|part| part.eq_ignore_ascii_case("stylesheet"));
             if is_style {
                 if let Some(href) = xml.attribute("href") {
                     self.sources.push(CssSource::Linked(href.to_string()));
@@ -132,7 +144,11 @@ impl Builder {
             parent,
             first_child: 0,
             child_len: 0,
-            src: Some(Anchor { spine: self.spine, path: path.clone(), offset: 0 }),
+            src: Some(Anchor {
+                spine: self.spine,
+                path: path.clone(),
+                offset: 0,
+            }),
             link: None,
         };
         let id = self.push(node, key);

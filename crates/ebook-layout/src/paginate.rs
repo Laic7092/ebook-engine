@@ -57,7 +57,10 @@ pub(crate) fn plan(units: &[Unit], page_h: f32) -> Vec<PageStart> {
             break;
         }
         top = units[cut].y.max(top + 1.0);
-        starts.push(PageStart { unit: cut as u32, y: top });
+        starts.push(PageStart {
+            unit: cut as u32,
+            y: top,
+        });
         s = cut;
     }
 
@@ -163,7 +166,12 @@ pub(crate) struct PageBuilder {
 
 impl PageBuilder {
     pub(crate) fn new(page_size: SizeF, inset: EdgesF) -> Self {
-        Self { pages: Vec::new(), page_size, inset, open: None }
+        Self {
+            pages: Vec::new(),
+            page_size,
+            inset,
+            open: None,
+        }
     }
 
     pub(crate) fn sync(&mut self, page: u32, top: f32, ops_len: u32, lines_len: u32) {

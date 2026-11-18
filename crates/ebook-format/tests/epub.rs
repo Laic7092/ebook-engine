@@ -3,7 +3,10 @@ use ebook_ir::{Len, NodeId, NodeKind, Rgba8, StyledDoc, Tag, TextAlign};
 
 fn source() -> MemorySource {
     let mut src = MemorySource::new();
-    src.insert("demo.epub", include_bytes!("../../../fixtures/demo.epub").to_vec());
+    src.insert(
+        "demo.epub",
+        include_bytes!("../../../fixtures/demo.epub").to_vec(),
+    );
     src
 }
 
@@ -46,7 +49,10 @@ fn cascade_applies_element_class_and_id_rules() {
         .copied()
         .find(|&id| (doc.node(id).style.font.size - 19.8).abs() < 0.01)
         .expect("p.lead");
-    assert_eq!(doc.node(lead).style.color, Rgba8::new(0x55, 0x55, 0x55, 255));
+    assert_eq!(
+        doc.node(lead).style.color,
+        Rgba8::new(0x55, 0x55, 0x55, 255)
+    );
 
     let note = paragraphs
         .iter()
@@ -69,7 +75,10 @@ fn inheritance_reaches_text_nodes() {
     let text = doc.kids(lead)[0];
     assert!(doc.node(text).kind.is_text());
     assert!((doc.node(text).style.font.size - 19.8).abs() < 0.01);
-    assert_eq!(doc.node(text).style.color, Rgba8::new(0x55, 0x55, 0x55, 255));
+    assert_eq!(
+        doc.node(text).style.color,
+        Rgba8::new(0x55, 0x55, 0x55, 255)
+    );
 }
 
 #[test]
@@ -119,7 +128,10 @@ fn reads_chapters_with_named_and_numeric_entities() {
     assert!(text.contains('\u{2026}'), "missing hellip: {text:?}");
     assert!(text.contains('\u{2019}'), "missing rsquo: {text:?}");
     assert!(text.contains('&'), "missing ampersand: {text:?}");
-    assert!(text.contains("&bogus;"), "unknown entity should survive as text: {text:?}");
+    assert!(
+        text.contains("&bogus;"),
+        "unknown entity should survive as text: {text:?}"
+    );
 }
 
 #[test]

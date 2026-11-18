@@ -2,7 +2,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use ebook_ir::{
-    Anchor, ComputedStyle, Dir, Display, DocMeta, Len, LineHeight, Node, NodeKind, NodeId, Span,
+    Anchor, ComputedStyle, Dir, Display, DocMeta, Len, LineHeight, Node, NodeId, NodeKind, Span,
     StyledDoc, Tag, TextAlign, WritingMode,
 };
 
@@ -16,10 +16,7 @@ impl FormatAdapter for Txt {
     }
 
     fn probe(&self, src: &dyn ByteSource) -> Probe {
-        if src
-            .document()
-            .is_some_and(|bytes| bytes.starts_with(b"PK"))
-        {
+        if src.document().is_some_and(|bytes| bytes.starts_with(b"PK")) {
             return Probe::No;
         }
         if src
@@ -97,7 +94,11 @@ pub fn build(bytes: &[u8]) -> StyledDoc {
         let kind = if heading { Tag::H2 } else { Tag::P };
         para_ids.push(doc.push_node(Node {
             kind: NodeKind::Element(kind),
-            style: if heading { heading_style() } else { paragraph_style() },
+            style: if heading {
+                heading_style()
+            } else {
+                paragraph_style()
+            },
             parent: Some(root),
             first_child: 0,
             child_len: 0,

@@ -41,7 +41,12 @@ pub struct RectF {
 }
 
 impl RectF {
-    pub const ZERO: RectF = RectF { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+    pub const ZERO: RectF = RectF {
+        x: 0.0,
+        y: 0.0,
+        w: 0.0,
+        h: 0.0,
+    };
 
     pub const fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
         Self { x, y, w, h }
@@ -89,9 +94,24 @@ pub struct Rgba8 {
 }
 
 impl Rgba8 {
-    pub const TRANSPARENT: Rgba8 = Rgba8 { r: 0, g: 0, b: 0, a: 0 };
-    pub const BLACK: Rgba8 = Rgba8 { r: 0, g: 0, b: 0, a: 255 };
-    pub const WHITE: Rgba8 = Rgba8 { r: 255, g: 255, b: 255, a: 255 };
+    pub const TRANSPARENT: Rgba8 = Rgba8 {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 0,
+    };
+    pub const BLACK: Rgba8 = Rgba8 {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 255,
+    };
+    pub const WHITE: Rgba8 = Rgba8 {
+        r: 255,
+        g: 255,
+        b: 255,
+        a: 255,
+    };
 
     pub const fn new(r: u8, g: u8, b: u8, a: u8) -> Self {
         Self { r, g, b, a }
@@ -108,7 +128,12 @@ pub struct Sided<T> {
 
 impl<T: Copy> Sided<T> {
     pub const fn all(v: T) -> Self {
-        Self { top: v, right: v, bottom: v, left: v }
+        Self {
+            top: v,
+            right: v,
+            bottom: v,
+            left: v,
+        }
     }
 
     pub fn horizontal(&self) -> T
@@ -148,10 +173,20 @@ pub struct SidesF {
 }
 
 impl SidesF {
-    pub const ZERO: SidesF = SidesF { top: 0.0, right: 0.0, bottom: 0.0, left: 0.0 };
+    pub const ZERO: SidesF = SidesF {
+        top: 0.0,
+        right: 0.0,
+        bottom: 0.0,
+        left: 0.0,
+    };
 
     pub const fn all(v: f32) -> Self {
-        Self { top: v, right: v, bottom: v, left: v }
+        Self {
+            top: v,
+            right: v,
+            bottom: v,
+            left: v,
+        }
     }
 
     pub fn horizontal(&self) -> f32 {

@@ -11,7 +11,10 @@ fn doc() -> StyledDoc {
 
 fn ir(width: f32, height: f32) -> LayoutResult {
     let doc = doc();
-    let env = LayoutEnv { measurer: &StubMeasurer, resources: &NoImageSizes };
+    let env = LayoutEnv {
+        measurer: &StubMeasurer,
+        resources: &NoImageSizes,
+    };
     let constraint = PageConstraint::new(width, height).with_margin(EdgesF::all(24.0));
     layout(&doc, &env, &constraint)
 }

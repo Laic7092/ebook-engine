@@ -43,23 +43,33 @@ fn run(args: &[String]) -> Result<(), String> {
         let arg = args[i].as_str();
         match arg {
             "--width" => {
-                width = need(args, i + 1, arg)?.parse().map_err(|_| "bad width".to_string())?;
+                width = need(args, i + 1, arg)?
+                    .parse()
+                    .map_err(|_| "bad width".to_string())?;
                 i += 1;
             }
             "--height" => {
-                height = need(args, i + 1, arg)?.parse().map_err(|_| "bad height".to_string())?;
+                height = need(args, i + 1, arg)?
+                    .parse()
+                    .map_err(|_| "bad height".to_string())?;
                 i += 1;
             }
             "--margin" => {
-                margin = need(args, i + 1, arg)?.parse().map_err(|_| "bad margin".to_string())?;
+                margin = need(args, i + 1, arg)?
+                    .parse()
+                    .map_err(|_| "bad margin".to_string())?;
                 i += 1;
             }
             "--page" => {
-                page = need(args, i + 1, arg)?.parse().map_err(|_| "bad page".to_string())?;
+                page = need(args, i + 1, arg)?
+                    .parse()
+                    .map_err(|_| "bad page".to_string())?;
                 i += 1;
             }
             "--spine" => {
-                spine = need(args, i + 1, arg)?.parse().map_err(|_| "bad spine".to_string())?;
+                spine = need(args, i + 1, arg)?
+                    .parse()
+                    .map_err(|_| "bad spine".to_string())?;
                 i += 1;
             }
             "--ir" => {
@@ -92,9 +102,11 @@ fn run(args: &[String]) -> Result<(), String> {
         .chapter(&src, spine)
         .map_err(|e| format!("chapter: {e:?}"))?;
 
-    let env = LayoutEnv { measurer: &StubMeasurer, resources: &NoImageSizes };
-    let constraint =
-        PageConstraint::new(width, height).with_margin(EdgesF::all(margin));
+    let env = LayoutEnv {
+        measurer: &StubMeasurer,
+        resources: &NoImageSizes,
+    };
+    let constraint = PageConstraint::new(width, height).with_margin(EdgesF::all(margin));
     let ir = Layout::new().layout(&doc, &env, &constraint);
     let bytes = codec::to_bytes(&ir).map_err(|e| format!("encode: {e:?}"))?;
 
@@ -124,5 +136,7 @@ fn run(args: &[String]) -> Result<(), String> {
 }
 
 fn need<'a>(args: &'a [String], i: usize, flag: &str) -> Result<&'a str, String> {
-    args.get(i).map(String::as_str).ok_or_else(|| format!("missing value for {flag}"))
+    args.get(i)
+        .map(String::as_str)
+        .ok_or_else(|| format!("missing value for {flag}"))
 }

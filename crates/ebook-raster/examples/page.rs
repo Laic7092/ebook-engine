@@ -2,19 +2,28 @@ use std::env;
 use std::fs;
 
 use ebook_font::FontBook;
-use ebook_ir::Rgba8;
 use ebook_format::{open, MemorySource};
 use ebook_ir::EdgesF;
+use ebook_ir::Rgba8;
 use ebook_layout::{layout, LayoutEnv, NoImageSizes, PageConstraint};
 use ebook_raster::RgbaSurface;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let book_path = args.get(1).cloned().unwrap_or_else(|| String::from("fixtures/en.epub"));
-    let font_path = args.get(2).cloned().unwrap_or_else(|| String::from("fixtures/font/test.ttf"));
+    let book_path = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| String::from("fixtures/en.epub"));
+    let font_path = args
+        .get(2)
+        .cloned()
+        .unwrap_or_else(|| String::from("fixtures/font/test.ttf"));
     let spine: usize = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(0);
     let page: u32 = args.get(4).and_then(|v| v.parse().ok()).unwrap_or(0);
-    let out = args.get(5).cloned().unwrap_or_else(|| String::from("/tmp/page.ppm"));
+    let out = args
+        .get(5)
+        .cloned()
+        .unwrap_or_else(|| String::from("/tmp/page.ppm"));
 
     let mut src = MemorySource::new();
     let name = book_path.rsplit('/').next().unwrap_or("book.epub");
@@ -23,9 +32,14 @@ fn main() {
     let doc = opened.chapter(&src, spine).expect("chapter");
 
     let mut fonts = FontBook::new();
-    fonts.add(fs::read(&font_path).expect("font")).expect("parse font");
+    fonts
+        .add(fs::read(&font_path).expect("font"))
+        .expect("parse font");
 
-    let env = LayoutEnv { measurer: &fonts, resources: &NoImageSizes };
+    let env = LayoutEnv {
+        measurer: &fonts,
+        resources: &NoImageSizes,
+    };
     let constraint = PageConstraint::new(720.0, 960.0).with_margin(EdgesF::all(54.0));
     let ir = layout(&doc, &env, &constraint);
 

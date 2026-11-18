@@ -2,7 +2,7 @@ use alloc::{string::String, vec::Vec};
 use serde::{Deserialize, Serialize};
 
 use crate::font::{FontFamilies, FontId, FontStyle};
-use crate::geom::{Rgba8, SizeF, Sides};
+use crate::geom::{Rgba8, Sides, SizeF};
 
 pub type NodeId = u32;
 pub type ImageId = u16;
@@ -254,7 +254,13 @@ pub struct BreakPolicy {
 
 impl Default for BreakPolicy {
     fn default() -> Self {
-        Self { before: Break::Auto, after: Break::Auto, inside: Break::Auto, orphans: 1, widows: 1 }
+        Self {
+            before: Break::Auto,
+            after: Break::Auto,
+            inside: Break::Auto,
+            orphans: 1,
+            widows: 1,
+        }
     }
 }
 
@@ -287,7 +293,12 @@ impl Default for FontSpec {
 
 impl FontSpec {
     pub fn new(size: f32, weight: u16, style: FontStyle) -> Self {
-        Self { size, weight, style, ..Self::default() }
+        Self {
+            size,
+            weight,
+            style,
+            ..Self::default()
+        }
     }
 
     pub fn with_families(mut self, families: FontFamilies) -> Self {
@@ -338,7 +349,10 @@ pub struct Border {
 
 impl Default for Border {
     fn default() -> Self {
-        Self { width: Sides::all(Len::ZERO), color: Rgba8::BLACK }
+        Self {
+            width: Sides::all(Len::ZERO),
+            color: Rgba8::BLACK,
+        }
     }
 }
 
@@ -399,7 +413,10 @@ impl ComputedStyle {
     }
 
     pub fn is_block_level(&self) -> bool {
-        matches!(self.display, Display::Block | Display::ListItem | Display::InlineBlock)
+        matches!(
+            self.display,
+            Display::Block | Display::ListItem | Display::InlineBlock
+        )
     }
 }
 
@@ -484,7 +501,10 @@ impl StyledDoc {
     }
 
     pub fn walk(&self) -> Walk<'_> {
-        Walk { doc: self, stack: alloc::vec![self.root] }
+        Walk {
+            doc: self,
+            stack: alloc::vec![self.root],
+        }
     }
 }
 

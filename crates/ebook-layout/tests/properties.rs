@@ -1,6 +1,6 @@
 use ebook_ir::{
-    codec, Break, BreakPolicy, ComputedStyle, Dir, Display, FontId, LayoutResult, Len,
-    LineHeight, Node, NodeKind, Rgba8, Sides, Span, StyledDoc, Tag,
+    codec, Break, BreakPolicy, ComputedStyle, Dir, Display, FontId, LayoutResult, Len, LineHeight,
+    Node, NodeKind, Rgba8, Sides, Span, StyledDoc, Tag,
 };
 use ebook_layout::{layout, LayoutEnv, NoImageSizes, PageConstraint, StubMeasurer};
 
@@ -56,7 +56,10 @@ impl Builder {
             link: None,
         });
         doc.root = root;
-        Self { doc, rng: Rng::new(seed) }
+        Self {
+            doc,
+            rng: Rng::new(seed),
+        }
     }
 
     fn span(&mut self) -> Span {
@@ -66,7 +69,9 @@ impl Builder {
             if index > 0 {
                 self.doc.text.push(' ');
             }
-            self.doc.text.push_str(WORDS[self.rng.below(WORDS.len() as u32) as usize]);
+            self.doc
+                .text
+                .push_str(WORDS[self.rng.below(WORDS.len() as u32) as usize]);
         }
         Span::new(start, self.doc.text.len() as u32 - start)
     }
@@ -74,7 +79,12 @@ impl Builder {
     fn inline(&mut self, parent: u32, size: f32, weight: u16) {
         let span = self.span();
         let style = ComputedStyle::inline(
-            ebook_ir::doc::FontSpec { font: FontId(0), size, weight, ..Default::default() },
+            ebook_ir::doc::FontSpec {
+                font: FontId(0),
+                size,
+                weight,
+                ..Default::default()
+            },
             Rgba8::BLACK,
             Dir::Ltr,
         );
@@ -96,7 +106,12 @@ impl Builder {
         let size = 10.0 + self.rng.unit() * 12.0;
         let mut style = ComputedStyle::default();
         style.display = Display::Block;
-        style.font = ebook_ir::doc::FontSpec { font: FontId(0), size, weight: 400, ..Default::default() };
+        style.font = ebook_ir::doc::FontSpec {
+            font: FontId(0),
+            size,
+            weight: 400,
+            ..Default::default()
+        };
         style.line_height = if self.rng.below(2) == 0 {
             LineHeight::Normal
         } else {
@@ -134,7 +149,7 @@ impl Builder {
                 first_child: 0,
                 child_len: 0,
                 src: None,
-            link: None,
+                link: None,
             });
             self.doc.set_kids(id, &[hidden]);
             return id;
@@ -150,7 +165,11 @@ impl Builder {
         let root = self.doc.root;
         let blocks = 1 + self.rng.below(6);
         for index in 0..blocks {
-            let tag = if index == 0 && self.rng.below(2) == 0 { Tag::H1 } else { Tag::P };
+            let tag = if index == 0 && self.rng.below(2) == 0 {
+                Tag::H1
+            } else {
+                Tag::P
+            };
             self.block(root, tag);
         }
         self.doc
@@ -171,7 +190,10 @@ fn check(doc: &StyledDoc, ir: &LayoutResult) -> Result<(), String> {
         }
         prev_origin = page.origin.y;
         if page.ops.start != op_cursor {
-            return Err(format!("page {} ops at {} not {}", page.index, page.ops.start, op_cursor));
+            return Err(format!(
+                "page {} ops at {} not {}",
+                page.index, page.ops.start, op_cursor
+            ));
         }
         op_cursor += page.ops.len;
         if page.lines.start != line_cursor {
@@ -191,7 +213,10 @@ fn check(doc: &StyledDoc, ir: &LayoutResult) -> Result<(), String> {
         let bottom = page.origin.y + page.size.h + 1e-3;
         for line in &ir.runs.lines[page.lines.start as usize..][..page.lines.len as usize] {
             if line.rect.y < top - 1e-3 {
-                return Err(format!("page {} line above top {} < {}", page.index, line.rect.y, top));
+                return Err(format!(
+                    "page {} line above top {} < {}",
+                    page.index, line.rect.y, top
+                ));
             }
             if line.rect.y + line.rect.h > bottom {
                 return Err(format!(
@@ -207,7 +232,11 @@ fn check(doc: &StyledDoc, ir: &LayoutResult) -> Result<(), String> {
         }
     }
     if op_cursor != ir.display.ops.len() as u32 {
-        return Err(format!("pages cover {} of {} ops", op_cursor, ir.display.ops.len()));
+        return Err(format!(
+            "pages cover {} of {} ops",
+            op_cursor,
+            ir.display.ops.len()
+        ));
     }
     if line_cursor != lines {
         return Err(format!("pages cover {} of {} lines", line_cursor, lines));
@@ -245,15 +274,22 @@ fn random_documents_hold_invariants() {
     for seed in 1..60u64 {
         let doc = Builder::new(seed).finish();
         for (width, height) in sizes {
-            let constraint = PageConstraint::new(width, height).with_margin(ebook_ir::EdgesF::all(24.0));
-            let env = LayoutEnv { measurer: &StubMeasurer, resources: &NoImageSizes };
+            let constraint =
+                PageConstraint::new(width, height).with_margin(ebook_ir::EdgesF::all(24.0));
+            let env = LayoutEnv {
+                measurer: &StubMeasurer,
+                resources: &NoImageSizes,
+            };
             let first = layout(&doc, &env, &constraint);
             let second = layout(&doc, &env, &constraint);
             let a = codec::to_bytes(&first).expect("encode");
             let b = codec::to_bytes(&second).expect("encode");
             assert_eq!(a, b, "layout is not deterministic for seed {seed}");
             let decoded: LayoutResult = codec::decode(&a).expect("decode");
-            assert_eq!(decoded, first, "codec round trip changed the layout for seed {seed}");
+            assert_eq!(
+                decoded, first,
+                "codec round trip changed the layout for seed {seed}"
+            );
             if let Err(problem) = check(&doc, &first) {
                 panic!("seed {seed} at {width}x{height}: {problem}");
             }
@@ -265,7 +301,10 @@ fn random_documents_hold_invariants() {
         }
     }
     assert!(total_lines > 500, "corpus too thin: {total_lines} lines");
-    assert!(multi_page > 20, "corpus never paginates: {multi_page} multi-page cases");
+    assert!(
+        multi_page > 20,
+        "corpus never paginates: {multi_page} multi-page cases"
+    );
     assert!(total_pages > 100, "corpus too thin: {total_pages} pages");
 }
 
@@ -279,14 +318,21 @@ fn degenerate_documents_stay_sane() {
         first_child: 0,
         child_len: 0,
         src: None,
-            link: None,
+        link: None,
     });
     doc.root = root;
-    let env = LayoutEnv { measurer: &StubMeasurer, resources: &NoImageSizes };
+    let env = LayoutEnv {
+        measurer: &StubMeasurer,
+        resources: &NoImageSizes,
+    };
     for size in [(1.0, 1.0), (0.5, 400.0), (400.0, 0.5), (1e5, 1e5)] {
         let constraint = PageConstraint::new(size.0, size.1);
         let ir = layout(&doc, &env, &constraint);
-        assert!(ir.pages.len() <= 1, "empty doc produced {} pages", ir.pages.len());
+        assert!(
+            ir.pages.len() <= 1,
+            "empty doc produced {} pages",
+            ir.pages.len()
+        );
         assert!(codec::to_bytes(&ir).is_ok());
     }
     let _ = (BreakPolicy::default(), Sides::all(Len::ZERO));

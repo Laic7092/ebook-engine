@@ -86,10 +86,16 @@ struct CollapsedMargin {
 }
 
 impl CollapsedMargin {
-    const ZERO: Self = Self { positive: 0.0, negative: 0.0 };
+    const ZERO: Self = Self {
+        positive: 0.0,
+        negative: 0.0,
+    };
 
     fn new(value: f32) -> Self {
-        Self { positive: value.max(0.0), negative: value.min(0.0) }
+        Self {
+            positive: value.max(0.0),
+            negative: value.min(0.0),
+        }
     }
 
     fn add(self, value: f32) -> Self {
@@ -162,7 +168,10 @@ impl<'a> FlowCtx<'a> {
         let NodeKind::Text(span) = node.kind else {
             return false;
         };
-        if !matches!(node.style.text.white_space, WhiteSpace::Normal | WhiteSpace::Nowrap) {
+        if !matches!(
+            node.style.text.white_space,
+            WhiteSpace::Normal | WhiteSpace::Nowrap
+        ) {
             return false;
         }
         self.doc
@@ -195,7 +204,10 @@ impl<'a> FlowCtx<'a> {
         self.depth += 1;
         if self.depth > 128 {
             self.depth -= 1;
-            return BlockFlow { margin: CollapsedMargin::ZERO, empty: true };
+            return BlockFlow {
+                margin: CollapsedMargin::ZERO,
+                empty: true,
+            };
         }
 
         let node = self.doc.node(id);
@@ -331,7 +343,10 @@ impl<'a> FlowCtx<'a> {
         };
         *y = cy + border.bottom + padding.bottom;
         self.depth -= 1;
-        BlockFlow { margin: margin_bottom, empty: false }
+        BlockFlow {
+            margin: margin_bottom,
+            empty: false,
+        }
     }
 
     fn image(
@@ -751,7 +766,10 @@ impl<'a> FlowCtx<'a> {
             VerticalAlign::Sub => parent.font.size / 5.0,
             VerticalAlign::Middle => {
                 let (ascent, descent, _, _) = self.metrics(style);
-                self.env.measurer.x_height(parent.font.font, parent.font.size) * 0.5
+                self.env
+                    .measurer
+                    .x_height(parent.font.font, parent.font.size)
+                    * 0.5
                     + (ascent - descent) * 0.5
             }
             VerticalAlign::TextTop => {
@@ -802,7 +820,9 @@ impl<'a> FlowCtx<'a> {
     fn line_link(&self, pieces: &[Piece], line: &[Ch]) -> Option<String> {
         for ch in line {
             let node = pieces[ch.piece as usize].node;
-            let Some(owner) = self.owner_id(node) else { continue };
+            let Some(owner) = self.owner_id(node) else {
+                continue;
+            };
             for id in self.owner_chain(owner).into_iter().rev() {
                 if let Some(link) = self.doc.node(id).link.as_ref() {
                     return Some(link.clone());
@@ -1003,7 +1023,10 @@ impl<'a> FlowCtx<'a> {
             .src
             .as_ref()
             .map(|a| a.with_offset(first.off));
-        let glyphs = Span::new(glyph_start_all, self.flow.glyphs.len() as u32 - glyph_start_all);
+        let glyphs = Span::new(
+            glyph_start_all,
+            self.flow.glyphs.len() as u32 - glyph_start_all,
+        );
         let link = self.line_link(pieces, line);
 
         let mut unresolved = Vec::new();

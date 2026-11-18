@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 pub const FONT_STACK_MAX: usize = 8;
 pub const FONT_FAMILY_MAX: usize = 32;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub struct FontId(pub u16);
 
 impl FontId {
@@ -28,7 +30,10 @@ pub struct FontFamily {
 
 impl Default for FontFamily {
     fn default() -> Self {
-        Self { len: 0, bytes: [0; FONT_FAMILY_MAX] }
+        Self {
+            len: 0,
+            bytes: [0; FONT_FAMILY_MAX],
+        }
     }
 }
 
@@ -65,7 +70,10 @@ pub struct FontFamilies {
 
 impl Default for FontFamilies {
     fn default() -> Self {
-        Self { len: 0, items: [FontFamily::default(); FONT_STACK_MAX] }
+        Self {
+            len: 0,
+            items: [FontFamily::default(); FONT_STACK_MAX],
+        }
     }
 }
 
@@ -135,7 +143,11 @@ pub struct FontDesc {
 
 impl Default for FontDesc {
     fn default() -> Self {
-        Self { family: String::new(), weight: 400, style: FontStyle::Normal }
+        Self {
+            family: String::new(),
+            weight: 400,
+            style: FontStyle::Normal,
+        }
     }
 }
 

@@ -18,7 +18,9 @@ impl<'a> EpubReader<'a> {
     pub fn open(raw: &'a [u8]) -> Result<Self, FormatError> {
         let zip = ZipArchive::parse(raw).map_err(|_| FormatError::Malformed("zip"))?;
         let opf_path = container_opf(&zip).ok_or(FormatError::Missing("container.xml"))?;
-        let opf = zip.read_text(&opf_path).ok_or(FormatError::Missing("opf"))?;
+        let opf = zip
+            .read_text(&opf_path)
+            .ok_or(FormatError::Missing("opf"))?;
         let book = parse_opf(&opf, &opf_path)?;
         Ok(Self { zip, book })
     }
@@ -57,7 +59,9 @@ impl FormatAdapter for Epub {
         let raw = src.document().ok_or(FormatError::Missing("epub"))?;
         let zip = ZipArchive::parse(&raw).map_err(|_| FormatError::Malformed("zip"))?;
         let opf_path = container_opf(&zip).ok_or(FormatError::Missing("container.xml"))?;
-        let opf = zip.read_text(&opf_path).ok_or(FormatError::Missing("opf"))?;
+        let opf = zip
+            .read_text(&opf_path)
+            .ok_or(FormatError::Missing("opf"))?;
         parse_opf(&opf, &opf_path)
     }
 
@@ -164,9 +168,7 @@ fn parse_opf(text: &str, opf_path: &str) -> Result<Book, FormatError> {
         .filter(|s| !s.is_empty());
     let lang = doc
         .descendants()
-        .find(|n| {
-            n.is_element() && matches!(n.tag_name().name(), "language" | "lang")
-        })
+        .find(|n| n.is_element() && matches!(n.tag_name().name(), "language" | "lang"))
         .and_then(|n| n.text())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());

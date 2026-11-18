@@ -14,7 +14,9 @@ const PIXEL_BOOK: &str = "fixtures/typography.epub";
 const PIXEL_FONT: &str = "fixtures/font/test.ttf";
 
 fn main() -> ExitCode {
-    let cmd = std::env::args().nth(1).unwrap_or_else(|| String::from("all"));
+    let cmd = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| String::from("all"));
     match cmd.as_str() {
         "golden" => golden(false),
         "bless" => golden(true),
@@ -42,9 +44,7 @@ fn main() -> ExitCode {
             }
         }
         _ => {
-            eprintln!(
-                "usage: xtask [all|golden|bless|contract|app|pixel|pixel-bless|size|parity]"
-            );
+            eprintln!("usage: xtask [all|golden|bless|contract|app|pixel|pixel-bless|size|parity]");
             ExitCode::from(2)
         }
     }
@@ -55,18 +55,27 @@ fn ir_for(name: &str, bytes: Vec<u8>) -> Vec<u8> {
     src.insert(name, bytes);
     let opened = ebook_format::open(&src).expect("format");
     let doc = opened.chapter(&src, 0).expect("chapter");
-    let env = LayoutEnv { measurer: &StubMeasurer, resources: &NoImageSizes };
+    let env = LayoutEnv {
+        measurer: &StubMeasurer,
+        resources: &NoImageSizes,
+    };
     let constraint = PageConstraint::new(600.0, 800.0).with_margin(EdgesF::all(24.0));
     let ir = Layout::new().layout(&doc, &env, &constraint);
     codec::to_bytes(&ir).expect("encode")
 }
 
 fn demo_ir() -> Vec<u8> {
-    ir_for("demo.txt", std::fs::read("fixtures/demo.txt").expect("fixtures/demo.txt"))
+    ir_for(
+        "demo.txt",
+        std::fs::read("fixtures/demo.txt").expect("fixtures/demo.txt"),
+    )
 }
 
 fn epub_ir() -> Vec<u8> {
-    ir_for("demo.epub", std::fs::read("fixtures/demo.epub").expect("fixtures/demo.epub"))
+    ir_for(
+        "demo.epub",
+        std::fs::read("fixtures/demo.epub").expect("fixtures/demo.epub"),
+    )
 }
 
 fn golden(bless: bool) -> ExitCode {
@@ -124,7 +133,10 @@ fn pixel_ir() -> LayoutResult {
     let doc = opened.chapter(&src, 0).expect("chapter");
     let mut fonts = FontBook::new();
     fonts.add(font).expect("font");
-    let env = LayoutEnv { measurer: &fonts, resources: &NoImageSizes };
+    let env = LayoutEnv {
+        measurer: &fonts,
+        resources: &NoImageSizes,
+    };
     let constraint = PageConstraint::new(480.0, 640.0).with_margin(EdgesF::all(36.0));
     Layout::new().layout(&doc, &env, &constraint)
 }
@@ -342,7 +354,12 @@ fn run_parity() -> Result<(), String> {
 }
 
 fn gzip_len(path: &Path) -> Option<usize> {
-    let out = Command::new("gzip").arg("-9").arg("-c").arg(path).output().ok()?;
+    let out = Command::new("gzip")
+        .arg("-9")
+        .arg("-c")
+        .arg(path)
+        .output()
+        .ok()?;
     if out.status.success() {
         Some(out.stdout.len())
     } else {

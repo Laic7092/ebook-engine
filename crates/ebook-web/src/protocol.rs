@@ -2,7 +2,13 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
-    Layout { spine: u32, text: String, width: f32, height: f32, margin: f32 },
+    Layout {
+        spine: u32,
+        text: String,
+        width: f32,
+        height: f32,
+        margin: f32,
+    },
     Ping,
 }
 
@@ -17,12 +23,20 @@ pub fn handle(bytes: &[u8]) -> Vec<u8> {
     let request = match postcard::from_bytes::<Request>(bytes) {
         Ok(request) => request,
         Err(_) => {
-            return postcard::to_allocvec(&Response::Error { message: String::from("decode") })
-                .unwrap_or_default()
+            return postcard::to_allocvec(&Response::Error {
+                message: String::from("decode"),
+            })
+            .unwrap_or_default()
         }
     };
     let response = match request {
-        Request::Layout { spine, text, width, height, margin } => {
+        Request::Layout {
+            spine,
+            text,
+            width,
+            height,
+            margin,
+        } => {
             let ir = crate::layout_text(&text, width, height, margin);
             let hash = ebook_ir::codec::hash_of(&ir);
             Response::Ready { spine, hash, ir }

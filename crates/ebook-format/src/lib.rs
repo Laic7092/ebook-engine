@@ -142,7 +142,10 @@ pub fn open(src: &dyn ByteSource) -> Result<Opened, FormatError> {
     for adapter in adapters() {
         let probe = adapter.probe(src);
         if probe == Probe::Yes {
-            return Ok(Opened { adapter: *adapter, book: adapter.open(src)? });
+            return Ok(Opened {
+                adapter: *adapter,
+                book: adapter.open(src)?,
+            });
         }
         if probe == Probe::Maybe && best == Probe::No {
             best = probe;
@@ -150,7 +153,10 @@ pub fn open(src: &dyn ByteSource) -> Result<Opened, FormatError> {
         }
     }
     match chosen {
-        Some(adapter) => Ok(Opened { adapter, book: adapter.open(src)? }),
+        Some(adapter) => Ok(Opened {
+            adapter,
+            book: adapter.open(src)?,
+        }),
         None => Err(FormatError::Unsupported("no adapter")),
     }
 }

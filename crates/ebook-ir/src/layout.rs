@@ -76,13 +76,26 @@ pub struct GlyphRun {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Op {
     GlyphRun(GlyphRun),
-    Rect { rect: RectF, color: Rgba8 },
+    Rect {
+        rect: RectF,
+        color: Rgba8,
+    },
     Border(BorderBox),
-    Image { id: ImageId, rect: RectF, fit: Fit },
+    Image {
+        id: ImageId,
+        rect: RectF,
+        fit: Fit,
+    },
     Unresolved(Unresolved),
-    Clip { rect: RectF, ops: Vec<Op> },
+    Clip {
+        rect: RectF,
+        ops: Vec<Op>,
+    },
     /// 链接热区。`rect` 是排版流坐标（与行盒矩形同形），`href` 是原文的属性值。
-    Link { rect: RectF, href: String },
+    Link {
+        rect: RectF,
+        href: String,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -198,12 +211,36 @@ impl Limits {
     pub fn resolved(self) -> Self {
         let d = Self::default();
         Self {
-            max_nodes: if self.max_nodes == 0 { d.max_nodes } else { self.max_nodes },
-            max_depth: if self.max_depth == 0 { d.max_depth } else { self.max_depth },
-            max_text_bytes: if self.max_text_bytes == 0 { d.max_text_bytes } else { self.max_text_bytes },
-            max_pages: if self.max_pages == 0 { d.max_pages } else { self.max_pages },
-            max_lines: if self.max_lines == 0 { d.max_lines } else { self.max_lines },
-            max_image_pixels: if self.max_image_pixels == 0 { d.max_image_pixels } else { self.max_image_pixels },
+            max_nodes: if self.max_nodes == 0 {
+                d.max_nodes
+            } else {
+                self.max_nodes
+            },
+            max_depth: if self.max_depth == 0 {
+                d.max_depth
+            } else {
+                self.max_depth
+            },
+            max_text_bytes: if self.max_text_bytes == 0 {
+                d.max_text_bytes
+            } else {
+                self.max_text_bytes
+            },
+            max_pages: if self.max_pages == 0 {
+                d.max_pages
+            } else {
+                self.max_pages
+            },
+            max_lines: if self.max_lines == 0 {
+                d.max_lines
+            } else {
+                self.max_lines
+            },
+            max_image_pixels: if self.max_image_pixels == 0 {
+                d.max_image_pixels
+            } else {
+                self.max_image_pixels
+            },
         }
     }
 }
@@ -248,7 +285,9 @@ impl LayoutResult {
     }
 
     pub fn page_of_line(&self, line: u32) -> Option<&Page> {
-        self.pages.iter().find(|p| line >= p.lines.start && line < p.lines.end())
+        self.pages
+            .iter()
+            .find(|p| line >= p.lines.start && line < p.lines.end())
     }
 
     /// 页内坐标 → 排版流坐标。逆着 `paint` 的平移：
@@ -271,10 +310,17 @@ impl LayoutResult {
         let start = page_ref.lines.start as usize;
         let end = page_ref.lines.end() as usize;
         let lines = self.runs.lines.get(start..end)?;
-        let (offset, line) = lines.iter().enumerate().find(|(_, line)| line.rect.contains(flow))?;
+        let (offset, line) = lines
+            .iter()
+            .enumerate()
+            .find(|(_, line)| line.rect.contains(flow))?;
         let index = start + offset;
         let byte = self.nearest_byte(page_ref, line, flow.x);
-        Some(Location { page: page_ref.index, line: index as u32, byte })
+        Some(Location {
+            page: page_ref.index,
+            line: index as u32,
+            byte,
+        })
     }
 
     /// 行内离 `x` 最近的字形在本行 `src` 文本里的字节偏移。
@@ -314,20 +360,30 @@ impl LayoutResult {
     pub fn location_of(&self, a: &Anchor) -> Option<Location> {
         let mut last: Option<(u32, u32)> = None;
         for (index, line) in self.runs.lines.iter().enumerate() {
-            let Some(anchor) = line.anchor.as_ref() else { continue };
+            let Some(anchor) = line.anchor.as_ref() else {
+                continue;
+            };
             if anchor.spine != a.spine || anchor.path != a.path {
                 continue;
             }
             let byte = a.offset.saturating_sub(anchor.offset);
             if byte <= line.src.len {
                 let page = self.page_of_line(index as u32)?;
-                return Some(Location { page: page.index, line: index as u32, byte });
+                return Some(Location {
+                    page: page.index,
+                    line: index as u32,
+                    byte,
+                });
             }
             last = Some((index as u32, line.src.len));
         }
         let (line, byte) = last?;
         let page = self.page_of_line(line)?;
-        Some(Location { page: page.index, line, byte })
+        Some(Location {
+            page: page.index,
+            line,
+            byte,
+        })
     }
 
     /// 页内坐标 → 原文锚点。字节偏移会累加进锚点，所以能和 `location_of` 往返。

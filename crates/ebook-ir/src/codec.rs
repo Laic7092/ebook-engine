@@ -11,7 +11,10 @@ pub const HEADER_LEN: usize = 8;
 pub enum CodecError {
     TooShort,
     BadMagic,
-    Version { found: IrVersion, expected: IrVersion },
+    Version {
+        found: IrVersion,
+        expected: IrVersion,
+    },
     Encode,
     Decode,
 }
@@ -50,7 +53,10 @@ pub fn read_header(bytes: &[u8]) -> Result<IrVersion, CodecError> {
         minor: u16::from_le_bytes([bytes[6], bytes[7]]),
     };
     if found.major != IR_VERSION.major {
-        return Err(CodecError::Version { found, expected: IR_VERSION });
+        return Err(CodecError::Version {
+            found,
+            expected: IR_VERSION,
+        });
     }
     Ok(found)
 }

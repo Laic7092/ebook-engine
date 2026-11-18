@@ -7,7 +7,12 @@ use ebook_ir::{
 };
 
 fn ir() -> ebook_ir::LayoutResult {
-    let glyphs = vec![Glyph { gid: 7, dx: 6.5, dy: 0.0, ch: 3 }];
+    let glyphs = vec![Glyph {
+        gid: 7,
+        dx: 6.5,
+        dy: 0.0,
+        ch: 3,
+    }];
     let ops = vec![
         Op::GlyphRun(GlyphRun {
             font: FontId(2),
@@ -19,7 +24,10 @@ fn ir() -> ebook_ir::LayoutResult {
             dir: Dir::Ltr,
             rotate: Rotate::None,
         }),
-        Op::Link { rect: RectF::new(10.0, 20.0, 6.5, 16.0), href: String::from("ch2.xhtml#n") },
+        Op::Link {
+            rect: RectF::new(10.0, 20.0, 6.5, 16.0),
+            href: String::from("ch2.xhtml#n"),
+        },
         Op::Unresolved(Unresolved {
             node: 4,
             rect: RectF::new(0.0, 0.0, 8.0, 8.0),
@@ -31,7 +39,11 @@ fn ir() -> ebook_ir::LayoutResult {
         baseline: 32.0,
         dir: Dir::Ltr,
         src: Span::new(5, 1),
-        anchor: Some(Anchor { spine: 0, path: vec![1, 2], offset: 5 }),
+        anchor: Some(Anchor {
+            spine: 0,
+            path: vec![1, 2],
+            offset: 5,
+        }),
         glyphs: Span::new(0, 1),
         node: 9,
     }];

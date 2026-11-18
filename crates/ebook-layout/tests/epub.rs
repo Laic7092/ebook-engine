@@ -4,14 +4,20 @@ use ebook_layout::{layout, LayoutEnv, NoImageSizes, PageConstraint, StubMeasurer
 
 fn chapter() -> StyledDoc {
     let mut src = MemorySource::new();
-    src.insert("demo.epub", include_bytes!("../../../fixtures/demo.epub").to_vec());
+    src.insert(
+        "demo.epub",
+        include_bytes!("../../../fixtures/demo.epub").to_vec(),
+    );
     let opened = open(&src).expect("open");
     opened.chapter(&src, 0).expect("chapter")
 }
 
 fn ir() -> ebook_ir::LayoutResult {
     let doc = chapter();
-    let env = LayoutEnv { measurer: &StubMeasurer, resources: &NoImageSizes };
+    let env = LayoutEnv {
+        measurer: &StubMeasurer,
+        resources: &NoImageSizes,
+    };
     let constraint = PageConstraint::new(600.0, 800.0).with_margin(EdgesF::all(24.0));
     layout(&doc, &env, &constraint)
 }

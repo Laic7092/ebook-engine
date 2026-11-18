@@ -1,7 +1,5 @@
 use ab_glyph_rasterizer::{point, Point, Rasterizer};
-use ebook_ir::{
-    FontDesc, FontId, FontSpec, FontStyle, GlyphBitmap, ImageData, ImageId, Resources,
-};
+use ebook_ir::{FontDesc, FontId, FontSpec, FontStyle, GlyphBitmap, ImageData, ImageId, Resources};
 use ebook_layout::TextMeasurer;
 use ttf_parser::Face;
 
@@ -32,7 +30,10 @@ impl Metrics {
         let ascender = face.ascender() as f32;
         let descender = face.descender() as f32;
         let advances = (0..face.number_of_glyphs())
-            .map(|gid| face.glyph_hor_advance(ttf_parser::GlyphId(gid)).unwrap_or(0))
+            .map(|gid| {
+                face.glyph_hor_advance(ttf_parser::GlyphId(gid))
+                    .unwrap_or(0)
+            })
             .collect();
         let mut cmap = Vec::new();
         if let Some(table) = face.tables().cmap {
@@ -49,11 +50,22 @@ impl Metrics {
         }
         cmap.sort_unstable_by_key(|entry| entry.0);
         cmap.dedup_by_key(|entry| entry.0);
-        Some(Self { desc, bytes, units_per_em, ascender, descender, advances, cmap })
+        Some(Self {
+            desc,
+            bytes,
+            units_per_em,
+            ascender,
+            descender,
+            advances,
+            cmap,
+        })
     }
 
     fn glyph(&self, ch: char) -> u16 {
-        match self.cmap.binary_search_by_key(&(ch as u32), |entry| entry.0) {
+        match self
+            .cmap
+            .binary_search_by_key(&(ch as u32), |entry| entry.0)
+        {
             Ok(index) => self.cmap[index].1,
             Err(_) => 0,
         }
@@ -105,7 +117,11 @@ impl FontBook {
         bytes: Vec<u8>,
     ) -> Option<FontId> {
         self.add_face(
-            FontDesc { family: family.into(), weight, style },
+            FontDesc {
+                family: family.into(),
+                weight,
+                style,
+            },
             bytes,
         )
     }
@@ -119,7 +135,9 @@ impl FontBook {
     }
 
     pub fn desc(&self, id: FontId) -> Option<&FontDesc> {
-        self.faces.get(self.real_index(id)?).map(|metrics| &metrics.desc)
+        self.faces
+            .get(self.real_index(id)?)
+            .map(|metrics| &metrics.desc)
     }
 
     pub fn select(&self, spec: &FontSpec) -> FontId {
@@ -276,7 +294,11 @@ impl FontBook {
         }
         let index = self.real_index(id)?;
         let face = self.face(FontId(index as u16))?;
-        let shear = if self.is_synthetic_italic(id) { SYNTH_SHEAR } else { 0.0 };
+        let shear = if self.is_synthetic_italic(id) {
+            SYNTH_SHEAR
+        } else {
+            0.0
+        };
         let mut bounds = Bounds::new(shear);
         face.outline_glyph(ttf_parser::GlyphId(gid), &mut bounds)?;
         if !bounds.any {
@@ -492,8 +514,9 @@ impl ttf_parser::OutlineBuilder for RasterOutline<'_> {
         let control1 = self.map(x1, y1);
         let control2 = self.map(x2, y2);
         let end = self.map(x, y);
-        let excess = distance(start, control1) + distance(control1, control2)
-            + distance(control2, end) - distance(start, end);
+        let excess =
+            distance(start, control1) + distance(control1, control2) + distance(control2, end)
+                - distance(start, end);
         let steps = curve_steps(excess);
         let mut previous = start;
         for i in 1..=steps {
@@ -529,33 +552,46 @@ fn curve_steps(excess: f32) -> usize {
 
 fn quad_at(a: Point, b: Point, c: Point, t: f32) -> Point {
     let u = 1.0 - t;
-    point(u * u * a.x + 2.0 * u * t * b.x + t * t * c.x,
-          u * u * a.y + 2.0 * u * t * b.y + t * t * c.y)
+    point(
+        u * u * a.x + 2.0 * u * t * b.x + t * t * c.x,
+        u * u * a.y + 2.0 * u * t * b.y + t * t * c.y,
+    )
 }
 
 fn cubic_at(a: Point, b: Point, c: Point, d: Point, t: f32) -> Point {
     let u = 1.0 - t;
-    point(u * u * u * a.x + 3.0 * u * u * t * b.x + 3.0 * u * t * t * c.x + t * t * t * d.x,
-          u * u * u * a.y + 3.0 * u * u * t * b.y + 3.0 * u * t * t * c.y + t * t * t * d.y)
+    point(
+        u * u * u * a.x + 3.0 * u * u * t * b.x + 3.0 * u * t * t * c.x + t * t * t * d.x,
+        u * u * u * a.y + 3.0 * u * u * t * b.y + 3.0 * u * t * t * c.y + t * t * t * d.y,
+    )
 }
 
 impl TextMeasurer for FontBook {
     fn advance(&self, ch: char, font: FontId, size: f32) -> f32 {
-        match self.real_index(font).and_then(|index| self.faces.get(index)) {
+        match self
+            .real_index(font)
+            .and_then(|index| self.faces.get(index))
+        {
             Some(metrics) => metrics.advance(ch) * size,
             None => 0.0,
         }
     }
 
     fn ascent(&self, font: FontId, size: f32) -> f32 {
-        match self.real_index(font).and_then(|index| self.faces.get(index)) {
+        match self
+            .real_index(font)
+            .and_then(|index| self.faces.get(index))
+        {
             Some(metrics) => metrics.ascender / metrics.units_per_em * size,
             None => size * 0.8,
         }
     }
 
     fn descent(&self, font: FontId, size: f32) -> f32 {
-        match self.real_index(font).and_then(|index| self.faces.get(index)) {
+        match self
+            .real_index(font)
+            .and_then(|index| self.faces.get(index))
+        {
             Some(metrics) => metrics.descender.abs() / metrics.units_per_em * size,
             None => size * 0.2,
         }

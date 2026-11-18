@@ -164,7 +164,10 @@ impl Layout {
             version: IR_VERSION,
             spine: doc.meta.spine,
             pages: builder.pages,
-            display: DisplayList { ops, glyphs: built.glyphs },
+            display: DisplayList {
+                ops,
+                glyphs: built.glyphs,
+            },
             runs: RunMap { lines },
             dirty: built.dirty,
             issues,
@@ -179,7 +182,11 @@ fn issue_of(unresolved: &ebook_ir::Unresolved) -> Issue {
         UnresolvedReason::FontMissing => IssueCode::MissingGlyph,
         UnresolvedReason::SizeFromContent => IssueCode::SizeFromContent,
     };
-    Issue { node: unresolved.node, code, detail: None }
+    Issue {
+        node: unresolved.node,
+        code,
+        detail: None,
+    }
 }
 
 fn units_of(items: &[flow::Item]) -> Vec<paginate::Unit> {

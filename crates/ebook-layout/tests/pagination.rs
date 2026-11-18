@@ -14,7 +14,10 @@ fn layout_html(css: &str, body: &str) -> LayoutResult {
          h2{{margin:0;line-height:24px}}{css}</style></head><body>{body}</body></html>"
     );
     let doc: StyledDoc = build(&html, 0, &mut NoAssets).expect("xhtml");
-    let env = LayoutEnv { measurer: &StubMeasurer, resources: &NoImageSizes };
+    let env = LayoutEnv {
+        measurer: &StubMeasurer,
+        resources: &NoImageSizes,
+    };
     let constraint = PageConstraint::new(600.0, 800.0).with_margin(EdgesF::all(24.0));
     layout(&doc, &env, &constraint)
 }
@@ -39,14 +42,20 @@ fn widows_pulls_lines_to_the_next_page() {
 fn orphans_pushes_a_short_fragment_down() {
     let body = format!("<p>{}</p><p>{}</p>", lines(29), lines(40));
     assert_eq!(per_page(&layout_html("", &body)), vec![31, 31, 7]);
-    assert_eq!(per_page(&layout_html("p{orphans:3}", &body)), vec![29, 31, 9]);
+    assert_eq!(
+        per_page(&layout_html("p{orphans:3}", &body)),
+        vec![29, 31, 9]
+    );
 }
 
 #[test]
 fn heading_is_not_stranded_at_the_bottom() {
     let body = format!("<p>{}</p><h2>h</h2><p>{}</p>", lines(30), lines(5));
     assert_eq!(per_page(&layout_html("", &body)), vec![30, 6]);
-    assert_eq!(per_page(&layout_html("h2{break-after:auto}", &body)), vec![31, 5]);
+    assert_eq!(
+        per_page(&layout_html("h2{break-after:auto}", &body)),
+        vec![31, 5]
+    );
 }
 
 #[test]
@@ -83,7 +92,12 @@ fn pages_start_at_their_first_line() {
 
 #[test]
 fn pagination_is_deterministic() {
-    let body = format!("<p>{}</p><h2>h</h2><p>{}</p><p>{}</p>", lines(29), lines(40), lines(7));
+    let body = format!(
+        "<p>{}</p><h2>h</h2><p>{}</p><p>{}</p>",
+        lines(29),
+        lines(40),
+        lines(7)
+    );
     let first = layout_html("p{widows:2;orphans:2}", &body);
     let second = layout_html("p{widows:2;orphans:2}", &body);
     assert_eq!(first, second);
