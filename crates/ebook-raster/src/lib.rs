@@ -509,7 +509,7 @@ impl RgbaSurface {
                 )
             }
         };
-        if !(dw > 0.0) || !(dh > 0.0) {
+        if !(dw > 0.0 && dh > 0.0) {
             return;
         }
         let clip = self.clip();
@@ -732,7 +732,7 @@ fn sample_bilinear(image: &ImageData, fx: i64, fy: i64) -> Option<Rgba8> {
     }
     let mut channel = [0u8; 3];
     for (slot, out) in acc.iter().zip(channel.iter_mut()) {
-        let premultiplied = ((*slot + 32768) >> 16) as u64;
+        let premultiplied = (*slot + 32768) >> 16;
         let straight = (premultiplied * RECIP[alpha as usize] as u64 + 32768) >> 16;
         *out = straight.min(255) as u8;
     }

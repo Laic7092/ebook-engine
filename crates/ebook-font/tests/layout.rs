@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use ebook_font::FontBook;
 use ebook_ir::doc::{FontSpec, TextStyle};
 use ebook_ir::{
-    Anchor, ComputedStyle, Dir, Display, FontId, LayoutResult, Len, LineHeight, Node, NodeId,
-    NodeKind, Op, Rgba8, Span, StyledDoc, Tag,
+    Anchor, ComputedStyle, Dir, FontId, LayoutResult, LineHeight, Node, NodeId, NodeKind, Op,
+    Rgba8, Span, StyledDoc, Tag,
 };
 use ebook_layout::{layout, LayoutEnv, NoImageSizes, PageConstraint, TextMeasurer};
 
@@ -20,18 +20,16 @@ fn book() -> FontBook {
 }
 
 fn block_style(size: f32) -> ComputedStyle {
-    let mut style = ComputedStyle::default();
-    style.display = Display::Block;
-    style.font = FontSpec {
-        font: FontId(0),
-        size,
-        weight: 400,
-        ..FontSpec::default()
-    };
-    style.line_height = LineHeight::Px(size * 1.5);
-    style.margin.top = Len::ZERO;
-    style.margin.bottom = Len::ZERO;
-    style
+    ComputedStyle {
+        font: FontSpec {
+            font: FontId(0),
+            size,
+            weight: 400,
+            ..FontSpec::default()
+        },
+        line_height: LineHeight::Px(size * 1.5),
+        ..ComputedStyle::default()
+    }
 }
 
 fn inline_style(size: f32) -> ComputedStyle {
@@ -157,8 +155,10 @@ fn letter_spacing_is_added_after_shaping() {
     let base = fonts.shape("fi", FontId(0), 32.0, &mut shaped);
     assert_eq!(shaped.len(), 1);
 
-    let mut style = TextStyle::default();
-    style.letter_spacing = 2.0;
+    let style = TextStyle {
+        letter_spacing: 2.0,
+        ..TextStyle::default()
+    };
     let ir = run(&doc("fi", 32.0, style));
     // 两个字距加在唯一的合字簇上。
     assert!(

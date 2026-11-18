@@ -487,7 +487,7 @@ fn truncated_results_are_still_decodable() {
     let bytes = codec::to_bytes(&ir).expect("encode");
     let back: LayoutResult = codec::decode(&bytes).expect("decode");
     assert_eq!(back, ir);
-    assert_eq!(back.truncated, true);
+    assert!(back.truncated);
     assert_legal(&back);
     let _ = (DisplayList::default(), Span::EMPTY);
 }
