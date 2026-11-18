@@ -411,6 +411,8 @@ pub struct Node {
     pub first_child: u32,
     pub child_len: u32,
     pub src: Option<Anchor>,
+    /// 链接目标（`<a href>`）。默认空；格式层负责填，排版层只负责发射 `Op::Link`。
+    pub link: Option<String>,
 }
 
 impl Node {

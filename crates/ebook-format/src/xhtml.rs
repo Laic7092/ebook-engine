@@ -62,6 +62,7 @@ impl Builder {
                     first_child: 0,
                     child_len: 0,
                     src: Some(Anchor { spine: self.spine, path: path.clone(), offset: 0 }),
+                    link: None,
                 },
                 key,
             ));
@@ -132,6 +133,7 @@ impl Builder {
             first_child: 0,
             child_len: 0,
             src: Some(Anchor { spine: self.spine, path: path.clone(), offset: 0 }),
+            link: None,
         };
         let id = self.push(node, key);
 

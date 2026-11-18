@@ -46,6 +46,9 @@ fn paint_ops(
                 paint_ops(ir, ops, surface, res, origin);
                 surface.pop_clip();
             }
+            Op::Link { rect, href } => {
+                surface.link(rect.shifted(-origin.x, -origin.y), href);
+            }
         }
     }
 }

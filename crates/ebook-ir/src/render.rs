@@ -57,6 +57,8 @@ pub trait Surface {
     fn border(&mut self, border: &BorderBox);
     fn image(&mut self, id: ImageId, rect: RectF, fit: Fit, res: &mut dyn Resources);
     fn unresolved(&mut self, unresolved: &Unresolved);
+    /// 链接热区。默认什么都不画：光栅后端保持透明，SVG 后端输出 `<a>`。
+    fn link(&mut self, _rect: RectF, _href: &str) {}
     fn push_clip(&mut self, _rect: RectF) {}
     fn pop_clip(&mut self) {}
 }

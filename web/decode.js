@@ -114,7 +114,7 @@ function readPage(r) {
 }
 
 function readGlyph(r) {
-  return { gid: r.varint(), dx: r.f32(), dy: r.f32() };
+  return { gid: r.varint(), dx: r.f32(), dy: r.f32(), ch: r.varint() };
 }
 
 function readGlyphRun(r) {
@@ -158,6 +158,9 @@ function readOp(r) {
   if (tag === 5) {
     return { type: "clip", rect: readRect(r), ops: readVec(r, readOp) };
   }
+  if (tag === 6) {
+    return { type: "link", rect: readRect(r), href: r.string() };
+  }
   throw new Error(`bad op tag ${tag}`);
 }
 
@@ -168,7 +171,13 @@ function readLineBox(r) {
     dir: r.varint(),
     src: readSpan(r),
     anchor: r.option(readAnchor),
+    glyphs: readSpan(r),
+    node: r.varint(),
   };
+}
+
+function readIssue(r) {
+  return { node: r.varint(), code: r.varint(), detail: r.option((x) => x.string()) };
 }
 
 function readDirty(r) {
@@ -188,6 +197,7 @@ function readLayout(r) {
       lines: readVec(r, readLineBox),
     },
     dirty: readVec(r, readDirty),
+    issues: readVec(r, readIssue),
   };
 }
 

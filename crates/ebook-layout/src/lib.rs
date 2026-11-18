@@ -11,8 +11,8 @@ mod resolve;
 use alloc::vec::Vec;
 
 use ebook_ir::{
-    DisplayList, EdgesF, FontId, FontSpec, GlyphRun, ImageId, LayoutResult, LineBox, Op, RectF,
-    RunMap, SizeF, StyledDoc, WritingMode, IR_VERSION,
+    DisplayList, EdgesF, FontId, FontSpec, GlyphRun, ImageId, Issue, IssueCode, LayoutResult,
+    LineBox, Op, RectF, RunMap, SizeF, StyledDoc, UnresolvedReason, WritingMode, IR_VERSION,
 };
 
 pub use measure::{StubMeasurer, TextMeasurer};
@@ -101,6 +101,7 @@ impl Layout {
         let mut builder = paginate::PageBuilder::new(content, c.margin);
         let mut ops: Vec<Op> = Vec::new();
         let mut lines: Vec<LineBox> = Vec::new();
+        let mut issues: Vec<Issue> = Vec::new();
 
         for (index, item) in built.items.drain(..).enumerate() {
             let page = paginate::page_of(&starts, index);
@@ -121,13 +122,26 @@ impl Layout {
                             rotate: run.rotate,
                         }));
                     }
-                    ops.extend(line.unresolved);
+                    for op in line.unresolved {
+                        if let Op::Unresolved(unresolved) = &op {
+                            issues.push(issue_of(unresolved));
+                        }
+                        ops.push(op);
+                    }
+                    if let Some(href) = line.link {
+                        ops.push(Op::Link {
+                            rect: RectF::new(line.x, line.y, line.w, line.h),
+                            href,
+                        });
+                    }
                     lines.push(LineBox {
                         rect: RectF::new(line.x, line.y, line.w, line.h),
                         baseline: line.baseline,
                         dir: line.dir,
                         src: line.src,
                         anchor: line.anchor,
+                        glyphs: line.glyphs,
+                        node: line.node,
                     });
                 }
                 flow::Item::Op(Op::Image { id, rect, fit }) => {
@@ -136,7 +150,12 @@ impl Layout {
                         ops: alloc::vec![Op::Image { id, rect, fit }],
                     });
                 }
-                flow::Item::Op(op) => ops.push(op),
+                flow::Item::Op(op) => {
+                    if let Op::Unresolved(unresolved) = &op {
+                        issues.push(issue_of(unresolved));
+                    }
+                    ops.push(op);
+                }
             }
         }
         builder.close(ops.len() as u32, lines.len() as u32);
@@ -148,8 +167,19 @@ impl Layout {
             display: DisplayList { ops, glyphs: built.glyphs },
             runs: RunMap { lines },
             dirty: built.dirty,
+            issues,
         }
     }
+}
+
+/// 未解析占位 → 诊断条目。本轮只在遇到 `Unresolved` 时顺手记录，不做拦截。
+fn issue_of(unresolved: &ebook_ir::Unresolved) -> Issue {
+    let code = match unresolved.reason {
+        UnresolvedReason::ImagePending => IssueCode::MissingImage,
+        UnresolvedReason::FontMissing => IssueCode::MissingGlyph,
+        UnresolvedReason::SizeFromContent => IssueCode::SizeFromContent,
+    };
+    Issue { node: unresolved.node, code, detail: None }
 }
 
 fn units_of(items: &[flow::Item]) -> Vec<paginate::Unit> {

@@ -216,5 +216,7 @@ pub(crate) fn op_bounds(op: &Op) -> (f32, f32) {
         Op::Image { rect, .. } => (rect.y, rect.h),
         Op::Unresolved(u) => (u.rect.y, u.rect.h),
         Op::Clip { rect, .. } => (rect.y, rect.h),
+        // 链接热区与行盒同形；它总是跟着 `Item::Line` 一起进 ops，不会单独成为分页单元。
+        Op::Link { rect, .. } => (rect.y, rect.h),
     }
 }
