@@ -7,8 +7,19 @@ use ebook_layout::{Layout, LayoutEnv, NoImageSizes, PageConstraint, StubMeasurer
 use ebook_raster::RgbaSurface;
 
 const GZIP_BUDGET: usize = 512 * 1024;
-const WASM: &str = "target/wasm32-unknown-unknown/release/ebook_web.wasm";
-const PARITY_DIR: &str = "target/parity";
+fn target_dir() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("target"))
+}
+
+fn wasm_path() -> PathBuf {
+    target_dir().join("wasm32-unknown-unknown/release/ebook_web.wasm")
+}
+
+fn parity_dir() -> PathBuf {
+    target_dir().join("parity")
+}
 const PIXEL_GOLDEN: &str = "tests/golden/pixels.txt";
 const PIXEL_BOOK: &str = "fixtures/typography.epub";
 const PIXEL_FONT: &str = "fixtures/font/test.ttf";
@@ -273,9 +284,9 @@ fn build_wasm(features: &[&str]) -> Result<(), String> {
 
 fn measure(features: &[&str], label: &str) -> Result<usize, String> {
     build_wasm(features)?;
-    let path = PathBuf::from(WASM);
+    let path = wasm_path();
     let raw = std::fs::metadata(&path)
-        .map_err(|e| format!("missing {WASM}: {e}"))?
+        .map_err(|e| format!("missing {}: {e}", path.display()))?
         .len() as usize;
     match gzip_len(&path) {
         Some(gz) => {
@@ -321,15 +332,15 @@ fn parity() -> ExitCode {
 
 fn run_parity() -> Result<(), String> {
     build_wasm(&[])?;
-    let dir = Path::new(PARITY_DIR);
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let dir = parity_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let pkg = dir.join("js");
     let _ = std::fs::remove_dir_all(&pkg);
 
     let out = Command::new("wasm-bindgen")
         .args(["--target", "nodejs", "--out-dir"])
         .arg(&pkg)
-        .arg(WASM)
+        .arg(wasm_path())
         .output()
         .map_err(|e| format!("wasm-bindgen: {e}"))?;
     if !out.status.success() {
