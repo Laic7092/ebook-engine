@@ -213,5 +213,11 @@ export function decodeLayout(input) {
   const reader = new Reader(bytes, 8);
   const header = { major: reader.rawU16(4), minor: reader.rawU16(6) };
   const layout = readLayout(reader);
+  if (reader.pos !== bytes.length) {
+    throw new Error(`layout trailing bytes: ${bytes.length - reader.pos}`);
+  }
+  if (layout.version.major !== header.major || layout.version.minor !== header.minor) {
+    throw new Error(`layout version mismatch: header=${header.major}.${header.minor}`);
+  }
   return { header, ...layout };
 }

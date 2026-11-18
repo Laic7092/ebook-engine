@@ -92,15 +92,17 @@ op 坐标是**排版流坐标**，不是页面内坐标。`Page.origin` 表示�
 
 纯函数换来的可验证性，是这个架构真正的收益：
 
-| 手段 | 作用 |
-|---|---|
-| golden IR | 比字节流，不比像素。改算法时 diff 直接指出影响面。 |
-| 跨目标比对 | native 与 wasm 各跑一遍，逐字节相同。 |
-| 不变量 fuzz | 行不重叠、y 单调、op 切片连续、重复排版幂等。 |
-| 差分测试 | headless 浏览器用 `column-count` 排同一份 XHTML，比行数与断点。 |
-| 往返测试 | 锚点 ↔ 源码偏移双向可逆。 |
+| 手段 | 命令 | 失守时说明什么 |
+|---|---|---|
+| golden IR | `xtask golden` | 排版结果变了。字节 diff 直接指出变化面。 |
+| ABI 契约 | `xtask contract` | JS 解码器与 Rust 结构体字段不再一致。做法是把 golden IR 解出来再编回去，要求逐字节还原。 |
+| 像素基线 | `xtask pixel` | 渲染结果变了。逐页 FNV 摘要，`pixel-bless` 显式更新。 |
+| 跨目标比对 | `xtask parity` | native 与 wasm 不再逐字节相同。 |
+| 不变量 fuzz | `cargo test` | 60 个随机文档 × 3 种页面尺寸：页覆盖、行不越界、y 单调、页序单调、重复排版幂等、编解码往返不变。 |
 
 `DisplayList` 里禁止 `HashMap` / `HashSet`。遍历顺序决定字节流，序列化必须确定。
+
+IR 是 wasm 与 JS 之间唯一的接口，而 JS 侧的解码器是手写的，所以 `contract` 这项不是锦上添花：它把「改了 Rust 结构体，忘了改 JS」从静默错位变成一条带字节偏移的失败。
 
 ---
 
@@ -116,9 +118,8 @@ PDF；DRM；flex / grid；浏览器级 CSS 兼容；把 HTML 直接塞进 DOM �
 
 ```
 cargo test --workspace
-cargo run -p xtask -- golden
-cargo run -p xtask -- size
-cargo run -p xtask -- parity
+cargo run -p xtask -- all
+cargo run -p xtask -- golden | bless | contract | pixel | pixel-bless | size | parity
 cargo run -p ebook-cli -- layout fixtures/demo.epub --spine 0 --stats --svg page.svg
 cargo run -p ebook-raster --example page
 ./web/build.sh && python3 -m http.server

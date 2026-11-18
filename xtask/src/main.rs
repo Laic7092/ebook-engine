@@ -1,12 +1,17 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-use ebook_ir::{codec, EdgesF};
+use ebook_font::FontBook;
+use ebook_ir::{codec, EdgesF, LayoutResult};
 use ebook_layout::{Layout, LayoutEnv, NoImageSizes, PageConstraint, StubMeasurer};
+use ebook_raster::RgbaSurface;
 
 const GZIP_BUDGET: usize = 512 * 1024;
 const WASM: &str = "target/wasm32-unknown-unknown/release/ebook_web.wasm";
 const PARITY_DIR: &str = "target/parity";
+const PIXEL_GOLDEN: &str = "tests/golden/pixels.txt";
+const PIXEL_BOOK: &str = "fixtures/typography.epub";
+const PIXEL_FONT: &str = "fixtures/font/test.ttf";
 
 fn main() -> ExitCode {
     let cmd = std::env::args().nth(1).unwrap_or_else(|| String::from("all"));
@@ -15,9 +20,14 @@ fn main() -> ExitCode {
         "bless" => golden(true),
         "size" => size(),
         "parity" => parity(),
+        "pixel" => pixel(false),
+        "pixel-bless" => pixel(true),
+        "contract" => contract(),
         "all" => {
             let ok = [
                 golden(false),
+                contract(),
+                pixel(false),
                 size(),
                 parity(),
             ]
@@ -30,7 +40,9 @@ fn main() -> ExitCode {
             }
         }
         _ => {
-            eprintln!("usage: xtask [all|golden|bless|size|parity]");
+            eprintln!(
+                "usage: xtask [all|golden|bless|contract|pixel|pixel-bless|size|parity]"
+            );
             ExitCode::from(2)
         }
     }
@@ -98,6 +110,105 @@ fn golden(bless: bool) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+fn pixel_ir() -> LayoutResult {
+    let bytes = std::fs::read(PIXEL_BOOK).expect(PIXEL_BOOK);
+    let font = std::fs::read(PIXEL_FONT).expect(PIXEL_FONT);
+    let mut src = ebook_format::MemorySource::new();
+    src.insert("typography.epub", bytes);
+    let opened = ebook_format::open(&src).expect("format");
+    let doc = opened.chapter(&src, 0).expect("chapter");
+    let mut fonts = FontBook::new();
+    fonts.add(font).expect("font");
+    let env = LayoutEnv { measurer: &fonts, resources: &NoImageSizes };
+    let constraint = PageConstraint::new(480.0, 640.0).with_margin(EdgesF::all(36.0));
+    Layout::new().layout(&doc, &env, &constraint)
+}
+
+fn fnv(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+fn pixel_digest() -> Vec<String> {
+    let ir = pixel_ir();
+    let mut fonts = FontBook::new();
+    let font = std::fs::read(PIXEL_FONT).expect(PIXEL_FONT);
+    fonts.add(font).expect("font");
+    let mut lines = Vec::new();
+    for index in 0..ir.pages.len() as u32 {
+        let page = ir.page(index).expect("page");
+        let mut surface = RgbaSurface::from_page(page);
+        surface.render_page(&ir, index, &mut fonts).expect("render");
+        let mut raw = Vec::with_capacity(surface.pixels().len() * 4);
+        for pixel in surface.pixels() {
+            raw.extend_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
+        }
+        lines.push(format!(
+            "page {} {}x{} {:016x}",
+            page.index,
+            surface.width(),
+            surface.height(),
+            fnv(&raw)
+        ));
+    }
+    lines.push(format!("pages {}", ir.pages.len()));
+    lines
+}
+
+fn pixel(bless: bool) -> ExitCode {
+    let actual = pixel_digest().join("\n");
+    let path = Path::new(PIXEL_GOLDEN);
+    if bless {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        std::fs::write(path, format!("{actual}\n")).expect("write pixel golden");
+        println!("pixel golden written: {PIXEL_GOLDEN}");
+        return ExitCode::SUCCESS;
+    }
+    match std::fs::read_to_string(path) {
+        Ok(expected) if expected.trim_end() == actual => {
+            println!("pixel ok: {PIXEL_GOLDEN}");
+            ExitCode::SUCCESS
+        }
+        Ok(expected) => {
+            for (line, want) in actual.lines().zip(expected.lines()) {
+                if line != want {
+                    eprintln!("pixel mismatch:\n  golden: {want}\n  actual: {line}");
+                    break;
+                }
+            }
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("pixel golden missing: {PIXEL_GOLDEN}: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn contract() -> ExitCode {
+    let out = Command::new("bun").arg("tests/contract.mjs").output();
+    match out {
+        Ok(out) if out.status.success() => {
+            print!("{}", String::from_utf8_lossy(&out.stdout));
+            ExitCode::SUCCESS
+        }
+        Ok(out) => {
+            eprint!("{}", String::from_utf8_lossy(&out.stderr));
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("bun: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 
