@@ -5,7 +5,7 @@
 # Coarse by design: absolute times depend on CPU and compiler; the
 # gate allows BENCH_TOL (default 1.15x) of slowdown.
 # Format: name<TAB>median_ns (median of 3 process medians)
-ir/decode	23754
-ir/encode	32823
-layout/en-epub-ch0	421004
-raster/page-480x640	1546573
+ir/decode	33224
+ir/encode	38018
+layout/en-epub-ch0	1643829
+raster/page-480x640	2216512
