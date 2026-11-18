@@ -1,9 +1,9 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use ebook_ir::{
-    Anchor, Break, ComputedStyle, Dir, Display, DirtyBlock, Fit, FontId, Glyph, ImageId, NodeId,
-    NodeKind, Op, PointF, RectF, Rotate, Span, TextAlign, Unresolved, UnresolvedReason,
-    WhiteSpace,
+    Anchor, Break, ComputedStyle, Dir, DirtyBlock, Display, Fit, FontId, Glyph, ImageId, NodeId,
+    NodeKind, Op, PointF, RectF, Rotate, Span, TextAlign, TextTransform, Unresolved,
+    UnresolvedReason, WhiteSpace,
 };
 
 use crate::resolve;
@@ -32,6 +32,7 @@ pub(crate) struct LaidLine {
     pub(crate) src: Span,
     pub(crate) anchor: Option<Anchor>,
     pub(crate) runs: Vec<LaidRun>,
+    pub(crate) unresolved: Vec<Op>,
     pub(crate) block: u32,
     pub(crate) order: u16,
     pub(crate) len: u16,
@@ -84,11 +85,7 @@ struct FlowCtx<'a> {
     next_block: u32,
 }
 
-pub(crate) fn flow(
-    doc: &ebook_ir::StyledDoc,
-    env: &LayoutEnv<'_>,
-    c: &PageConstraint,
-) -> Flow {
+pub(crate) fn flow(doc: &ebook_ir::StyledDoc, env: &LayoutEnv<'_>, c: &PageConstraint) -> Flow {
     let content = c.content_size();
     let mut ctx = FlowCtx {
         doc,
@@ -224,7 +221,12 @@ impl<'a> FlowCtx<'a> {
         *y += rect.h + margin.bottom;
     }
 
-    fn image_size(&self, img: ImageId, style: &ComputedStyle, avail_w: f32) -> Option<ebook_ir::SizeF> {
+    fn image_size(
+        &self,
+        img: ImageId,
+        style: &ComputedStyle,
+        avail_w: f32,
+    ) -> Option<ebook_ir::SizeF> {
         let em = style.font.size;
         let w = style.width.resolve(avail_w, em);
         let h = style.height.resolve(0.0, em);
@@ -289,7 +291,11 @@ impl<'a> FlowCtx<'a> {
         for (pi, piece) in pieces.iter().enumerate() {
             match piece.kind {
                 PieceKind::Break => {
-                    out.push(Ch { c: '\n', off: 0, piece: pi as u16 });
+                    out.push(Ch {
+                        c: '\n',
+                        off: 0,
+                        piece: pi as u16,
+                    });
                     prev_space = false;
                 }
                 PieceKind::Text => {
@@ -298,6 +304,7 @@ impl<'a> FlowCtx<'a> {
                         piece.style.text.white_space,
                         WhiteSpace::Normal | WhiteSpace::Nowrap
                     );
+                    let transform = piece.style.text.transform;
                     for (off, raw) in text.char_indices() {
                         let c = match raw {
                             '\n' | '\r' | '\t' => ' ',
@@ -313,7 +320,31 @@ impl<'a> FlowCtx<'a> {
                                 prev_space = false;
                             }
                         }
-                        out.push(Ch { c, off: off as u32, piece: pi as u16 });
+                        match transform {
+                            TextTransform::None => out.push(Ch {
+                                c,
+                                off: off as u32,
+                                piece: pi as u16,
+                            }),
+                            TextTransform::Uppercase => {
+                                for t in c.to_uppercase() {
+                                    out.push(Ch {
+                                        c: t,
+                                        off: off as u32,
+                                        piece: pi as u16,
+                                    });
+                                }
+                            }
+                            TextTransform::Lowercase => {
+                                for t in c.to_lowercase() {
+                                    out.push(Ch {
+                                        c: t,
+                                        off: off as u32,
+                                        piece: pi as u16,
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -322,9 +353,16 @@ impl<'a> FlowCtx<'a> {
 
     fn advance(&self, ch: &Ch, pieces: &[Piece]) -> f32 {
         let style = &pieces[ch.piece as usize].style;
-        let base = self.env.measurer.advance(ch.c, style.font.font, style.font.size);
+        let base = self
+            .env
+            .measurer
+            .advance(ch.c, style.font.font, style.font.size);
         let spacing = style.text.letter_spacing
-            + if ch.c == ' ' { style.text.word_spacing } else { 0.0 };
+            + if ch.c == ' ' {
+                style.text.word_spacing
+            } else {
+                0.0
+            };
         (base + spacing).max(0.0)
     }
 
@@ -355,6 +393,10 @@ impl<'a> FlowCtx<'a> {
             .unwrap_or(0.0)
             .clamp(0.0, w);
 
+        let nowrap = base_style.text.white_space == WhiteSpace::Nowrap
+            || pieces
+                .iter()
+                .any(|p| p.style.text.white_space == WhiteSpace::Nowrap);
         let mut line_start = 0usize;
         let mut last_break: Option<usize> = None;
         let mut used = indent;
@@ -364,7 +406,17 @@ impl<'a> FlowCtx<'a> {
         while i < chars.len() {
             if chars[i].c == '\n' {
                 let pad = if first { indent } else { 0.0 };
-                self.emit_line(pieces, &chars[line_start..i], x0, y, w, pad, base_style, block, &mut order);
+                self.emit_line(
+                    pieces,
+                    &chars[line_start..i],
+                    x0,
+                    y,
+                    w,
+                    pad,
+                    base_style,
+                    block,
+                    &mut order,
+                );
                 first = false;
                 line_start = i + 1;
                 used = 0.0;
@@ -373,10 +425,22 @@ impl<'a> FlowCtx<'a> {
                 continue;
             }
             let adv = self.advance(&chars[i], pieces);
-            if used + adv > w + 0.001 && i > line_start {
-                let brk = last_break.filter(|&b| b > line_start && b <= i).unwrap_or(i);
+            if !nowrap && used + adv > w + 0.001 && i > line_start {
+                let brk = last_break
+                    .filter(|&b| b > line_start && b <= i)
+                    .unwrap_or(i);
                 let pad = if first { indent } else { 0.0 };
-                self.emit_line(pieces, &chars[line_start..brk], x0, y, w, pad, base_style, block, &mut order);
+                self.emit_line(
+                    pieces,
+                    &chars[line_start..brk],
+                    x0,
+                    y,
+                    w,
+                    pad,
+                    base_style,
+                    block,
+                    &mut order,
+                );
                 first = false;
                 line_start = brk;
                 while line_start < chars.len() && chars[line_start].c == ' ' {
@@ -402,10 +466,24 @@ impl<'a> FlowCtx<'a> {
 
         if line_start < chars.len() {
             let pad = if first { indent } else { 0.0 };
-            self.emit_line(pieces, &chars[line_start..], x0, y, w, pad, base_style, block, &mut order);
+            self.emit_line(
+                pieces,
+                &chars[line_start..],
+                x0,
+                y,
+                w,
+                pad,
+                base_style,
+                block,
+                &mut order,
+            );
         }
 
-        let count = (self.flow.items.len() - item_start).min(u16::MAX as usize) as u16;
+        let count = self.flow.items[item_start..]
+            .iter()
+            .filter(|item| matches!(item, Item::Line(_)))
+            .count()
+            .min(u16::MAX as usize) as u16;
         if count == 0 {
             return;
         }
@@ -414,8 +492,82 @@ impl<'a> FlowCtx<'a> {
                 line.len = count;
             }
         }
-        if let Some(Item::Line(line)) = self.flow.items.last_mut() {
+        if let Some(Item::Line(line)) = self.flow.items[item_start..]
+            .iter_mut()
+            .rev()
+            .find(|item| matches!(item, Item::Line(_)))
+        {
             line.avoid_after = container.brk.after == Break::Avoid;
+        }
+        if base_style.text.align == TextAlign::Justify {
+            let lines: Vec<usize> = (item_start..self.flow.items.len())
+                .filter(|&index| matches!(self.flow.items[index], Item::Line(_)))
+                .collect();
+            let last = lines.last().copied();
+            for index in lines {
+                if Some(index) != last {
+                    self.justify_line(index, x0, w);
+                }
+            }
+        }
+    }
+
+    fn justify_line(&mut self, index: usize, x0: f32, w: f32) {
+        let (runs, line_x, line_w) = match &self.flow.items[index] {
+            Item::Line(line) => (line.runs.clone(), line.x, line.w),
+            _ => return,
+        };
+        let target = (w - (line_x - x0)).max(0.0);
+        let extra = target - line_w;
+        if extra <= 0.001 || runs.is_empty() {
+            return;
+        }
+        let has_space = runs.iter().any(|run| run.text.contains(' '));
+        let last_glyph = runs.last().map(|run| run.glyphs.end() as usize);
+        let mut eligible: Vec<usize> = Vec::new();
+        for run in &runs {
+            if has_space {
+                for (offset, ch) in run.text.chars().enumerate() {
+                    if ch == ' ' {
+                        eligible.push(run.glyphs.start as usize + offset);
+                    }
+                }
+            } else {
+                for glyph in run.glyphs.as_range() {
+                    if Some(glyph + 1) != last_glyph {
+                        eligible.push(glyph);
+                    }
+                }
+            }
+        }
+        if eligible.is_empty() {
+            return;
+        }
+        let n = eligible.len() as f32;
+        let each = extra / n;
+        let mut origins = Vec::with_capacity(runs.len());
+        let mut shift = 0.0f32;
+        let mut next = 0usize;
+        for run in &runs {
+            origins.push(run.origin.x + shift);
+            for glyph in run.glyphs.as_range() {
+                if next < eligible.len() && eligible[next] == glyph {
+                    let delta = if next + 1 == eligible.len() {
+                        extra - each * (n - 1.0)
+                    } else {
+                        each
+                    };
+                    self.flow.glyphs[glyph].dx += delta;
+                    shift += delta;
+                    next += 1;
+                }
+            }
+        }
+        if let Item::Line(line) = &mut self.flow.items[index] {
+            for (run, origin) in line.runs.iter_mut().zip(origins) {
+                run.origin.x = origin;
+            }
+            line.w = target;
         }
     }
 
@@ -466,35 +618,50 @@ impl<'a> FlowCtx<'a> {
         let baseline = top + max_ascent;
         let mut cx = start_x;
         let mut runs: Vec<LaidRun> = Vec::new();
+        let mut missing: Vec<(NodeId, RectF)> = Vec::new();
         let mut k = 0usize;
 
         while k < line.len() {
             let piece_id = line[k].piece;
-            let style = pieces[piece_id as usize].style;
+            let piece = &pieces[piece_id as usize];
+            let style = piece.style;
+            let covered = self.env.measurer.covers(line[k].c, style.font.font);
             let glyph_start = self.flow.glyphs.len() as u32;
             let run_x = cx;
             let mut text = String::new();
-            while k < line.len() && line[k].piece == piece_id {
+            while k < line.len()
+                && line[k].piece == piece_id
+                && self.env.measurer.covers(line[k].c, style.font.font) == covered
+            {
                 let adv = self.advance(&line[k], pieces);
-                self.flow.glyphs.push(Glyph {
-                    gid: glyph_id(line[k].c),
-                    dx: adv,
-                    dy: 0.0,
-                });
-                text.push(line[k].c);
+                if covered {
+                    self.flow.glyphs.push(Glyph {
+                        gid: self.env.measurer.glyph_id(line[k].c, style.font.font),
+                        dx: adv,
+                        dy: 0.0,
+                    });
+                    text.push(line[k].c);
+                }
                 cx += adv;
                 k += 1;
             }
-            runs.push(LaidRun {
-                font: style.font.font,
-                size: style.font.size,
-                color: style.color,
-                dir: style.dir,
-                rotate: Rotate::None,
-                origin: PointF::new(run_x, baseline),
-                glyphs: Span::new(glyph_start, self.flow.glyphs.len() as u32 - glyph_start),
-                text,
-            });
+            if covered {
+                runs.push(LaidRun {
+                    font: style.font.font,
+                    size: style.font.size,
+                    color: style.color,
+                    dir: style.dir,
+                    rotate: Rotate::None,
+                    origin: PointF::new(run_x, baseline),
+                    glyphs: Span::new(glyph_start, self.flow.glyphs.len() as u32 - glyph_start),
+                    text,
+                });
+            } else {
+                missing.push((
+                    piece.node,
+                    RectF::new(run_x, top, (cx - run_x).max(0.0), line_h),
+                ));
+            }
         }
 
         let first = line[0];
@@ -510,6 +677,20 @@ impl<'a> FlowCtx<'a> {
             .as_ref()
             .map(|a| a.with_offset(first.off));
 
+        let mut unresolved = Vec::new();
+        for (node, rect) in missing {
+            unresolved.push(Op::Unresolved(Unresolved {
+                node,
+                rect,
+                reason: UnresolvedReason::FontMissing,
+            }));
+            self.flow.dirty.push(DirtyBlock {
+                node,
+                rect,
+                reason: UnresolvedReason::FontMissing,
+            });
+        }
+
         self.flow.items.push(Item::Line(LaidLine {
             y: top,
             x: start_x,
@@ -520,6 +701,7 @@ impl<'a> FlowCtx<'a> {
             src: Span::new(src_start, src_end.saturating_sub(src_start)),
             anchor,
             runs,
+            unresolved,
             block,
             order: index,
             len: 0,
@@ -530,14 +712,5 @@ impl<'a> FlowCtx<'a> {
             avoid_after: false,
         }));
         *y = top + line_h;
-    }
-}
-
-fn glyph_id(c: char) -> u16 {
-    let v = c as u32;
-    if v <= 0xFFFF {
-        v as u16
-    } else {
-        0xFFFD
     }
 }
