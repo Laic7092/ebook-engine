@@ -203,6 +203,10 @@ pub enum WhiteSpace {
     Pre,
     Nowrap,
     PreWrap,
+    /// CSS `pre-line`：折叠空格，保留硬换行，允许软换行。
+    PreLine,
+    /// CSS `break-spaces`：保留空格与硬换行，允许软换行。
+    BreakSpaces,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

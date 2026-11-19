@@ -687,10 +687,12 @@ fn apply(
             }
         }
         "white-space" => {
-            style.text.white_space = match value {
+            style.text.white_space = match value.to_ascii_lowercase().as_str() {
                 "pre" => WhiteSpace::Pre,
                 "nowrap" => WhiteSpace::Nowrap,
                 "pre-wrap" => WhiteSpace::PreWrap,
+                "pre-line" => WhiteSpace::PreLine,
+                "break-spaces" => WhiteSpace::BreakSpaces,
                 _ => WhiteSpace::Normal,
             }
         }
