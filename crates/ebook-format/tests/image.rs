@@ -1,4 +1,4 @@
-//! 图片头解析：PNG / JPEG / GIF / WebP 与截断输入。
+//! 图片头解析：PNG / JPEG / GIF / WebP / SVG 与截断输入。
 
 use ebook_format::image::{decode_png, image_mime, image_size};
 
@@ -64,6 +64,80 @@ fn webp_vp8x_and_vp8l_give_the_size() {
     let size = image_size(&vp8l).expect("vp8l");
     assert_eq!((size.w, size.h), (10.0, 5.0));
     assert_eq!(image_mime(&vp8l), Some("image/webp"));
+}
+
+#[test]
+fn svg_width_height_and_mime() {
+    let svg = br#"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" width="120" height="90"></svg>"#;
+    let size = image_size(svg).expect("svg");
+    assert_eq!((size.w, size.h), (120.0, 90.0));
+    assert_eq!(image_mime(svg), Some("image/svg+xml"));
+}
+
+#[test]
+fn svg_length_units_are_css_pixels() {
+    let svg = br#"<svg width="1in" height="2.54cm"/>"#;
+    let size = image_size(svg).expect("svg units");
+    assert!((size.w - 96.0).abs() < 0.001);
+    assert!((size.h - 96.0).abs() < 0.001);
+
+    let svg = br#"<svg width="72pt" height="6pc"/>"#;
+    let size = image_size(svg).expect("svg pt/pc");
+    assert!((size.w - 96.0).abs() < 0.001);
+    assert!((size.h - 96.0).abs() < 0.001);
+
+    let svg = br#"<svg width="25.4mm" height="25.4mm"/>"#;
+    let size = image_size(svg).expect("svg mm");
+    assert!((size.w - 96.0).abs() < 0.001);
+    assert!((size.h - 96.0).abs() < 0.001);
+}
+
+#[test]
+fn svg_percentages_fall_back_to_viewbox() {
+    let svg = br#"<svg width="100%" height="100%" viewBox="0 0 300 200"/>"#;
+    let size = image_size(svg).expect("svg viewBox");
+    assert_eq!((size.w, size.h), (300.0, 200.0));
+}
+
+#[test]
+fn svg_only_viewbox_gives_the_size() {
+    let svg = br#"<svg viewBox="0 0 300 200"></svg>"#;
+    let size = image_size(svg).expect("svg viewBox only");
+    assert_eq!((size.w, size.h), (300.0, 200.0));
+}
+
+#[test]
+fn svg_one_dimension_uses_viewbox_aspect_ratio() {
+    let svg = br#"<svg width="200" viewBox="0 0 300 200"/>"#;
+    let size = image_size(svg).expect("svg width only");
+    assert_eq!(size.w, 200.0);
+    assert!((size.h - 400.0 / 3.0).abs() < 0.001);
+
+    let svg = br#"<svg height="200" viewBox="0 0 300 200"/>"#;
+    let size = image_size(svg).expect("svg height only");
+    assert_eq!(size.h, 200.0);
+    assert!((size.w - 300.0).abs() < 0.001);
+}
+
+#[test]
+fn svg_skips_bom_prolog_comments_and_doctype() {
+    let svg = b"\xEF\xBB\xBF \n<?xml version=\"1.0\"?>\n<!-- cover -->\n<!DOCTYPE svg [ <!ENTITY x \"y\"> ]>\n<svg VIEWBOX='0 0 40 20' WIDTH=\"80\"></svg>";
+    let size = image_size(svg).expect("svg prolog");
+    assert_eq!(size.w, 80.0);
+    assert!((size.h - 40.0).abs() < 0.001);
+    assert_eq!(image_mime(svg), Some("image/svg+xml"));
+}
+
+#[test]
+fn broken_svg_is_none_not_panic() {
+    assert_eq!(image_size(b"<svg width=\"abc\" height=\"90\"/>"), None);
+    assert_eq!(image_size(b"<svg viewBox=\"0 0 0 0\"/>"), None);
+    assert_eq!(image_size(b"<svg width=\"-5\" height=\"10\"/>"), None);
+    assert_eq!(image_size(b"<svg width=\"100\"/>"), None);
+    assert_eq!(image_size(b"<svg width=\"100\" height=\"90\""), None);
+    assert_eq!(image_size(b"<svg viewBox=\"0 0 10\"/>"), None);
+    assert_eq!(image_size(b"<svg"), None);
+    assert_eq!(image_size(b"<svg "), None);
 }
 
 #[test]
