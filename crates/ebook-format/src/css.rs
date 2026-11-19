@@ -44,11 +44,30 @@ impl Default for FontFace {
     }
 }
 
+/// 相邻两个复合选择器之间的组合器。默认是后代组合器（空格）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Combinator {
+    #[default]
+    Descendant,
+    Child,
+    AdjacentSibling,
+}
+
+/// 结构性伪类。只实现只看元素兄弟的两个：文本节点不参与计数。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PseudoClass {
+    FirstChild,
+    LastChild,
+}
+
 #[derive(Clone, Debug, Default)]
 struct Compound {
+    /// 与本复合选择器前面的那个复合选择器如何连接；第一个复合选择器忽略此字段。
+    combinator: Combinator,
     tag: Option<String>,
     id: Option<String>,
     classes: Vec<String>,
+    pseudos: Vec<PseudoClass>,
 }
 
 type Spec = (u16, u16, u16);
@@ -482,23 +501,24 @@ pub fn cascade(doc: &mut StyledDoc, keys: &[ElemKey], sheet: &StyleSheet) {
         matched.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
         let parent_size = parent_style.font.size;
         let parent_weight = parent_style.font.weight;
+        let parent_color = parent_style.color;
         // 普通声明先按 specificity 叠，再叠内联；带 !important 的声明最后叠，
         // 因而能压过内联的普通声明（CSS 的层叠顺序）。
         for (_, i) in matched.iter() {
             for decl in sheet.rules[*i].decls.iter().filter(|d| !d.important) {
-                apply(&mut style, decl, parent_size, parent_weight);
+                apply(&mut style, decl, parent_size, parent_weight, parent_color);
             }
         }
         for decl in keys[id as usize].inline.iter().filter(|d| !d.important) {
-            apply(&mut style, decl, parent_size, parent_weight);
+            apply(&mut style, decl, parent_size, parent_weight, parent_color);
         }
         for (_, i) in matched.iter() {
             for decl in sheet.rules[*i].decls.iter().filter(|d| d.important) {
-                apply(&mut style, decl, parent_size, parent_weight);
+                apply(&mut style, decl, parent_size, parent_weight, parent_color);
             }
         }
         for decl in keys[id as usize].inline.iter().filter(|d| d.important) {
-            apply(&mut style, decl, parent_size, parent_weight);
+            apply(&mut style, decl, parent_size, parent_weight, parent_color);
         }
         doc.node_mut(id).style = style;
     }
@@ -574,7 +594,13 @@ fn heading(style: &mut ebook_ir::ComputedStyle, size: f32, scale: f32, margin: f
     style.margin.bottom = Len::Em(margin * 0.6);
 }
 
-fn apply(style: &mut ebook_ir::ComputedStyle, decl: &Decl, parent_size: f32, parent_weight: u16) {
+fn apply(
+    style: &mut ebook_ir::ComputedStyle,
+    decl: &Decl,
+    parent_size: f32,
+    parent_weight: u16,
+    parent_color: Rgba8,
+) {
     let value = decl.value.trim();
     let base = style.font.size;
     match decl.name.as_str() {
@@ -583,13 +609,25 @@ fn apply(style: &mut ebook_ir::ComputedStyle, decl: &Decl, parent_size: f32, par
                 style.display = display;
             }
         }
+        // `currentColor` 不是固定颜色值，必须在这里按上下文求值。
+        // `color: currentColor` 等价于继承父元素的颜色。
         "color" => {
-            if let Some(color) = parse_color(value) {
+            if is_current_color(value) {
+                style.color = parent_color;
+            } else if let Some(color) = parse_color(value) {
                 style.color = color;
             }
         }
+        // 声明按层叠顺序逐条应用，所以 `background-color: currentColor` 取的是
+        // **此刻**元素已经算出的 `color`。若同一条规则里先写 background 再写
+        // color，背景用的是写背景之前的颜色。测试固定了这个顺序语义。
         "background-color" | "background" => {
-            if let Some(color) = parse_color(value) {
+            let color = if is_current_color(value) {
+                Some(style.color)
+            } else {
+                parse_color(value)
+            };
+            if let Some(color) = color {
                 style.background = if color.a == 0 { None } else { Some(color) };
             }
         }
@@ -1001,6 +1039,31 @@ pub fn parse_len(value: &str) -> Option<Len> {
     if let Some(n) = value.strip_suffix("px") {
         return n.trim().parse::<f32>().ok().map(Len::Px);
     }
+    // 绝对单位按 CSS 定义直接换成 px：1in = 96px，1pc = 16px，1pt = 4/3 px。
+    // 先匹配 pt 再匹配 pc，二者不互相包含，但保持与其它单位一致的显式顺序。
+    if let Some(n) = value.strip_suffix("pt") {
+        return n.trim().parse::<f32>().ok().map(|n| Len::Px(n * 4.0 / 3.0));
+    }
+    if let Some(n) = value.strip_suffix("pc") {
+        return n.trim().parse::<f32>().ok().map(|n| Len::Px(n * 16.0));
+    }
+    if let Some(n) = value.strip_suffix("in") {
+        return n.trim().parse::<f32>().ok().map(|n| Len::Px(n * 96.0));
+    }
+    if let Some(n) = value.strip_suffix("cm") {
+        return n
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|n| Len::Px(n * 96.0 / 2.54));
+    }
+    if let Some(n) = value.strip_suffix("mm") {
+        return n
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|n| Len::Px(n * 96.0 / 25.4));
+    }
     if let Some(n) = value.strip_suffix("rem") {
         return n.trim().parse::<f32>().ok().map(Len::Rem);
     }
@@ -1027,24 +1090,30 @@ fn len_px(len: Len, base: f32) -> Option<f32> {
     }
 }
 
+/// `currentColor` 大小写不敏感；它需要元素上下文，所以不归 `parse_color` 管。
+fn is_current_color(value: &str) -> bool {
+    value.trim().eq_ignore_ascii_case("currentcolor")
+}
+
 pub fn parse_color(value: &str) -> Option<Rgba8> {
     let value = value.trim();
-    if value == "transparent" {
+    if value.eq_ignore_ascii_case("transparent") {
         return Some(Rgba8::TRANSPARENT);
     }
     if let Some(hex) = value.strip_prefix('#') {
         return parse_hex(hex);
     }
-    if let Some(inner) = value.strip_prefix("rgb(").and_then(|v| v.strip_suffix(')')) {
-        let parts: Vec<&str> = inner.split(',').collect();
-        if parts.len() == 3 {
-            let r = parts[0].trim().parse::<u8>().ok()?;
-            let g = parts[1].trim().parse::<u8>().ok()?;
-            let b = parts[2].trim().parse::<u8>().ok()?;
-            return Some(Rgba8::new(r, g, b, 255));
-        }
+    let lower = value.to_ascii_lowercase();
+    if let Some(inner) = lower.strip_prefix("rgb(").and_then(|v| v.strip_suffix(')')) {
+        return parse_rgb(inner);
     }
-    let named = match value {
+    if let Some(inner) = lower
+        .strip_prefix("rgba(")
+        .and_then(|v| v.strip_suffix(')'))
+    {
+        return parse_rgb(inner);
+    }
+    let named = match lower.as_str() {
         "black" => Rgba8::BLACK,
         "white" => Rgba8::WHITE,
         "red" => Rgba8::new(255, 0, 0, 255),
@@ -1060,77 +1129,204 @@ pub fn parse_color(value: &str) -> Option<Rgba8> {
     Some(named)
 }
 
+/// `rgb()` / `rgba()` 的函数体。分量接受 0–255 的数字或百分比，
+/// 第 4 个分量（两种函数都接受）是 0–1 的数字或百分比；越界一律钳制。
+fn parse_rgb(inner: &str) -> Option<Rgba8> {
+    let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+    if !matches!(parts.len(), 3 | 4) {
+        return None;
+    }
+    let r = parse_color_component(parts[0])?;
+    let g = parse_color_component(parts[1])?;
+    let b = parse_color_component(parts[2])?;
+    let a = match parts.get(3) {
+        Some(part) => parse_alpha(part)?,
+        None => 255,
+    };
+    Some(Rgba8::new(r, g, b, a))
+}
+
+fn parse_color_component(part: &str) -> Option<u8> {
+    let value = if let Some(percent) = part.strip_suffix('%') {
+        parse_finite(percent)? / 100.0 * 255.0
+    } else {
+        parse_finite(part)?
+    };
+    // no_std 下没有 f32::round，钳制后的非负数加 0.5 再截断即可四舍五入。
+    Some((value.clamp(0.0, 255.0) + 0.5) as u8)
+}
+
+fn parse_alpha(part: &str) -> Option<u8> {
+    let value = if let Some(percent) = part.strip_suffix('%') {
+        parse_finite(percent)? / 100.0
+    } else {
+        parse_finite(part)?
+    };
+    Some((value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+}
+
+fn parse_finite(value: &str) -> Option<f32> {
+    value.trim().parse::<f32>().ok().filter(|v| v.is_finite())
+}
+
 fn parse_hex(hex: &str) -> Option<Rgba8> {
+    if !hex.is_ascii() {
+        return None;
+    }
     let expand = |c: u8| -> Option<u8> {
         let v = (c as char).to_digit(16)? as u8;
         Some(v * 17)
     };
-    if hex.len() == 3 {
-        let bytes = hex.as_bytes();
-        return Some(Rgba8::new(
+    let pair = |text: &str| -> Option<u8> { u8::from_str_radix(text, 16).ok() };
+    let bytes = hex.as_bytes();
+    match hex.len() {
+        3 | 4 => Some(Rgba8::new(
             expand(bytes[0])?,
             expand(bytes[1])?,
             expand(bytes[2])?,
-            255,
-        ));
+            if hex.len() == 4 {
+                expand(bytes[3])?
+            } else {
+                255
+            },
+        )),
+        6 | 8 => Some(Rgba8::new(
+            pair(&hex[0..2])?,
+            pair(&hex[2..4])?,
+            pair(&hex[4..6])?,
+            if hex.len() == 8 {
+                pair(&hex[6..8])?
+            } else {
+                255
+            },
+        )),
+        _ => None,
     }
-    if hex.len() == 6 {
-        let v = u32::from_str_radix(hex, 16).ok()?;
-        return Some(Rgba8::new(
-            (v >> 16) as u8,
-            ((v >> 8) & 0xff) as u8,
-            (v & 0xff) as u8,
-            255,
-        ));
-    }
-    None
 }
 
+/// 解析一条选择器（逗号已经由外层拆开）。只认识后代 / `>` / `+` 三种
+/// 组合器与 `:first-child` / `:last-child`；其它语法返回 `None`，整条规则丢弃。
 fn parse_selector(text: &str) -> Option<Vec<Compound>> {
-    let mut out = Vec::new();
-    for token in text.split_whitespace() {
-        if token.is_empty() {
+    let bytes = text.as_bytes();
+    let mut out: Vec<Compound> = Vec::new();
+    let mut pending: Option<Combinator> = None;
+    let mut i = 0usize;
+    loop {
+        while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let combinator = match bytes[i] {
+            b'>' => {
+                i += 1;
+                Combinator::Child
+            }
+            b'+' => {
+                i += 1;
+                Combinator::AdjacentSibling
+            }
+            // `~` / 属性 / 函数式伪类继续整条丢弃，不降级成通配符。
+            b'~' | b'[' | b']' | b'(' | b')' => return None,
+            _ => Combinator::Descendant,
+        };
+        if combinator != Combinator::Descendant {
+            // 组合器不能出现在开头，也不能连续出现。
+            if out.is_empty() || pending.is_some() {
+                return None;
+            }
+            pending = Some(combinator);
             continue;
         }
-        if token.contains(['>', '+', '~', ':', '[', ']', '(', ')', '*']) && token != "*" {
+        let start = i;
+        while i < bytes.len() {
+            let byte = bytes[i];
+            if (byte as char).is_ascii_whitespace()
+                || matches!(byte, b'>' | b'+' | b'~' | b'[' | b']' | b'(' | b')')
+            {
+                break;
+            }
+            i += 1;
+        }
+        if i == start {
             return None;
         }
-        out.push(parse_compound(token)?);
+        let mut compound = parse_compound(&text[start..i])?;
+        if out.is_empty() {
+            if pending.is_some() {
+                return None;
+            }
+        } else {
+            compound.combinator = pending.take().unwrap_or(Combinator::Descendant);
+        }
+        out.push(compound);
     }
-    if out.is_empty() {
+    if pending.is_some() || out.is_empty() {
         None
     } else {
         Some(out)
     }
 }
 
+fn valid_compound_name(value: &str) -> bool {
+    !value.is_empty()
+        && !value.chars().any(|c| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '.' | '#' | ':' | '>' | '+' | '~' | '[' | ']' | '(' | ')' | '*'
+                )
+        })
+}
+
 fn parse_compound(token: &str) -> Option<Compound> {
-    if token == "*" {
-        return Some(Compound::default());
-    }
     let mut compound = Compound::default();
     let mut rest = token;
+    // 通配符只允许单独出现或后面直接跟伪类（`*:first-child`）。
+    if let Some(after) = rest.strip_prefix('*') {
+        if after.is_empty() {
+            return Some(compound);
+        }
+        if !after.starts_with(':') {
+            return None;
+        }
+        rest = after;
+    }
     let mut has_tag = false;
     while !rest.is_empty() {
         if let Some(after) = rest.strip_prefix('#') {
-            let end = after.find(['.', '#']).unwrap_or(after.len());
-            if end == 0 {
+            let end = after.find(['.', '#', ':']).unwrap_or(after.len());
+            if !valid_compound_name(&after[..end]) {
                 return None;
             }
             compound.id = Some(after[..end].to_string());
             rest = &after[end..];
         } else if let Some(after) = rest.strip_prefix('.') {
-            let end = after.find(['.', '#']).unwrap_or(after.len());
-            if end == 0 {
+            let end = after.find(['.', '#', ':']).unwrap_or(after.len());
+            if !valid_compound_name(&after[..end]) {
                 return None;
             }
             compound.classes.push(after[..end].to_string());
+            rest = &after[end..];
+        } else if let Some(after) = rest.strip_prefix(':') {
+            // `::before` 这类伪元素不在本轮范围。
+            if after.starts_with(':') {
+                return None;
+            }
+            let end = after.find(['.', '#', ':']).unwrap_or(after.len());
+            let pseudo = match after[..end].to_ascii_lowercase().as_str() {
+                "first-child" => PseudoClass::FirstChild,
+                "last-child" => PseudoClass::LastChild,
+                _ => return None,
+            };
+            compound.pseudos.push(pseudo);
             rest = &after[end..];
         } else {
             if has_tag {
                 return None;
             }
-            let end = rest.find(['.', '#']).unwrap_or(rest.len());
+            let end = rest.find(['.', '#', ':']).unwrap_or(rest.len());
             let name = &rest[..end];
             if !name.chars().all(|c| c.is_alphanumeric() || c == '-') {
                 return None;
@@ -1151,7 +1347,8 @@ fn specificity(selector: &[Compound]) -> Spec {
         if compound.id.is_some() {
             ids += 1;
         }
-        classes += compound.classes.len() as u16;
+        // 伪类按 class 级计数。
+        classes += compound.classes.len() as u16 + compound.pseudos.len() as u16;
         if compound.tag.is_some() {
             tags += 1;
         }
@@ -1178,31 +1375,96 @@ fn compound_matches(key: &ElemKey, compound: &Compound) -> bool {
     true
 }
 
-fn matches(doc: &StyledDoc, keys: &[ElemKey], node: NodeId, selector: &[Compound]) -> bool {
-    let Some(last) = selector.last() else {
+/// 只看元素兄弟的第一个/最后一个孩子；文本、换行等非元素节点跳过。
+fn element_child(doc: &StyledDoc, keys: &[ElemKey], parent: NodeId, last: bool) -> Option<NodeId> {
+    let kids = doc.kids(parent);
+    if last {
+        kids.iter()
+            .rev()
+            .copied()
+            .find(|&kid| keys[kid as usize].is_element)
+    } else {
+        kids.iter()
+            .copied()
+            .find(|&kid| keys[kid as usize].is_element)
+    }
+}
+
+fn previous_element_sibling(doc: &StyledDoc, keys: &[ElemKey], node: NodeId) -> Option<NodeId> {
+    let parent = doc.node(node).parent?;
+    let kids = doc.kids(parent);
+    let index = kids.iter().position(|&kid| kid == node)?;
+    kids[..index]
+        .iter()
+        .rev()
+        .copied()
+        .find(|&kid| keys[kid as usize].is_element)
+}
+
+fn pseudo_matches(doc: &StyledDoc, keys: &[ElemKey], node: NodeId, compound: &Compound) -> bool {
+    if compound.pseudos.is_empty() {
+        return true;
+    }
+    // 根元素没有父节点，不属于任何兄弟序列，`*:first-child` 不命中它。
+    let Some(parent) = doc.node(node).parent else {
         return false;
     };
-    if !keys[node as usize].is_element || !compound_matches(&keys[node as usize], last) {
-        return false;
-    }
-    let mut ancestor = doc.node(node).parent;
-    for compound in selector[..selector.len() - 1].iter().rev() {
-        let mut found = None;
-        while let Some(candidate) = ancestor {
-            if keys[candidate as usize].is_element
-                && compound_matches(&keys[candidate as usize], compound)
-            {
-                found = Some(candidate);
-                break;
-            }
-            ancestor = doc.node(candidate).parent;
-        }
-        match found {
-            Some(hit) => ancestor = doc.node(hit).parent,
-            None => return false,
+    for pseudo in &compound.pseudos {
+        let hit = match pseudo {
+            PseudoClass::FirstChild => element_child(doc, keys, parent, false),
+            PseudoClass::LastChild => element_child(doc, keys, parent, true),
+        };
+        if hit != Some(node) {
+            return false;
         }
     }
     true
+}
+
+/// 从右往左匹配。遇到 `>` 固定检查直接父节点，遇到 `+` 只检查紧邻的元素兄弟；
+/// 后代组合器逐个向上找，找不到就返回 false。
+fn matches(doc: &StyledDoc, keys: &[ElemKey], node: NodeId, selector: &[Compound]) -> bool {
+    let Some(last) = selector.len().checked_sub(1) else {
+        return false;
+    };
+    match_at(doc, keys, node, selector, last)
+}
+
+fn match_at(
+    doc: &StyledDoc,
+    keys: &[ElemKey],
+    node: NodeId,
+    selector: &[Compound],
+    index: usize,
+) -> bool {
+    let compound = &selector[index];
+    if !keys[node as usize].is_element
+        || !compound_matches(&keys[node as usize], compound)
+        || !pseudo_matches(doc, keys, node, compound)
+    {
+        return false;
+    }
+    if index == 0 {
+        return true;
+    }
+    match compound.combinator {
+        Combinator::Descendant => {
+            let mut ancestor = doc.node(node).parent;
+            while let Some(candidate) = ancestor {
+                if match_at(doc, keys, candidate, selector, index - 1) {
+                    return true;
+                }
+                ancestor = doc.node(candidate).parent;
+            }
+            false
+        }
+        Combinator::Child => doc
+            .node(node)
+            .parent
+            .is_some_and(|parent| match_at(doc, keys, parent, selector, index - 1)),
+        Combinator::AdjacentSibling => previous_element_sibling(doc, keys, node)
+            .is_some_and(|sibling| match_at(doc, keys, sibling, selector, index - 1)),
+    }
 }
 
 fn skip_space_and_comments(bytes: &[u8], mut i: usize) -> usize {
@@ -1226,12 +1488,84 @@ fn skip_space_and_comments(bytes: &[u8], mut i: usize) -> usize {
 mod tests {
     use super::*;
 
+    use ebook_ir::{ComputedStyle, Node, NodeKind, Span};
+
     fn styled(css: &str) -> ebook_ir::ComputedStyle {
         let mut style = ebook_ir::ComputedStyle::default();
+        let parent_color = style.color;
         for decl in parse_decls(css) {
-            apply(&mut style, &decl, 16.0, 400);
+            apply(&mut style, &decl, 16.0, 400, parent_color);
         }
         style
+    }
+
+    fn element(
+        doc: &mut StyledDoc,
+        keys: &mut Vec<ElemKey>,
+        parent: Option<NodeId>,
+        tag: Tag,
+        name: &str,
+        id: Option<&str>,
+        classes: &[&str],
+    ) -> NodeId {
+        let node = doc.push_node(Node {
+            kind: NodeKind::Element(tag),
+            style: ComputedStyle::default(),
+            parent,
+            first_child: 0,
+            child_len: 0,
+            src: None,
+            link: None,
+        });
+        keys.push(ElemKey {
+            tag,
+            tag_name: name.to_string(),
+            id: id.map(|s| s.to_string()),
+            classes: classes.iter().map(|s| s.to_string()).collect(),
+            inline: Vec::new(),
+            is_element: true,
+        });
+        node
+    }
+
+    fn text_node(
+        doc: &mut StyledDoc,
+        keys: &mut Vec<ElemKey>,
+        parent: NodeId,
+        text: &str,
+    ) -> NodeId {
+        let start = doc.text.len() as u32;
+        doc.text.push_str(text);
+        let node = doc.push_node(Node {
+            kind: NodeKind::Text(Span::new(start, text.len() as u32)),
+            style: ComputedStyle::default(),
+            parent: Some(parent),
+            first_child: 0,
+            child_len: 0,
+            src: None,
+            link: None,
+        });
+        keys.push(ElemKey {
+            is_element: false,
+            ..ElemKey::default()
+        });
+        node
+    }
+
+    fn cascade_css(doc: &mut StyledDoc, keys: &[ElemKey], css: &str) {
+        let mut sheet = StyleSheet::default();
+        sheet.parse_into(css);
+        cascade(doc, keys, &sheet);
+    }
+
+    fn simple_paragraph() -> (StyledDoc, Vec<ElemKey>, NodeId) {
+        let mut doc = StyledDoc::default();
+        let mut keys = Vec::new();
+        let body = element(&mut doc, &mut keys, None, Tag::Body, "body", None, &[]);
+        doc.root = body;
+        let p = element(&mut doc, &mut keys, Some(body), Tag::P, "p", None, &[]);
+        doc.set_kids(body, &[p]);
+        (doc, keys, p)
     }
 
     #[test]
@@ -1280,5 +1614,377 @@ mod tests {
     fn hanging_punctuation_accepts_lists() {
         let style = styled("hanging-punctuation: first allow-end;");
         assert!(style.text.rules.hanging_punctuation);
+    }
+
+    fn assert_px(value: &str, expected: f32) {
+        match parse_len(value) {
+            Some(Len::Px(px)) => assert!(
+                (px - expected).abs() < 0.01,
+                "{value}: expected {expected}, got {px}"
+            ),
+            other => panic!("{value}: expected px, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn absolute_units_convert_to_px() {
+        assert_px("12pt", 16.0);
+        assert_px("1pc", 16.0);
+        assert_px("1in", 96.0);
+        assert_px("2.54cm", 96.0);
+        assert_px("25.4mm", 96.0);
+        // 原有相对单位保持不变。
+        assert_eq!(parse_len("1.5em"), Some(Len::Em(1.5)));
+        assert_eq!(parse_len("2rem"), Some(Len::Rem(2.0)));
+        assert_eq!(parse_len("50%"), Some(Len::Pct(50.0)));
+    }
+
+    #[test]
+    fn absolute_units_reach_computed_style() {
+        let (mut doc, keys, p) = simple_paragraph();
+        cascade_css(
+            &mut doc,
+            &keys,
+            "p { font-size: 12pt; margin-left: 1in; margin-right: 1pc; \
+             padding-top: 2.54cm; text-indent: 25.4mm; }",
+        );
+        let style = doc.node(p).style;
+        assert!((style.font.size - 16.0).abs() < 0.01, "12pt = 16px");
+        assert!(matches!(style.margin.left, Len::Px(v) if (v - 96.0).abs() < 0.01));
+        assert!(matches!(style.margin.right, Len::Px(v) if (v - 16.0).abs() < 0.01));
+        assert!(matches!(style.padding.top, Len::Px(v) if (v - 96.0).abs() < 0.01));
+        assert!(matches!(style.text.indent, Len::Px(v) if (v - 96.0).abs() < 0.01));
+    }
+
+    #[test]
+    fn parses_hex_colors_with_alpha() {
+        assert_eq!(parse_color("#f008"), Some(Rgba8::new(255, 0, 0, 0x88)));
+        assert_eq!(parse_color("#ff000080"), Some(Rgba8::new(255, 0, 0, 0x80)));
+        assert_eq!(parse_color("#abc"), Some(Rgba8::new(0xaa, 0xbb, 0xcc, 255)));
+        assert_eq!(parse_color("#0f08"), Some(Rgba8::new(0, 255, 0, 0x88)));
+    }
+
+    #[test]
+    fn parses_rgb_and_rgba_components() {
+        assert_eq!(
+            parse_color("rgb(100%,0%,0%)"),
+            Some(Rgba8::new(255, 0, 0, 255))
+        );
+        assert_eq!(
+            parse_color("rgba(0,0,0,.5)"),
+            Some(Rgba8::new(0, 0, 0, 128))
+        );
+        assert_eq!(
+            parse_color("rgba(0, 0, 0, 50%)"),
+            Some(Rgba8::new(0, 0, 0, 128))
+        );
+        // 越界分量钳制到合法范围。
+        assert_eq!(
+            parse_color("rgb(300,-20,128)"),
+            Some(Rgba8::new(255, 0, 128, 255))
+        );
+        assert_eq!(
+            parse_color("rgba(0,0,0,150%)"),
+            Some(Rgba8::new(0, 0, 0, 255))
+        );
+        assert_eq!(parse_color("rgba(0,0,0,0)"), Some(Rgba8::TRANSPARENT));
+    }
+
+    #[test]
+    fn current_color_resolves_in_cascade() {
+        let mut doc = StyledDoc::default();
+        let mut keys = Vec::new();
+        let body = element(&mut doc, &mut keys, None, Tag::Body, "body", None, &[]);
+        doc.root = body;
+        let div = element(&mut doc, &mut keys, Some(body), Tag::Div, "div", None, &[]);
+        let bg = element(&mut doc, &mut keys, Some(div), Tag::P, "p", Some("bg"), &[]);
+        let inherit = element(
+            &mut doc,
+            &mut keys,
+            Some(div),
+            Tag::P,
+            "p",
+            Some("inherit"),
+            &[],
+        );
+        doc.set_kids(div, &[bg, inherit]);
+        doc.set_kids(body, &[div]);
+
+        cascade_css(
+            &mut doc,
+            &keys,
+            "div { color: #aa0000; } \
+             p { color: #00bb00; background-color: currentColor; } \
+             #inherit { color: currentColor; }",
+        );
+
+        // background-color 取元素此刻的 color，而不是父元素的颜色。
+        assert_eq!(doc.node(bg).style.color, Rgba8::new(0x00, 0xbb, 0x00, 255));
+        assert_eq!(
+            doc.node(bg).style.background,
+            Some(Rgba8::new(0x00, 0xbb, 0x00, 255))
+        );
+        // color: currentColor 等价于继承父元素颜色。
+        assert_eq!(
+            doc.node(inherit).style.color,
+            Rgba8::new(0xaa, 0x00, 0x00, 255)
+        );
+        // 背景在 color 被后面的声明改写之前已经取值，固定顺序语义。
+        assert_eq!(
+            doc.node(inherit).style.background,
+            Some(Rgba8::new(0x00, 0xbb, 0x00, 255))
+        );
+    }
+
+    struct SelectorDoc {
+        doc: StyledDoc,
+        keys: Vec<ElemKey>,
+        outer: NodeId,
+        direct: NodeId,
+        grand: NodeId,
+        head: NodeId,
+        adjacent: NodeId,
+        not_adjacent: NodeId,
+        list: NodeId,
+        first: NodeId,
+        middle: NodeId,
+        last: NodeId,
+    }
+
+    fn selector_document() -> SelectorDoc {
+        let mut doc = StyledDoc::default();
+        let mut keys = Vec::new();
+        let body = element(&mut doc, &mut keys, None, Tag::Body, "body", None, &[]);
+        doc.root = body;
+        let outer = element(
+            &mut doc,
+            &mut keys,
+            Some(body),
+            Tag::Div,
+            "div",
+            Some("outer"),
+            &[],
+        );
+        let direct = element(
+            &mut doc,
+            &mut keys,
+            Some(outer),
+            Tag::P,
+            "p",
+            Some("direct"),
+            &[],
+        );
+        let section = element(
+            &mut doc,
+            &mut keys,
+            Some(outer),
+            Tag::Section,
+            "section",
+            None,
+            &[],
+        );
+        let grand = element(
+            &mut doc,
+            &mut keys,
+            Some(section),
+            Tag::P,
+            "p",
+            Some("grand"),
+            &[],
+        );
+        let head = element(
+            &mut doc,
+            &mut keys,
+            Some(body),
+            Tag::H1,
+            "h1",
+            Some("head"),
+            &[],
+        );
+        let adjacent = element(
+            &mut doc,
+            &mut keys,
+            Some(body),
+            Tag::P,
+            "p",
+            Some("adjacent"),
+            &[],
+        );
+        let not_adjacent = element(
+            &mut doc,
+            &mut keys,
+            Some(body),
+            Tag::P,
+            "p",
+            Some("not-adjacent"),
+            &[],
+        );
+        let list = element(
+            &mut doc,
+            &mut keys,
+            Some(body),
+            Tag::Div,
+            "div",
+            Some("list"),
+            &[],
+        );
+        let lead = text_node(&mut doc, &mut keys, list, "x");
+        let first = element(
+            &mut doc,
+            &mut keys,
+            Some(list),
+            Tag::P,
+            "p",
+            Some("first"),
+            &[],
+        );
+        let span = element(
+            &mut doc,
+            &mut keys,
+            Some(list),
+            Tag::Span,
+            "span",
+            None,
+            &[],
+        );
+        let middle = element(
+            &mut doc,
+            &mut keys,
+            Some(list),
+            Tag::P,
+            "p",
+            Some("middle"),
+            &["note"],
+        );
+        let last = element(
+            &mut doc,
+            &mut keys,
+            Some(list),
+            Tag::P,
+            "p",
+            Some("last"),
+            &[],
+        );
+        doc.set_kids(section, &[grand]);
+        doc.set_kids(outer, &[direct, section]);
+        doc.set_kids(list, &[lead, first, span, middle, last]);
+        doc.set_kids(body, &[outer, head, adjacent, not_adjacent, list]);
+        SelectorDoc {
+            doc,
+            keys,
+            outer,
+            direct,
+            grand,
+            head,
+            adjacent,
+            not_adjacent,
+            list,
+            first,
+            middle,
+            last,
+        }
+    }
+
+    #[test]
+    fn child_combinator_matches_only_direct_children() {
+        let mut fixture = selector_document();
+        cascade_css(&mut fixture.doc, &fixture.keys, "div > p { color: red; }");
+        assert_eq!(
+            fixture.doc.node(fixture.direct).style.color,
+            Rgba8::new(255, 0, 0, 255)
+        );
+        assert_eq!(
+            fixture.doc.node(fixture.grand).style.color,
+            Rgba8::BLACK,
+            "孙代不应命中 div > p"
+        );
+        assert_eq!(fixture.doc.node(fixture.outer).style.color, Rgba8::BLACK);
+    }
+
+    #[test]
+    fn adjacent_sibling_matches_only_the_next_element() {
+        let mut fixture = selector_document();
+        cascade_css(&mut fixture.doc, &fixture.keys, "h1 + p { color: green; }");
+        assert_eq!(
+            fixture.doc.node(fixture.adjacent).style.color,
+            Rgba8::new(0, 128, 0, 255)
+        );
+        assert_eq!(
+            fixture.doc.node(fixture.not_adjacent).style.color,
+            Rgba8::BLACK
+        );
+        assert_eq!(fixture.doc.node(fixture.head).style.color, Rgba8::BLACK);
+    }
+
+    #[test]
+    fn first_and_last_child_skip_text_nodes() {
+        let mut fixture = selector_document();
+        cascade_css(
+            &mut fixture.doc,
+            &fixture.keys,
+            "#list > p:first-child { color: blue; } \
+             #list > p:last-child { color: maroon; }",
+        );
+        assert_eq!(
+            fixture.doc.node(fixture.first).style.color,
+            Rgba8::new(0, 0, 255, 255)
+        );
+        assert_eq!(
+            fixture.doc.node(fixture.last).style.color,
+            Rgba8::new(128, 0, 0, 255)
+        );
+        assert_eq!(fixture.doc.node(fixture.middle).style.color, Rgba8::BLACK);
+        assert_eq!(fixture.doc.node(fixture.list).style.color, Rgba8::BLACK);
+    }
+
+    #[test]
+    fn specificity_orders_pseudo_classes_like_classes() {
+        let mut fixture = selector_document();
+        // 高 specificity 写在前面，仍然需要压过后面的低 specificity 规则。
+        cascade_css(
+            &mut fixture.doc,
+            &fixture.keys,
+            "#middle { color: navy; } \
+             p.note { color: blue; } \
+             p:first-child { color: red; } \
+             p { color: green; }",
+        );
+        assert_eq!(
+            fixture.doc.node(fixture.middle).style.color,
+            Rgba8::new(0, 0, 128, 255),
+            "id 选择器应压过 class / 伪类"
+        );
+        assert_eq!(
+            fixture.doc.node(fixture.first).style.color,
+            Rgba8::new(255, 0, 0, 255),
+            ":first-child 与 class 同级，压过 tag"
+        );
+        assert_eq!(
+            fixture.doc.node(fixture.last).style.color,
+            Rgba8::new(0, 128, 0, 255)
+        );
+    }
+
+    #[test]
+    fn unsupported_selectors_are_rejected_whole() {
+        for selector in [
+            "p ~ span",
+            "p[class]",
+            ":not(.x)",
+            "p::before",
+            "div > > p",
+            "> p",
+            "h1 +",
+        ] {
+            assert!(
+                parse_selector(selector).is_none(),
+                "{selector} 应当整条丢弃"
+            );
+        }
+        // 支持的形式仍能解析出组合器。
+        let selector = parse_selector("div > p + h1").expect("selector");
+        assert_eq!(selector.len(), 3);
+        assert_eq!(selector[1].combinator, Combinator::Child);
+        assert_eq!(selector[2].combinator, Combinator::AdjacentSibling);
     }
 }
