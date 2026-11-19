@@ -245,15 +245,11 @@ function drawRun(run, ox, oy) {
   ctx.textAlign = "left";
   ctx.textBaseline = "alphabetic";
   ctx.direction = run.dir === 1 ? "rtl" : "ltr";
-  ctx.fontKerning = "none";
+  ctx.fontKerning = "auto";
   const x = run.origin.x - ox;
   const y = run.origin.y - oy;
   const chars = Array.from(run.text);
   const glyphs = layout.display.glyphs.slice(run.glyphs.start, run.glyphs.start + run.glyphs.len);
-  let advance = 0;
-  for (const glyph of glyphs) {
-    advance += glyph.dx;
-  }
   const paint = (fn) => {
     if (run.rotate === 1) {
       ctx.save();
@@ -265,17 +261,35 @@ function drawRun(run, ox, oy) {
       fn(x, y);
     }
   };
-  if (glyphs.length === chars.length && Math.abs(ctx.measureText(run.text).width - advance) > 0.35) {
-    paint((startX, startY) => {
-      let cursor = startX;
-      for (let i = 0; i < chars.length; i += 1) {
-        ctx.fillText(chars[i], cursor, startY);
+  // 排版已经把 advance 结算进每个字形（两端对齐加在空格上），所以整串
+  // `fillText` 会把空格打回字体原宽、行尾缩回去。按“非空白连续块”画：块内
+  // 交给浏览器整形（保留 kerning / 连字），块之间按字形 dx 前进，两端对齐
+  // 的加宽由此精确复现。
+  // RTL 与字形/字符不是 1:1 时退回整串绘制：顺序和簇都不可按字符硬切。
+  const split = run.dir !== 1 && glyphs.length === chars.length;
+  paint((startX, startY) => {
+    if (!split) {
+      ctx.fillText(run.text, startX, startY);
+      return;
+    }
+    let cursor = startX;
+    let wordStart = 0;
+    for (let i = 0; i <= chars.length; i += 1) {
+      if (i < chars.length && !/\s/u.test(chars[i])) {
+        continue;
+      }
+      if (i > wordStart) {
+        ctx.fillText(chars.slice(wordStart, i).join(""), cursor, startY);
+        for (let k = wordStart; k < i; k += 1) {
+          cursor += glyphs[k].dx;
+        }
+      }
+      if (i < chars.length) {
         cursor += glyphs[i].dx;
       }
-    });
-  } else {
-    paint((startX, startY) => ctx.fillText(run.text, startX, startY));
-  }
+      wordStart = i + 1;
+    }
+  });
   ctx.restore();
 }
 
@@ -717,6 +731,17 @@ async function openBook(bytes) {
   chapter = 0;
   // 先把内嵌字体装进 wasm 与浏览器，再排版，避免第一页用错字脸。
   await loadEmbeddedFonts(info);
+  // 没有内嵌字体的书（仓库自带的 en.epub 就是）必须有一个真实量度，否则
+  // 排版退回固定 advance 的 stub，而画布用宿主字体：量出来的和画出来的不是
+  // 同一套宽度，词内就会裂开。内置字体只在这时兜底，不覆盖内嵌字体。
+  if (eb_font_count() === 0) {
+    try {
+      await loadFont(await fetchFirst(FONT_URLS));
+      builtinEl.checked = true;
+    } catch (error) {
+      setStatus("no font: layout falls back to fixed advances");
+    }
+  }
   updateBook();
   layoutChapter(0, 0);
 }

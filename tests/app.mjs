@@ -180,13 +180,27 @@ check("boot draws the requested book", drawn.length > 200, `drawn ${drawn.length
 check("boot fills the title", text("book-title").length > 0, text("book-title"));
 check("boot leaves no banner", banner() === "", banner());
 check("boot sizes the canvas", globalThis.document.getElementById("page").width > 0);
+check(
+  "boot loads the builtin font",
+  globalThis.document.getElementById("builtin-font").checked === true,
+  "builtin font not loaded, layout would use stub advances",
+);
+check(
+  "boot draws whole words instead of single characters",
+  drawn.some((item) => /^[A-Za-z]{3,}$/.test(item.text)),
+  drawn.slice(0, 8).map((item) => item.text).join("|"),
+);
 
 drawn.length = 0;
 upload("fixtures/zh.epub");
 await settle();
 await settle();
 check("upload swaps the book", text("book-title") !== "The Lantern at the End of Winter", text("book-title"));
-check("upload lays out the new chapter", drawn.length > 50, `drawn ${drawn.length}`);
+check(
+  "upload lays out the new chapter",
+  drawn.reduce((sum, item) => sum + Array.from(item.text).length, 0) > 50,
+  `drawn ${drawn.length} chunks`,
+);
 check("upload leaves no banner", banner() === "", banner());
 check(
   "upload draws non-ascii text",
