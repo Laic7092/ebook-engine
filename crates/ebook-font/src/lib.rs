@@ -1,3 +1,6 @@
+use core::cell::RefCell;
+use std::collections::BTreeMap;
+
 use ab_glyph_rasterizer::{point, Point, Rasterizer};
 use ebook_ir::{FontDesc, FontId, FontSpec, FontStyle, GlyphBitmap, ImageData, ImageId, Resources};
 use ebook_layout::{shape_per_char, English, Hyphenator, ShapeGlyph, TextMeasurer};
@@ -8,6 +11,59 @@ const SYNTH_BOLD: u16 = 0x1000;
 const SYNTH_ITALIC: u16 = 0x2000;
 const SYNTH_BASE_MASK: u16 = 0x0fff;
 const SYNTH_SHEAR: f32 = 0.22;
+
+/// 光栅缓存上限。超限就整体清空，而不是逐条淘汰：字位图比键大得多，
+/// 记 LRU 顺序的收益不如直接把生命周期切成小段。清空后仍会重新填，
+/// 长会话的内存因此有硬上限。
+const RASTER_CACHE_MAX: usize = 4096;
+
+/// 整形缓存上限。同理，整段 run 的代价高于几个键，超限整体清空。
+const SHAPE_CACHE_MAX: usize = 1024;
+
+/// 光栅缓存的键。`FontId` 用逻辑 id 而不是 base face：合成粗体/斜体
+/// 走同一份轮廓，但增益/切变之后的位图不同，不能共用条目。浮点按 bit
+/// 入键，保证命中判定与逐字节结果一样严格（`-0.0`/`0.0` 也分开）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct RasterKey {
+    font: FontId,
+    gid: u16,
+    px: u32,
+    dx: u32,
+    dy: u32,
+}
+
+impl RasterKey {
+    fn new(font: FontId, gid: u16, px: f32, dx: f32, dy: f32) -> Self {
+        Self {
+            font,
+            gid,
+            px: px.to_bits(),
+            dx: dx.to_bits(),
+            dy: dy.to_bits(),
+        }
+    }
+}
+
+/// 整形缓存的键。文本和语言都在里面：同样的字节在不同 `locl` 语言下
+/// 可能得到不同的字形；字号按 bit 入键，避免 `-0.0`/`0.0` 之类混用。
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ShapeKey {
+    font: FontId,
+    size: u32,
+    text: String,
+    lang: Option<String>,
+}
+
+impl ShapeKey {
+    fn new(font: FontId, size: f32, text: &str, lang: Option<&str>) -> Self {
+        Self {
+            font,
+            size: size.to_bits(),
+            text: text.to_owned(),
+            lang: lang.map(str::to_owned),
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 struct Metrics {
@@ -92,6 +148,11 @@ pub struct FontBook {
     /// 内置英文断字词典。零大小类型，`hyphenator()` 借出去；
     /// `StubMeasurer` 仍然返回 `None`，保持“没有字体就没有断字”。
     english: English,
+    /// 字形光栅缓存，绑定 `FontBook` 生命周期；不放进全局/`thread_local`。
+    /// `RefCell` 让 `&self` 的 `Resources::glyph_alpha_at` 也能写缓存。
+    rasters: RefCell<BTreeMap<RasterKey, Option<GlyphBitmap>>>,
+    /// 整形缓存，值保存 `shape` 写入 `out` 的字形序列与返回的 advance。
+    shapes: RefCell<BTreeMap<ShapeKey, (f32, Vec<ShapeGlyph>)>>,
 }
 
 impl FontBook {
@@ -111,6 +172,10 @@ impl FontBook {
         let metrics = Metrics::parse(desc, bytes)?;
         let id = FontId(self.faces.len() as u16);
         self.faces.push(metrics);
+        // 新 face 会改变后续 select/fallback 的候选集。旧逻辑 `FontId` 仍指向
+        // 原来的 base face，本身不会串味，但候选集变化后旧缓存已不再代表
+        // “当前 FontBook 的结果”，直接清空最稳。
+        self.clear_caches();
         Some(id)
     }
 
@@ -138,6 +203,14 @@ impl FontBook {
     /// 设置文档语言，只影响 OpenType 的 `locl` 之类的语言相关替换。
     pub fn set_language(&mut self, lang: Option<&str>) {
         self.lang = lang.map(|value| value.to_ascii_lowercase());
+        // 语言进整形键，理论上换语言会自然落到新键；但旧语言的条目不再有用，
+        // 而且清空后不会让长会话因为来回切语言而积累两份缓存。
+        self.shapes.borrow_mut().clear();
+    }
+
+    fn clear_caches(&self) {
+        self.rasters.borrow_mut().clear();
+        self.shapes.borrow_mut().clear();
     }
 
     pub fn language(&self) -> Option<&str> {
@@ -310,8 +383,32 @@ impl FontBook {
         if !px.is_finite() || px <= 0.0 || !dx.is_finite() || !dy.is_finite() {
             return None;
         }
+        // 先只确认逻辑 id 有效，不解析 `Face`：命中缓存时不应再做一次字体解析。
         let index = self.real_index(id)?;
-        let face = self.face(FontId(index as u16))?;
+        let key = RasterKey::new(id, gid, px, dx, dy);
+        if let Some(cached) = self.rasters.borrow().get(&key) {
+            return cached.clone();
+        }
+        let result = self.rasterize_uncached(FontId(index as u16), id, gid, px, dx, dy);
+        // `None` 也缓存：缺字、越界等失败结果同样会在翻页/缩放时重复询问。
+        let mut cache = self.rasters.borrow_mut();
+        if cache.len() >= RASTER_CACHE_MAX {
+            cache.clear();
+        }
+        cache.insert(key, result.clone());
+        result
+    }
+
+    fn rasterize_uncached(
+        &self,
+        base: FontId,
+        id: FontId,
+        gid: u16,
+        px: f32,
+        dx: f32,
+        dy: f32,
+    ) -> Option<GlyphBitmap> {
+        let face = self.face(base)?;
         let shear = if self.is_synthetic_italic(id) {
             SYNTH_SHEAR
         } else {
@@ -627,6 +724,13 @@ impl TextMeasurer for FontBook {
         if !size.is_finite() || size <= 0.0 {
             return 0.0;
         }
+        // 键包含字体、字号、文本和当前注入的语言。语言同时影响 `locl`，
+        // 文本本身又决定脚本/猜出来的语言，所以命中即可直接复用整段结果。
+        let key = ShapeKey::new(font, size, text, self.lang.as_deref());
+        if let Some((total, glyphs)) = self.shapes.borrow().get(&key) {
+            out.extend_from_slice(glyphs);
+            return *total;
+        }
         let Some(face) = rustybuzz::Face::from_slice(&metrics.bytes, 0) else {
             return shape_per_char(self, text, font, size, out);
         };
@@ -664,6 +768,11 @@ impl TextMeasurer for FontBook {
             glyphs.reverse();
         }
         out.extend_from_slice(&glyphs);
+        let mut cache = self.shapes.borrow_mut();
+        if cache.len() >= SHAPE_CACHE_MAX {
+            cache.clear();
+        }
+        cache.insert(key, (total, glyphs));
         total
     }
 
