@@ -75,6 +75,15 @@
 - README 增加 CI badge、脚本入口、验证矩阵、能力清单与“不做”边界，
   并把文档入口补到 `docs/text-rules.md`。
 - bench 基线按 rustybuzz 之后的实现重新采集。
+- 断行表删掉未使用的 `RI` 类：UAX #14 的 LB30a 尚未实现，这个枚举没有规则可挂；
+  `data/gen_linebreak.py` 把 `RI` 解析为 `AL`，表少 `0x1F1E6..0x1F1FF` 一个区间，
+  脚本重跑与入库表逐字节一致。
+
+### Removed
+
+- 未合并分支 `wt-b`（用 `glyph_bounding_box` 代替 `outline_glyph` 求光栅边界）作废：
+  `Bounds` 现已带 `shear` 参数服务合成斜体，而 `glyph_bounding_box` 不经过 shear，
+  照原样合入会让斜体字形的边界算错。
 
 ### Fixed
 
