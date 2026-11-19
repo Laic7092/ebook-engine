@@ -319,6 +319,9 @@ fn clip_cuts_a_glyph_in_half() {
         text: String::from("A"),
         dir: Dir::Ltr,
         rotate: Rotate::None,
+        weight: 400,
+        style: ebook_ir::FontStyle::Normal,
+        underline: false,
     };
     append_op(
         &mut ir,

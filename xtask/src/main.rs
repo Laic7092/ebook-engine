@@ -249,6 +249,7 @@ fn app() -> ExitCode {
     match build_web_pkg()
         .and_then(|()| run_script("tests/app.mjs"))
         .and_then(|()| run_script("web/tests/images.mjs"))
+        .and_then(|()| run_script("web/tests/atlas.mjs"))
     {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {

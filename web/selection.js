@@ -10,9 +10,10 @@
 const DRAG_THRESHOLD = 3;
 const CANCEL_SLIDE = 8;
 const LONG_PRESS_MS = 320;
+const SWIPE_MIN = 44;
 
 export function createSelection(options) {
-  const { canvas, page, hit, select, linkAt, onLink, setStatus, onChange } = options;
+  const { canvas, page, hit, select, linkAt, onLink, onTap, onSwipe, setStatus, onChange } = options;
 
   let anchor = null;
   let focus = null;
@@ -136,7 +137,7 @@ export function createSelection(options) {
 
   function handleLink(point) {
     if (!linkAt || !onLink) {
-      return;
+      return false;
     }
     let href = null;
     try {
@@ -146,6 +147,17 @@ export function createSelection(options) {
     }
     if (href) {
       onLink(href);
+      return true;
+    }
+    return false;
+  }
+
+  function tap(event, point) {
+    if (!point) {
+      return;
+    }
+    if (!handleLink(point) && onTap) {
+      onTap(event);
     }
   }
 
@@ -165,10 +177,8 @@ export function createSelection(options) {
         refresh();
         copyText(text);
       } else {
-        // 没有真正拖动 → 当成点击（链接）。
-        if (point) {
-          handleLink(point);
-        }
+        // 没有真正拖动 → 当成点击（链接或宿主轻点）。
+        tap(event, point);
         clear();
         if (onChange) {
           onChange();
@@ -177,10 +187,8 @@ export function createSelection(options) {
       dragging = false;
       return;
     }
-    // 触屏长按前就抬手 = 轻点：只处理链接。
-    if (point) {
-      handleLink(point);
-    }
+    // 触屏长按前就抬手 = 轻点：只处理链接或宿主轻点。
+    tap(event, point);
     clear();
     if (onChange) {
       onChange();
@@ -223,6 +231,17 @@ export function createSelection(options) {
     const dx = event.clientX - startClient.x;
     const dy = event.clientY - startClient.y;
     if (!dragging) {
+      // 触屏横向滑动：还没成长按，直接算翻页，不再等 pointerup。
+      if (timer && Math.abs(dx) > SWIPE_MIN && Math.abs(dx) > Math.abs(dy) * 1.4) {
+        clearTimeout(timer);
+        timer = 0;
+        pressed = false;
+        if (onSwipe) {
+          onSwipe(dx < 0 ? "next" : "prev");
+        }
+        event.preventDefault();
+        return;
+      }
       if (timer && Math.hypot(dx, dy) > CANCEL_SLIDE) {
         // 长按前就开始滑：不算选区，交给宿主滚动/翻页。
         clearTimeout(timer);

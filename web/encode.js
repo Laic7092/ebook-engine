@@ -153,6 +153,9 @@ function writeGlyphRun(w, value) {
   w.string(value.text);
   w.varint(value.dir);
   w.varint(value.rotate);
+  w.varint(value.weight);
+  w.varint(value.style);
+  w.u8(value.underline ? 1 : 0);
 }
 
 function writeBorderBox(w, value) {

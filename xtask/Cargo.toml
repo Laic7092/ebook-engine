@@ -8,5 +8,5 @@ publish.workspace = true
 ebook-ir.workspace = true
 ebook-layout.workspace = true
 ebook-format.workspace = true
-ebook-font.workspace = true
+ebook-font = { workspace = true, features = ["hyphen-en"] }
 ebook-raster.workspace = true

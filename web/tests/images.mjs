@@ -38,6 +38,7 @@ const ctxStub = {
   fillText(text, x, y) {
     drawn.push({ text, x, y, font: this.font });
   },
+  strokeText() {},
   drawImage(bitmap, x, y, w, h) {
     drawnImages.push({ bitmap, x, y, w, h });
   },
@@ -116,7 +117,7 @@ globalThis.document = {
 globalThis.window = {
   location: {
     href: `${ORIGIN}web/`,
-    search: "?book=../fixtures/images.epub",
+    search: "?book=../fixtures/images.epub&atlas=0",
     protocol: "http:",
   },
   innerHeight: 1000,
@@ -221,8 +222,8 @@ check(
   tocButtons.map((button) => button.textContent).join(" | "),
 );
 
-const chapterSelect = globalThis.document.getElementById("chapter");
-check("starts in chapter 1", chapterSelect.value === "0", chapterSelect.value);
+const pageLabel = globalThis.document.getElementById("page-label");
+check("starts in chapter 1", /第 1 章/.test(pageLabel.textContent), pageLabel.textContent);
 const second = tocButtons.find((button) => /^Two:/.test(button.textContent));
 check("the second chapter has a toc entry", Boolean(second));
 if (second) {
@@ -231,7 +232,11 @@ if (second) {
   for (let i = 0; i < 4; i += 1) {
     await settle();
   }
-  check("clicking it changes the chapter", chapterSelect.value === "1", chapterSelect.value);
+  check(
+    "clicking it changes the chapter",
+    /第 2 章/.test(pageLabel.textContent),
+    pageLabel.textContent,
+  );
   check("the second chapter draws its image", drawnImages.length === 1, `drawn ${drawnImages.length}`);
 }
 

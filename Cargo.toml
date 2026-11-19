@@ -24,7 +24,7 @@ ebook-layout = { path = "crates/ebook-layout", default-features = false }
 ebook-cache = { path = "crates/ebook-cache" }
 ebook-format = { path = "crates/ebook-format" }
 ebook-render = { path = "crates/ebook-render" }
-ebook-font = { path = "crates/ebook-font" }
+ebook-font = { path = "crates/ebook-font", default-features = false }
 ebook-raster = { path = "crates/ebook-raster" }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }

@@ -1,3 +1,4 @@
+#![cfg(feature = "hyphen-en")]
 //! 断字接入：`hyphens:auto` + 注入的英文词典才会出现行末连字符。
 
 use ebook_ir::doc::FontSpec;

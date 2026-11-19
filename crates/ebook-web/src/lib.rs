@@ -8,11 +8,12 @@ use std::sync::Mutex;
 
 use ebook_font::FontBook;
 use ebook_format::epub::EpubReader;
-use ebook_format::{Book, ChapterAnchor};
-use ebook_ir::{codec, EdgesF, LayoutResult, Location, PointF, StyledDoc};
+use ebook_format::txt::TxtReader;
+use ebook_format::{Book, ChapterAnchor, ChapterLinks, FormatError, LinkTarget};
+use ebook_ir::{codec, EdgesF, FontId, LayoutResult, Location, PointF, StyledDoc};
 use ebook_layout::{Layout, LayoutEnv, NoImageSizes, PageConstraint, Reader, StubMeasurer};
 
-static BOOK: Mutex<Option<EpubReader<'static>>> = Mutex::new(None);
+static BOOK: Mutex<Option<Backend>> = Mutex::new(None);
 static FONT: Mutex<Option<FontBook>> = Mutex::new(None);
 /// 最近一次排版的 IR 与原文。交互查询（命中/选区/进度）只认这一份，
 /// 与 JS 侧当前显示的章节保持同步；排版层本身仍然无状态。
@@ -38,6 +39,46 @@ impl LastLayout {
     }
 }
 
+/// 已打开的书。两种格式在 wasm 侧共用一套 `LAST` / 字体 / 交互查询，
+/// 只在“章怎么来、资产怎么取、链接怎么解析”这三点上分叉。
+enum Backend {
+    Epub(EpubReader<'static>),
+    Txt(TxtReader),
+}
+
+impl Backend {
+    fn book(&self) -> &Book {
+        match self {
+            Backend::Epub(reader) => reader.book(),
+            Backend::Txt(reader) => reader.book(),
+        }
+    }
+
+    fn chapter_with_anchors(
+        &self,
+        index: usize,
+    ) -> Result<(StyledDoc, Vec<ChapterLinks>, Vec<ChapterAnchor>), FormatError> {
+        match self {
+            Backend::Epub(reader) => reader.chapter_with_anchors(index),
+            Backend::Txt(reader) => reader.chapter_with_anchors(index),
+        }
+    }
+
+    fn asset<'a>(&'a self, href: &str) -> Option<(&'a [u8], &'a str)> {
+        match self {
+            Backend::Epub(reader) => reader.asset(href),
+            Backend::Txt(reader) => reader.asset(href),
+        }
+    }
+
+    fn resolve_link_from(&self, spine: usize, href: &str) -> Option<LinkTarget> {
+        match self {
+            Backend::Epub(reader) => reader.resolve_link_from(spine, href),
+            Backend::Txt(reader) => reader.resolve_link_from(spine, href),
+        }
+    }
+}
+
 pub fn layout_text(text: &str, width: f32, height: f32, margin: f32) -> Vec<u8> {
     let doc = ebook_format::txt::build(text.as_bytes());
     layout_doc(&doc, width, height, margin)
@@ -46,13 +87,32 @@ pub fn layout_text(text: &str, width: f32, height: f32, margin: f32) -> Vec<u8> 
 pub fn open_book(bytes: &[u8]) -> String {
     let leaked: &'static [u8] = Box::leak(bytes.to_vec().into_boxed_slice());
     match EpubReader::open(leaked) {
-        Ok(reader) => {
-            let json = book_json(reader.book());
-            *BOOK.lock().unwrap() = Some(reader);
-            json
-        }
+        Ok(reader) => install(Backend::Epub(reader)),
         Err(error) => error_json(&format!("open: {error:?}")),
     }
+}
+
+/// 打开已经由宿主解码好的纯文本。章节在格式层按标题行切分，
+/// TOC / spine / 交互查询因此和 EPUB 完全同构。
+pub fn open_text(text: &str, name: &str) -> String {
+    install(Backend::Txt(TxtReader::from_text(text, Some(name))))
+}
+
+/// 按魔数自动识别：ZIP 交给 EPUB，否则按 UTF-8 文本处理。
+/// 浏览器会先用 `TextDecoder` 处理 BOM/GBK，再走 `eb_open_text`；
+/// 这个入口留给直接给字节的宿主与测试。
+pub fn open_file(bytes: &[u8], name: &str) -> String {
+    if bytes.starts_with(b"PK") {
+        open_book(bytes)
+    } else {
+        open_text(&String::from_utf8_lossy(bytes), name)
+    }
+}
+
+fn install(backend: Backend) -> String {
+    let json = book_json(backend.book());
+    *BOOK.lock().unwrap() = Some(backend);
+    json
 }
 
 pub fn register_font(bytes: &[u8]) -> u32 {
@@ -66,6 +126,29 @@ pub fn register_font(bytes: &[u8]) -> u32 {
 
 pub fn reset_fonts() {
     *FONT.lock().unwrap() = None;
+}
+
+/// 宿主按 `GlyphRun` 的 glyph id 取回光栅位图，自己合成页面。
+///
+/// 返回 8 字节小端头 + `w*h` 的 alpha：
+/// `[w:u16, h:u16, left:i16, top:i16, alpha...]`。
+/// `left/top` 是相对整像素落点的偏移，`top` 为负；没有位图时返回空数组。
+/// 合成粗体/斜体在 `FontBook` 内部完成，宿主不需要再猜浏览器会不会合成。
+pub fn glyph_bitmap(font: u32, gid: u32, px: f32, dx: f32, dy: f32) -> Vec<u8> {
+    let slot = FONT.lock().unwrap();
+    let Some(book) = slot.as_ref() else {
+        return Vec::new();
+    };
+    let Some(bitmap) = book.rasterize_at(FontId(font as u16), gid as u16, px, dx, dy) else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(8 + bitmap.alpha.len());
+    out.extend_from_slice(&bitmap.w.to_le_bytes());
+    out.extend_from_slice(&bitmap.h.to_le_bytes());
+    out.extend_from_slice(&bitmap.left.to_le_bytes());
+    out.extend_from_slice(&bitmap.top.to_le_bytes());
+    out.extend_from_slice(&bitmap.alpha);
+    out
 }
 
 pub fn font_count() -> u32 {
@@ -284,18 +367,189 @@ fn font_style_name(style: ebook_ir::FontStyle) -> &'static str {
     }
 }
 
+/// 网页“字号”不是缩放整页，而是只改文档里的字号/行高；页面约束、分页
+/// 几何都不变，所以容器不会跟着字号一起变。
+fn scale_doc_fonts(doc: &mut ebook_ir::StyledDoc, scale: f32) {
+    if !scale.is_finite() || scale <= 0.0 || (scale - 1.0).abs() < 1.0e-4 {
+        return;
+    }
+    for node in &mut doc.nodes {
+        node.style.font.size = (node.style.font.size * scale).max(0.0);
+        if let ebook_ir::LineHeight::Px(px) = &mut node.style.line_height {
+            *px *= scale;
+        }
+        if let ebook_ir::Len::Px(px) = &mut node.style.text.indent {
+            *px *= scale;
+        }
+        node.style.text.letter_spacing *= scale;
+        node.style.text.word_spacing *= scale;
+    }
+}
+
+/// 阅读器的独立排版选项。`font_scale` 只缩放文档字号/行高/间距；
+/// 行距、字距和对齐在缩放之后覆盖，不改变页面几何。
+fn apply_doc_text_options(
+    doc: &mut ebook_ir::StyledDoc,
+    line_scale: f32,
+    letter_px: f32,
+    align: u32,
+) {
+    let line_scale = if line_scale.is_finite() && line_scale > 0.0 {
+        line_scale
+    } else {
+        1.0
+    };
+    let letter_px = if letter_px.is_finite() {
+        letter_px
+    } else {
+        0.0
+    };
+    let align = match align {
+        1 => Some(ebook_ir::TextAlign::Start),
+        2 => Some(ebook_ir::TextAlign::Center),
+        3 => Some(ebook_ir::TextAlign::End),
+        4 => Some(ebook_ir::TextAlign::Justify),
+        _ => None,
+    };
+    for node in &mut doc.nodes {
+        // 阅读器的行距是绝对倍数（1.5 = 1.5em），不叠在书里的 line-height 上。
+        if line_scale.is_finite() && line_scale > 0.0 {
+            node.style.line_height = ebook_ir::LineHeight::Mul(line_scale);
+        }
+        if letter_px.abs() > 1.0e-4 {
+            node.style.text.letter_spacing += letter_px;
+        }
+        if let Some(align) = align {
+            node.style.text.align = align;
+        }
+    }
+}
+
+/// 当前书第一章根节点的字号；网页用它把“18px”换算成文档内的缩放比例。
+pub fn base_font_size() -> f32 {
+    let books = BOOK.lock().unwrap();
+    let Some(reader) = books.as_ref() else {
+        return 16.0;
+    };
+    match reader.chapter_with_anchors(0) {
+        Ok((doc, _, _)) => {
+            // 正文通常不是根节点的字号：取文本节点里最常见的字号当“基准”。
+            let mut sizes: Vec<(f32, usize)> = Vec::new();
+            for node in &doc.nodes {
+                let ebook_ir::NodeKind::Text(span) = node.kind else {
+                    continue;
+                };
+                if doc.text_of(span).trim().is_empty() {
+                    continue;
+                }
+                let size = node.style.font.size;
+                if !size.is_finite() || size <= 0.0 {
+                    continue;
+                }
+                match sizes
+                    .iter_mut()
+                    .find(|(known, _)| (*known - size).abs() < 0.05)
+                {
+                    Some((_, count)) => *count += 1,
+                    None => sizes.push((size, 1)),
+                }
+            }
+            sizes
+                .into_iter()
+                .max_by_key(|(_, count)| *count)
+                .map(|(size, _)| size)
+                .or_else(|| {
+                    doc.nodes
+                        .get(doc.root as usize)
+                        .map(|node| node.style.font.size)
+                        .filter(|size| *size > 0.0)
+                })
+                .unwrap_or(16.0)
+        }
+        Err(_) => 16.0,
+    }
+}
+
 pub fn layout_cached(spine: u32, width: f32, height: f32, margin: f32) -> Vec<u8> {
+    layout_cached_edges(spine, width, height, EdgesF::all(margin), 1.0, 1.0, 0.0, 0)
+}
+
+/// 四边可不同的排版入口。网页阅读器要让正文避开顶部/底部工具栏，同时保持
+/// 页面本身铺满视口；工具栏显隐只改变覆盖层，不再触发布局。`font_scale`
+/// 只缩放文档字号与行高，页面尺寸保持不变。
+#[allow(clippy::too_many_arguments)]
+pub fn layout_cached_insets(
+    spine: u32,
+    width: f32,
+    height: f32,
+    left: f32,
+    right: f32,
+    top: f32,
+    bottom: f32,
+    font_scale: f32,
+) -> Vec<u8> {
+    layout_cached_style(
+        spine, width, height, left, right, top, bottom, font_scale, 1.0, 0.0, 0,
+    )
+}
+
+/// 在四边页边距之上，再独立设置行距、字距和对齐。
+/// `align`: 0=保留原书，1=左/起始，2=居中，3=右/末尾，4=两端对齐。
+#[allow(clippy::too_many_arguments)]
+pub fn layout_cached_style(
+    spine: u32,
+    width: f32,
+    height: f32,
+    left: f32,
+    right: f32,
+    top: f32,
+    bottom: f32,
+    font_scale: f32,
+    line_scale: f32,
+    letter_px: f32,
+    align: u32,
+) -> Vec<u8> {
+    layout_cached_edges(
+        spine,
+        width,
+        height,
+        EdgesF {
+            top,
+            right,
+            bottom,
+            left,
+        },
+        font_scale,
+        line_scale,
+        letter_px,
+        align,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_cached_edges(
+    spine: u32,
+    width: f32,
+    height: f32,
+    margin: EdgesF,
+    font_scale: f32,
+    line_scale: f32,
+    letter_px: f32,
+    align: u32,
+) -> Vec<u8> {
     let books = BOOK.lock().unwrap();
     let Some(reader) = books.as_ref() else {
         return Vec::new();
     };
-    let (doc, _, anchors) = match reader.chapter_with_anchors(spine as usize) {
+    let (mut doc, _, anchors) = match reader.chapter_with_anchors(spine as usize) {
         Ok(value) => value,
         Err(error) => {
             *LAST_ERROR.lock().unwrap() = Some(format!("{error:?}"));
             return Vec::new();
         }
     };
+    scale_doc_fonts(&mut doc, font_scale);
+    apply_doc_text_options(&mut doc, line_scale, letter_px, align);
     *LAST_ERROR.lock().unwrap() = None;
     let mut font = FONT.lock().unwrap();
     // 语言是排版入参：文档语言要在 shape 前注入，locl 之类才会生效。
@@ -303,8 +557,8 @@ pub fn layout_cached(spine: u32, width: f32, height: f32, margin: f32) -> Vec<u8
         font.set_language(doc.meta.lang.as_deref());
     }
     match font.as_ref() {
-        Some(font) => layout_doc_with(&doc, font, width, height, margin, anchors),
-        None => layout_doc_full(&doc, &StubMeasurer, width, height, margin, anchors),
+        Some(font) => layout_doc_with_edges(&doc, font, width, height, margin, anchors),
+        None => layout_doc_full_edges(&doc, &StubMeasurer, width, height, margin, anchors),
     }
 }
 
@@ -329,33 +583,40 @@ pub fn layout_chapter(
 }
 
 fn layout_doc(doc: &ebook_ir::StyledDoc, width: f32, height: f32, margin: f32) -> Vec<u8> {
-    layout_doc_full(doc, &StubMeasurer, width, height, margin, Vec::new())
+    layout_doc_full_edges(
+        doc,
+        &StubMeasurer,
+        width,
+        height,
+        EdgesF::all(margin),
+        Vec::new(),
+    )
 }
 
-fn layout_doc_with(
+fn layout_doc_with_edges(
     doc: &ebook_ir::StyledDoc,
     measurer: &dyn ebook_layout::TextMeasurer,
     width: f32,
     height: f32,
-    margin: f32,
+    margin: EdgesF,
     anchors: Vec<ChapterAnchor>,
 ) -> Vec<u8> {
-    layout_doc_full(doc, measurer, width, height, margin, anchors)
+    layout_doc_full_edges(doc, measurer, width, height, margin, anchors)
 }
 
-fn layout_doc_full(
+fn layout_doc_full_edges(
     doc: &ebook_ir::StyledDoc,
     measurer: &dyn ebook_layout::TextMeasurer,
     width: f32,
     height: f32,
-    margin: f32,
+    margin: EdgesF,
     anchors: Vec<ChapterAnchor>,
 ) -> Vec<u8> {
     let env = LayoutEnv {
         measurer,
         resources: &NoImageSizes,
     };
-    let constraint = PageConstraint::new(width, height).with_margin(EdgesF::all(margin));
+    let constraint = PageConstraint::new(width, height).with_margin(margin);
     let ir = Layout::new().layout(doc, &env, &constraint);
     *LAST.lock().unwrap() = Some(LastLayout {
         ir: ir.clone(),
@@ -490,6 +751,18 @@ fn book_json(book: &Book) -> String {
     push_json_opt(&mut out, book.lang.as_deref());
     out.push_str(",\"lang\":");
     push_json_opt(&mut out, book.lang.as_deref());
+    out.push_str(",\"creator\":");
+    push_json_opt(&mut out, book.creator.as_deref());
+    out.push_str(",\"publisher\":");
+    push_json_opt(&mut out, book.publisher.as_deref());
+    out.push_str(",\"identifier\":");
+    push_json_opt(&mut out, book.identifier.as_deref());
+    out.push_str(",\"date\":");
+    push_json_opt(&mut out, book.date.as_deref());
+    out.push_str(",\"description\":");
+    push_json_opt(&mut out, book.description.as_deref());
+    out.push_str(",\"cover\":");
+    push_json_opt(&mut out, book.cover_href.as_deref());
     out.push_str(",\"spine\":[");
     for (index, item) in book.spine.iter().enumerate() {
         if index > 0 {
@@ -600,5 +873,34 @@ mod tests {
         assert_eq!(progress_json(0, last, byte), "{\"progress\":1}");
         // 越界进度不 panic，夹到 1。
         assert_eq!(progress_json(9, 99, 99), "{\"progress\":1}");
+
+        // TXT 走同一条 BOOK/LAST 链路：书名、目录、逐章排版都可用。
+        let opened = open_text("第一章 一\n\n正文。\n\n第二章 二\n\n正文。\n", "demo.txt");
+        assert!(opened.contains("\"title\":\"demo\""), "{opened}");
+        assert!(opened.contains("\"spine\":["), "{opened}");
+        assert!(toc_json().contains("第二章"), "{}", toc_json());
+        let chapter = layout_cached(1, 520.0, 300.0, 40.0);
+        assert!(!chapter.is_empty());
+        let ir: LayoutResult = ebook_ir::decode(&chapter).unwrap();
+        assert_eq!(ir.spine, 1);
+        assert_eq!(ir.runs.lines[0].anchor.as_ref().unwrap().spine, 1);
+
+        // 四边独立页边距：覆盖式工具栏靠它让正文避开顶栏/底栏。
+        let inset = layout_cached_insets(0, 520.0, 300.0, 30.0, 40.0, 80.0, 50.0, 1.0);
+        let ir: LayoutResult = ebook_ir::decode(&inset).unwrap();
+        let page = &ir.pages[0];
+        assert_eq!(page.inset.left, 30.0);
+        assert_eq!(page.inset.right, 40.0);
+        assert_eq!(page.inset.top, 80.0);
+        assert_eq!(page.inset.bottom, 50.0);
+        assert_eq!(page.box_size().w, 520.0);
+        assert_eq!(page.box_size().h, 300.0);
+
+        // 行距/字距/对齐是独立的排版选项，不乘进字号缩放。
+        let styled = layout_cached_style(0, 520.0, 300.0, 30.0, 40.0, 80.0, 50.0, 1.0, 1.8, 1.0, 2);
+        let ir: LayoutResult = ebook_ir::decode(&styled).unwrap();
+        let page = &ir.pages[0];
+        assert_eq!(page.box_size().w, 520.0);
+        assert_eq!(page.box_size().h, 300.0);
     }
 }

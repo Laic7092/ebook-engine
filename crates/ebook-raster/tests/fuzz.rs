@@ -170,6 +170,9 @@ fn ops(rng: &mut Rng, span: f32, glyphs: &mut Vec<Glyph>, depth: u32) -> Vec<Op>
                         Dir::Rtl
                     },
                     rotate: Rotate::None,
+                    weight: 400,
+                    style: ebook_ir::FontStyle::Normal,
+                    underline: false,
                 }));
             }
             3 => out.push(Op::Image {
@@ -283,6 +286,9 @@ fn off_canvas_ops_leave_the_surface_untouched() {
             text: String::from("a"),
             dir: Dir::Ltr,
             rotate: Rotate::None,
+            weight: 400,
+            style: ebook_ir::FontStyle::Normal,
+            underline: false,
         }),
         Op::Image {
             id: 0,

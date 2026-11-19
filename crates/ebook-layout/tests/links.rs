@@ -4,8 +4,8 @@
 
 use ebook_ir::doc::FontSpec;
 use ebook_ir::{
-    Anchor, ComputedStyle, Dir, FontId, LayoutResult, LineHeight, Node, NodeId, NodeKind, Op,
-    Rgba8, Span, StyledDoc, Tag,
+    Anchor, ComputedStyle, Dir, FontId, FontStyle, LayoutResult, LineHeight, Node, NodeId,
+    NodeKind, Op, Rgba8, Span, StyledDoc, Tag,
 };
 use ebook_layout::{layout, LayoutEnv, NoImageSizes, PageConstraint, TextMeasurer};
 
@@ -179,6 +179,32 @@ fn line_boxes_carry_node_and_glyph_span() {
     // 前两行的 node 是链接里的文本节点，第三行属于另一个段落。
     assert_eq!(ir.runs.lines[0].node, ir.runs.lines[1].node);
     assert_ne!(ir.runs.lines[1].node, ir.runs.lines[2].node);
+}
+
+#[test]
+fn glyph_runs_carry_weight_italic_and_underline() {
+    let mut doc = doc_with_link();
+    for node in &mut doc.nodes {
+        if node.kind.is_text() {
+            node.style.font.weight = 700;
+            node.style.font.style = FontStyle::Italic;
+            node.style.text.underline = true;
+        }
+    }
+    let ir = run(&doc, 100.0);
+    let runs: Vec<_> = ir
+        .display
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::GlyphRun(run) => Some(run),
+            _ => None,
+        })
+        .collect();
+    assert!(!runs.is_empty(), "应当至少发射一个 GlyphRun");
+    assert!(runs.iter().all(|run| run.weight == 700));
+    assert!(runs.iter().all(|run| run.style == FontStyle::Italic));
+    assert!(runs.iter().all(|run| run.underline));
 }
 
 #[test]

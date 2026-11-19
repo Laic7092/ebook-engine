@@ -127,6 +127,9 @@ function readGlyphRun(r) {
     text: r.string(),
     dir: r.varint(),
     rotate: r.varint(),
+    weight: r.varint(),
+    style: r.varint(),
+    underline: r.u8() === 1,
   };
 }
 

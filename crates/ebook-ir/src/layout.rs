@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 use crate::doc::{Anchor, Dir, ImageId, NodeId, Span, StyledDoc};
-use crate::font::FontId;
+use crate::font::{FontId, FontStyle};
 use crate::geom::{EdgesF, PointF, RectF, Rgba8, SidesF, SizeF};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,7 +12,7 @@ pub struct IrVersion {
     pub minor: u16,
 }
 
-pub const IR_VERSION: IrVersion = IrVersion { major: 1, minor: 3 };
+pub const IR_VERSION: IrVersion = IrVersion { major: 1, minor: 4 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Rotate {
@@ -71,6 +71,19 @@ pub struct GlyphRun {
     pub text: String,
     pub dir: Dir,
     pub rotate: Rotate,
+    /// 文字粗细。即使宿主没有装载字体，也能用系统字体合成 bold。
+    #[serde(default = "default_weight")]
+    pub weight: u16,
+    /// 斜体；与 `weight` 同理，不依赖 FontBook 是否命中。
+    #[serde(default)]
+    pub style: FontStyle,
+    /// 是否在字形下方画下划线。
+    #[serde(default)]
+    pub underline: bool,
+}
+
+fn default_weight() -> u16 {
+    400
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

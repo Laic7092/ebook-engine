@@ -10,6 +10,8 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 epub = []
+# 显式开启内置英文断字词典；默认不把 en.pat 打进 wasm。
+hyphen-en = ["ebook-font/hyphen-en"]
 
 [dependencies]
 ebook-ir.workspace = true

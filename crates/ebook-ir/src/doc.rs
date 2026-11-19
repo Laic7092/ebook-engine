@@ -346,6 +346,9 @@ pub struct TextStyle {
     /// 中文排版政策。旧数据缺这个字段时按规范默认（全关）解码。
     #[serde(default)]
     pub rules: TextRules,
+    /// 下划线。链接默认带下划线，宿主直接画在字形下方。
+    #[serde(default)]
+    pub underline: bool,
 }
 
 impl Default for TextStyle {
@@ -361,6 +364,7 @@ impl Default for TextStyle {
             transform: TextTransform::None,
             vertical_align: VerticalAlign::Baseline,
             rules: TextRules::default(),
+            underline: false,
         }
     }
 }

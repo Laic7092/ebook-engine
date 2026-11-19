@@ -1,8 +1,8 @@
 //! 命中测试与位置映射：不依赖排版器，直接构造 IR，验证坐标换算与往返回自洽。
 
 use ebook_ir::{
-    Anchor, Dir, DisplayList, EdgesF, FontId, Glyph, GlyphRun, LayoutResult, Limits, LineBox, Op,
-    Page, PointF, RectF, Rgba8, Rotate, RunMap, SizeF, Span, IR_VERSION,
+    Anchor, Dir, DisplayList, EdgesF, FontId, FontStyle, Glyph, GlyphRun, LayoutResult, Limits,
+    LineBox, Op, Page, PointF, RectF, Rgba8, Rotate, RunMap, SizeF, Span, IR_VERSION,
 };
 
 const LINE_H: f32 = 20.0;
@@ -26,6 +26,9 @@ fn run(glyphs: Span, x: f32, y: f32) -> Op {
         text: String::from("abcd"),
         dir: Dir::Ltr,
         rotate: Rotate::None,
+        weight: 400,
+        style: FontStyle::Normal,
+        underline: false,
     })
 }
 

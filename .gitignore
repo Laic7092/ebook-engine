@@ -3,7 +3,6 @@
 *.svg.out
 Cargo.lock.bak
 /web/pkg
-/web/en.epub
-/web/test.ttf
+/web/dist
 !tests/golden/*.ir
 /clippy.log

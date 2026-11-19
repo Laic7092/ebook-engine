@@ -17,6 +17,20 @@ pub fn eb_open(bytes: &[u8]) -> String {
     crate::open_book(bytes)
 }
 
+/// 打开宿主已经解码好的纯文本。`name` 只用于书名/扩展名展示。
+#[cfg(feature = "epub")]
+#[wasm_bindgen]
+pub fn eb_open_text(text: &str, name: &str) -> String {
+    crate::open_text(text, name)
+}
+
+/// 按字节自动识别 EPUB / TXT。
+#[cfg(feature = "epub")]
+#[wasm_bindgen]
+pub fn eb_open_file(bytes: &[u8], name: &str) -> String {
+    crate::open_file(bytes, name)
+}
+
 #[cfg(feature = "epub")]
 #[wasm_bindgen]
 pub fn eb_font(bytes: &[u8]) -> u32 {
@@ -48,10 +62,61 @@ pub fn eb_font_desc(id: u32) -> String {
     crate::font_desc(id)
 }
 
+/// 按字形 id 取 alpha 位图，供宿主用 `drawImage`/WebGL 自己画字。
+/// 头部见 `crate::glyph_bitmap`；没有位图时返回空数组。
+#[wasm_bindgen]
+pub fn eb_glyph_bitmap(font: u32, gid: u32, px: f32, dx: f32, dy: f32) -> Vec<u8> {
+    crate::glyph_bitmap(font, gid, px, dx, dy)
+}
+
 #[cfg(feature = "epub")]
 #[wasm_bindgen(js_name = "eb_layout")]
 pub fn eb_layout_book(spine: u32, width: f32, height: f32, margin: f32) -> Vec<u8> {
     crate::layout_cached(spine, width, height, margin)
+}
+
+#[cfg(feature = "epub")]
+#[wasm_bindgen(js_name = "eb_layout_insets")]
+#[allow(clippy::too_many_arguments)]
+pub fn eb_layout_book_insets(
+    spine: u32,
+    width: f32,
+    height: f32,
+    left: f32,
+    right: f32,
+    top: f32,
+    bottom: f32,
+    font_scale: f32,
+) -> Vec<u8> {
+    crate::layout_cached_insets(spine, width, height, left, right, top, bottom, font_scale)
+}
+
+#[cfg(feature = "epub")]
+#[wasm_bindgen(js_name = "eb_layout_style")]
+#[allow(clippy::too_many_arguments)]
+pub fn eb_layout_book_style(
+    spine: u32,
+    width: f32,
+    height: f32,
+    left: f32,
+    right: f32,
+    top: f32,
+    bottom: f32,
+    font_scale: f32,
+    line_scale: f32,
+    letter_px: f32,
+    align: u32,
+) -> Vec<u8> {
+    crate::layout_cached_style(
+        spine, width, height, left, right, top, bottom, font_scale, line_scale, letter_px, align,
+    )
+}
+
+/// 当前书第一章根节点的字号，宿主用它把“字号 18px”换算成缩放比例。
+#[cfg(feature = "epub")]
+#[wasm_bindgen]
+pub fn eb_base_font_size() -> f32 {
+    crate::base_font_size()
 }
 
 #[cfg(feature = "epub")]

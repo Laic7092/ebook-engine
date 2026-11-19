@@ -1,8 +1,8 @@
-//! IR 1.3 新增字段的编解码：链接 op、字形字节偏移、行盒索引、诊断条目。
+//! IR 1.4 新增字段的编解码：链接 op、字形样式、下划线、行盒索引、诊断条目。
 
 use ebook_ir::{
-    codec, Anchor, Dir, DisplayList, EdgesF, FontId, Glyph, GlyphRun, Issue, IssueCode, Limits,
-    LineBox, Op, Page, PointF, RectF, Rgba8, Rotate, RunMap, SizeF, Span, Unresolved,
+    codec, Anchor, Dir, DisplayList, EdgesF, FontId, FontStyle, Glyph, GlyphRun, Issue, IssueCode,
+    Limits, LineBox, Op, Page, PointF, RectF, Rgba8, Rotate, RunMap, SizeF, Span, Unresolved,
     UnresolvedReason, IR_VERSION,
 };
 
@@ -23,6 +23,9 @@ fn ir() -> ebook_ir::LayoutResult {
             text: String::from("x"),
             dir: Dir::Ltr,
             rotate: Rotate::None,
+            weight: 700,
+            style: FontStyle::Italic,
+            underline: true,
         }),
         Op::Link {
             rect: RectF::new(10.0, 20.0, 6.5, 16.0),
@@ -76,7 +79,7 @@ fn new_fields_survive_the_byte_contract() {
     let ir = ir();
     let bytes = codec::to_bytes(&ir).expect("encode");
     assert_eq!(&bytes[..4], &codec::MAGIC);
-    assert_eq!(&bytes[4..8], &[1, 0, 3, 0], "1.3 header");
+    assert_eq!(&bytes[4..8], &[1, 0, 4, 0], "1.4 header");
     let back: ebook_ir::LayoutResult = codec::decode(&bytes).expect("decode");
     assert_eq!(back, ir);
     assert_eq!(back.version, IR_VERSION);

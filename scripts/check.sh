@@ -56,6 +56,24 @@ if ! cargo test --workspace; then
 	status=1
 fi
 
+section "optional hyphen-en feature"
+if ! cargo clippy -p ebook-layout --all-targets --features hyphen-en -- -D warnings; then
+	echo "FAIL: clippy (ebook-layout, hyphen-en)" >&2
+	status=1
+fi
+if ! cargo clippy -p ebook-font --all-targets --features hyphen-en -- -D warnings; then
+	echo "FAIL: clippy (ebook-font, hyphen-en)" >&2
+	status=1
+fi
+if ! cargo test -p ebook-layout --features hyphen-en --test hyphen; then
+	echo "FAIL: cargo test (ebook-layout, hyphen-en)" >&2
+	status=1
+fi
+if ! cargo test -p ebook-font --features hyphen-en --test embedded; then
+	echo "FAIL: cargo test (ebook-font, hyphen-en)" >&2
+	status=1
+fi
+
 # tests/golden/*.ir 已入库（.gitignore 的 `!tests/golden/*.ir` 放行）。
 # 这里只为“本地刚 checkout、快照被误删”兜底：缺失时生成，已有快照仍然
 # 逐字节比较；不要用 bless 覆盖回归。

@@ -9,7 +9,8 @@
 
 接口契约见 [docs/api.md](docs/api.md)，设计论证与不变量见
 [docs/design.md](docs/design.md)，限额与默认值见 [docs/limits.md](docs/limits.md)，
-中文文本政策见 [docs/text-rules.md](docs/text-rules.md)。
+中文文本政策见 [docs/text-rules.md](docs/text-rules.md)，已知缺口与兼容性审计见
+[docs/gaps.md](docs/gaps.md)。
 
 ```
 format  ──>  StyledDoc  ──>  layout  ──>  LayoutResult  ──>  render
@@ -71,7 +72,7 @@ format  ──>  StyledDoc  ──>  layout  ──>  LayoutResult  ──>  ren
 
 度量只认字体入参：`TextMeasurer` 由外部注入，`FontBook` 用 `ttf-parser` 给出真实的 advance / ascent / descent / cmap，同一份字体字节同时也是 `Resources` 的光栅化来源。`TextMeasurer::shape` 默认逐字 advance，`FontBook` 用 rustybuzz 做真正的整形（kerning / ligature、按簇回写字形与字节偏移）；双向文本由 `unicode-bidi` 按 UAX #9 求段内级，排版层按簇做视觉重排。`ebook-layout` 只依赖 `ebook-ir` 与 `unicode-bidi`，仍然不碰 I/O。
 
-断行按 UAX #14，属性表由 `data/unicode/LineBreak.txt` 生成（`data/gen_linebreak.py`），不引第三方 crate。只实现成对可判定的规则，需要上下文的规则明确不装。断字（hyphenation）是可插接口：宿主通过 `TextMeasurer::hyphenator()` 注入词典，内置英文 ushyphmax 模式的 Liang 算法；没有词典时 `hyphens: auto` 与 `none` 同行为。
+断行按 UAX #14，属性表由 `data/unicode/LineBreak.txt` 生成（`data/gen_linebreak.py`），不引第三方 crate。只实现成对可判定的规则，需要上下文的规则明确不装。断字（hyphenation）是可插接口：宿主通过 `TextMeasurer::hyphenator()` 注入词典，内置英文 ushyphmax 模式的 Liang 算法（`hyphen-en` feature，默认关闭，不把 `en.pat` 链进 wasm）；没有词典时 `hyphens: auto` 与 `none` 同行为。
 
 中文排版政策是三个独立开关（`TextRules`：成对标点挤压 / 行末悬挂 / 中西文自动间距），默认全关，出处与浏览器差异见 [docs/text-rules.md](docs/text-rules.md)。行内图片与 ruby 不再静默丢失：尺寸未知时产占位与诊断，ruby 的注音参与行高但不改基文字形。
 
@@ -93,7 +94,7 @@ op 坐标是**排版流坐标**，不是页面内坐标。`Page.origin` 表示�
 | 排版 | 盒树、margin collapsing、UAX #14 断行、两端对齐、孤行寡行、强制分页、增量重排入口；`layout` 是全函数 |
 | 文本 | `TextMeasurer::shape`（默认逐字，`FontBook` 用 rustybuzz）、按簇双向重排（UAX #9）、字距/词距、可选断字词典、`TextRules` 三个中文政策开关 |
 | 替换元素 | 块级/行内图片（固有尺寸未知时占位）、ruby 注音 |
-| 契约 | IR 1.3：`Glyph.ch`、`Op::Link`、`Issue`/`IssueCode`、`LayoutResult.truncated`、`LayoutStats` |
+| 契约 | IR 1.4：`Glyph.ch`、`Op::Link`、`GlyphRun.weight/style/underline`、`Issue`/`IssueCode`、`LayoutResult.truncated`、`LayoutStats` |
 | 限额 | `Limits` 六个字段（节点/深度/文本字节/页数/行数/图片像素），超限返回合法截断 IR |
 | 交互 | `Reader`（命中、锚点、进度、链接、夹取）、`Selection`/`SelectionRect`（分页矩形与原文）、wasm 侧 JSON 查询 |
 | 缓存 | `ebook-cache`：输入指纹为键的有界 LRU，命中/未命中/淘汰统计 |
@@ -101,6 +102,8 @@ op 坐标是**排版流坐标**，不是页面内坐标。`Page.origin` 表示�
 | 渲染 | SVG 参考后端、RGBA8 整数光栅（tone/线性光、嵌套裁剪、双线性图片）、Canvas2D 阅读器 |
 
 ## 现状与限制
+
+完整的缺口清单、证据与建议修复顺序见 [docs/gaps.md](docs/gaps.md)。这里只列当前最影响使用的几条：
 
 - 只做横排；`WritingMode` 字段保留。
 - `layout_parallel` 并行的是分页单元映射，不是段落断行本身；真正按段并行需要改 `flow` 的内部拆分，留给后续。
@@ -119,7 +122,7 @@ op 坐标是**排版流坐标**，不是页面内坐标。`Page.origin` 表示�
 |---|---|---|
 | SVG | `ebook-render` | 参考实现，输出可以直接看，也方便和浏览器排同一份 XHTML 做差分 |
 | 光栅 | `ebook-raster` | 整数混合，跨平台逐字节一致；`to_ppm()` 可以落到文件 |
-| Canvas2D | `web/` | 浏览器阅读器，按 `GlyphRun.text` 画，文本可选中 |
+| Canvas2D | `web/` | 浏览器阅读器，按 `GlyphRun.gid` 取 FontBook 位图画，文本可选中 |
 
 `paint()` 是三个后端共用的 op 遍历，坐标只在这里被平移到页面内，后端自己不碰坐标。
 
@@ -173,8 +176,11 @@ cargo run -p xtask -- golden | bless | contract | pixel | pixel-bless | size | p
 cargo run -p ebook-cli -- layout fixtures/demo.epub --spine 0 --stats --svg page.svg
 cargo run -p ebook-raster --example page
 ./web/build.sh && python3 -m http.server
+./web/minify.sh                  # 生成可部署的 web/dist（JS/HTML 压缩；--wasm-opt / --precompress 见脚本头）
+npx wrangler pages deploy web/dist --project-name ebook-reader   # 发布到 Cloudflare Pages
+FEATURES=epub,hyphen-en ./web/build.sh   # 需要内置英文断字时
 ```
 
-最后一条打开 `http://localhost:8000/web/` 就是阅读器：选 EPUB、翻页、换章。`fixtures/en.epub` 是自带的英文样书，字体用 `fixtures/font/test.ttf`，浏览器侧用同一份字体做绘制，量出来的和画出来的不该有漂移。中日韩书需要自带一个覆盖 CJK 的字体，仓库里那个只覆盖拉丁。
+最后一条打开 `http://localhost:8000/web/` 就是完整阅读器：书架默认从 IndexedDB 读取，支持导入 EPUB 与 TXT（UTF-8 / UTF-16 / GB18030 / Big5 / Shift_JIS），点开进入阅读页，翻页、目录、字号/粗体/行距/字距/边距/对齐/主题设置与阅读进度都会持久化。界面按移动优先设计，阅读页使用真实可视区域排版并铺满，手机用底部面板、桌面用侧边抽屉，移动端工具栏会自动隐藏，轻点屏幕中间显示或收起；左右两侧轻点或横向滑动翻页。`?book=<url>&spine=<n>` 可直接打开指定书与章节，方便截图与回归。`fixtures/en.epub` 只用于测试，不进入部署包。部署包里的拉丁回退字体是 `web/latin.ttf`（DejaVu Sans），中日韩字体当前是 `web/cjk.ttf`，同时提供 `web/cjk.ttf.gz`（约 1.5 MB）；支持 `DecompressionStream` 的浏览器优先下载 gzip，不支持时回退未压缩 TTF。`web/manifest.webmanifest` + `web/sw.js` 让应用可安装，并把 wasm、JS 和第一次读到的字体放进 Cache Storage；字体首次约 1.5 MB（gzip）或 2.2 MB（回退 TTF），之后冷启动直接命中本地缓存。子集缺字时该段退回浏览器系统字体，不会静默消失。
 
 `golden` 比字节；`size` 卡预算；`parity` 用同一份输入分别跑 native 与 wasm，逐字节比对 IR。`bench` 输出 `name<TAB>median_ns`，可直接 diff；基线文件里写明采集机器与 rustc 版本。CI 跑 fmt、clippy `-D warnings`、test、`xtask all` 与 `xtask size`，并在干净 checkout 上直接用入库的 golden 快照。

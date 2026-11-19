@@ -8,6 +8,9 @@ publish.workspace = true
 # wasm 不启用：线程只在 native 上参与，关闭后 layout_parallel 走串行路径。
 default = ["parallel"]
 parallel = []
+# 内置英文断字词典（en.pat，约 100KB）。默认关闭：只有需要 hyphens:auto
+# 且接受这份体积的宿主才显式开启。
+hyphen-en = []
 
 [dependencies]
 ebook-ir.workspace = true

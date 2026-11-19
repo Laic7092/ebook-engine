@@ -34,7 +34,9 @@ use ebook_ir::{
 };
 
 pub use hit::Reader;
-pub use hyphen::{English, Hyphenator};
+#[cfg(feature = "hyphen-en")]
+pub use hyphen::English;
+pub use hyphen::Hyphenator;
 pub use measure::{ShapeGlyph, StubMeasurer, TextMeasurer};
 pub use select::{Selection, SelectionRect};
 pub use shape::shape_per_char;
@@ -245,6 +247,9 @@ impl Layout {
                             text: run.text.clone(),
                             dir: run.dir,
                             rotate: run.rotate,
+                            weight: run.weight,
+                            style: run.style,
+                            underline: run.underline,
                         }));
                     }
                     for op in line.unresolved {

@@ -20,6 +20,9 @@ pub(crate) struct LaidRun {
     pub(crate) origin: PointF,
     pub(crate) glyphs: Span,
     pub(crate) text: String,
+    pub(crate) weight: u16,
+    pub(crate) style: ebook_ir::FontStyle,
+    pub(crate) underline: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1516,6 +1519,9 @@ impl<'a> FlowCtx<'a> {
             origin: PointF::new(run_x, baseline),
             glyphs: Span::new(glyph_start, count),
             text: rt_text.into(),
+            weight: piece.style.font.weight,
+            style: piece.style.font.style,
+            underline: piece.style.text.underline,
         })
     }
 
@@ -1742,6 +1748,9 @@ impl<'a> FlowCtx<'a> {
                     origin: PointF::new(run_x, run_baseline),
                     glyphs: Span::new(glyph_start, self.flow.glyphs.len() as u32 - glyph_start),
                     text,
+                    weight: style.font.weight,
+                    style: style.font.style,
+                    underline: style.text.underline,
                 });
                 if let PieceKind::Ruby { rt } = piece.kind {
                     if let Some(run) = self.ruby_run(
@@ -1797,6 +1806,9 @@ impl<'a> FlowCtx<'a> {
                     origin: PointF::new(run_x, baseline + shift),
                     glyphs: Span::new(glyph_start, 1),
                     text: String::from("-"),
+                    weight: hyphen_style.font.weight,
+                    style: hyphen_style.font.style,
+                    underline: hyphen_style.text.underline,
                 });
             } else {
                 missing.push((piece.node, RectF::new(run_x, top, hyphen_advance, line_h)));

@@ -236,7 +236,7 @@ fn split_important(value: &str) -> (&str, bool) {
     (trimmed, false)
 }
 
-/// 属性名是否认识。认识但 IR 没有对应字段的（`text-decoration`、`border-radius`）
+/// 属性名是否认识。认识但 IR 没有对应字段的（`border-radius`）
 /// 也算认识：它们被安静跳过，而不是报告成未知属性。
 pub fn property_supported(name: &str) -> bool {
     matches!(
@@ -548,8 +548,17 @@ fn ua_apply(style: &mut ebook_ir::ComputedStyle, tag: Tag) {
             style.display = Display::Inline;
             style.font.weight = 700;
         }
-        Tag::Em => style.display = Display::Inline,
-        Tag::Span | Tag::A | Tag::Code | Tag::Ruby | Tag::Rt => style.display = Display::Inline,
+        Tag::Em => {
+            style.display = Display::Inline;
+            style.font.style = FontStyle::Italic;
+        }
+        Tag::A => {
+            style.display = Display::Inline;
+            // 浏览器 UA 默认的链接蓝与下划线；书里的 CSS 仍可覆盖。
+            style.color = ebook_ir::Rgba8::new(26, 95, 180, 255);
+            style.text.underline = true;
+        }
+        Tag::Span | Tag::Code | Tag::Ruby | Tag::Rt => style.display = Display::Inline,
         Tag::Br => style.display = Display::Inline,
         Tag::Img => style.display = Display::InlineBlock,
         Tag::Li => {
@@ -809,8 +818,13 @@ fn apply(
             }
             style.list = Some(ListStyle { ordered, start: 1 });
         }
-        // IR 没有装饰线与圆角字段：明确跳过，等 IR 提供后再接。
-        "text-decoration" | "text-decoration-line" | "border-radius" => {}
+        // IR 只有下划线，`line-through` / `overline` / 圆角暂不支持。
+        "text-decoration" | "text-decoration-line" => {
+            style.text.underline = value
+                .split_whitespace()
+                .any(|part| part.eq_ignore_ascii_case("underline"));
+        }
+        "border-radius" => {}
         _ => {}
     }
 }
@@ -1965,6 +1979,31 @@ mod tests {
             fixture.doc.node(fixture.last).style.color,
             Rgba8::new(0, 128, 0, 255)
         );
+    }
+
+    #[test]
+    fn links_get_ua_blue_and_underline_but_css_can_override() {
+        let (mut doc, mut keys, p) = simple_paragraph();
+        let a = element(&mut doc, &mut keys, Some(p), Tag::A, "a", None, &[]);
+        let t = text_node(&mut doc, &mut keys, a, "link");
+        doc.set_kids(p, &[a]);
+        doc.set_kids(a, &[t]);
+
+        cascade_css(&mut doc, &keys, "");
+        assert_eq!(
+            doc.node(a).style.color,
+            Rgba8::new(26, 95, 180, 255),
+            "没有样式表时链接应当是蓝色"
+        );
+        assert!(doc.node(a).style.text.underline, "链接默认带下划线");
+
+        cascade_css(
+            &mut doc,
+            &keys,
+            "a { color: #123456; text-decoration: none; }",
+        );
+        assert_eq!(doc.node(a).style.color, Rgba8::new(0x12, 0x34, 0x56, 255));
+        assert!(!doc.node(a).style.text.underline);
     }
 
     #[test]

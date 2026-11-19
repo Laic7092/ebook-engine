@@ -28,8 +28,8 @@ function compare(name, bytes) {
 // 所以这里对新增字段的语义做最小断言，防止 decode/encode 一起跑偏。
 function checkFields(name, layout) {
   const { major, minor } = layout.version;
-  if (major !== 1 || minor !== 3) {
-    throw new Error(`${name}: IR version ${major}.${minor}, want 1.3`);
+  if (major !== 1 || minor !== 4) {
+    throw new Error(`${name}: IR version ${major}.${minor}, want 1.4`);
   }
 
   const glyphs = layout.display.glyphs;
@@ -110,8 +110,8 @@ function checkSpans(name, layout) {
 // golden 里暂时没有 link（格式层还没填 `Node.link`），所以这一段是 link 解码的唯一覆盖。
 function selfCheck() {
   const layout = {
-    header: { major: 1, minor: 3 },
-    version: { major: 1, minor: 3 },
+    header: { major: 1, minor: 4 },
+    version: { major: 1, minor: 4 },
     spine: 0,
     pages: [{
       index: 0,
@@ -135,6 +135,9 @@ function selfCheck() {
             text: "x",
             dir: 0,
             rotate: 0,
+            weight: 700,
+            style: 1,
+            underline: true,
           },
         },
         { type: "link", rect: { x: 10, y: 20, w: 8, h: 16 }, href: "ch2.xhtml#n" },
@@ -306,6 +309,7 @@ async function selectionModuleSelfCheck() {
     }
   };
   let linked = null;
+  let swiped = null;
   const page = () => ({
     index: 0,
     info: {
@@ -327,6 +331,9 @@ async function selectionModuleSelfCheck() {
     linkAt: () => "ch2.xhtml#n",
     onLink: (href) => {
       linked = href;
+    },
+    onSwipe: (direction) => {
+      swiped = direction;
     },
     setStatus: () => {},
     onChange: () => {},
@@ -369,7 +376,17 @@ async function selectionModuleSelfCheck() {
   if (linked !== "ch2.xhtml#n") {
     throw new Error(`selection module: link click ${linked}`);
   }
-  console.log("contract ok: selection module drag/overlay/link-click");
+
+  // 触屏横向滑动：左滑翻下一页，不应再触发点击。
+  linked = null;
+  swiped = null;
+  fire("pointerdown", { clientX: 90, clientY: 10, pointerType: "touch" });
+  fire("pointermove", { clientX: 40, clientY: 12, pointerType: "touch" });
+  fire("pointerup", { clientX: 40, clientY: 12, pointerType: "touch" });
+  if (swiped !== "next" || linked !== null) {
+    throw new Error(`selection module: swipe ${swiped}, link ${linked}`);
+  }
+  console.log("contract ok: selection module drag/overlay/link-click/swipe");
 }
 
 const names = process.argv.length > 2

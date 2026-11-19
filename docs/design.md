@@ -90,7 +90,7 @@ ebook-format ──> ebook-ir <── ebook-layout <── ebook-font
 26. 只有一行、且该行连同比页内起点偏移都装不进内容区时，允许它溢出页面；
     其它任何情况下行都不越界（`tests/fuzz.rs` 把这条写成了断言）。
 
-> 已知缺陷（1.3）：整行只有行内图片时，`LineBox.src` 从 0 算起（占位字符
+> 已知缺陷（1.4）：整行只有行内图片时，`LineBox.src` 从 0 算起（占位字符
 > `U+FFFC` 按 3 字节计），不指向真实原文。选区会跳过这类行；修复需要改
 > `flow` 的源区间计算。`tests/fuzz.rs` 暂时把 `Image` 行从 src 单调检查里排除。
 
@@ -229,9 +229,14 @@ golden test 失去意义，跨端一致性也无法证明。
 - JS 解码器手写，字段顺序必须与 Rust 完全一致；
 - `web/encode.js` 只用于 contract 的“解出来再编回去”，不参与阅读器主路径。
 
-`web/app.js` 只按 `GlyphRun.text` 画文本，按 `Page.origin/inset` 平移画布；
+`web/reader.js` 只按 `GlyphRun.text` 画文本，按 `Page.origin/inset` 平移画布；
 它不解释 CSS，也不重新断行。字体描述由 `eb_font_desc` 从 `FontBook` 取出，
 交给 canvas 的 `font` 字符串，保证量出来的和画出来的用同一份字体。
+`web/app.js` 负责书架/阅读页路由与导入，`web/library.js` 渲染书架，
+`web/db.js` 封装 IndexedDB（不可用时退化成内存），TXT 的编码检测在
+`web/text.js`，分章仍在 `ebook-format::txt::TxtReader`。界面是移动优先的
+响应式布局：阅读页用实际可视区域作为排版约束，手机用底部面板，桌面用侧边抽屉，
+移动端工具栏在阅读时自动隐藏，轻点页面显示或收起；工具栏是覆盖层，显隐不会改变排版约束或触发重排。
 
 ---
 
@@ -317,9 +322,9 @@ StyledDoc ──flow──> [Item::Line | Item::Op] ──paginate──> Page[]
 
 ---
 
-## 13. IR 1.3 的字段为什么这么放
+## 13. IR 1.2–1.4 的字段为什么这么放
 
-IR 是位置编码，字段顺序就是字节布局。1.2/1.3 的新字段都遵守同一条规则：
+IR 是位置编码，字段顺序就是字节布局。1.2–1.4 的新字段都遵守同一条规则：
 **只在结构体末尾追加**，让旧快照只多出一个后缀，而不是整段错位。
 
 | 字段 | 放在哪 | 为什么不是别的放法 |
@@ -328,6 +333,8 @@ IR 是位置编码，字段顺序就是字节布局。1.2/1.3 的新字段都遵
 | `Op::Link` | `DisplayList.ops` 的一种 op | 链接是渲染/命中关心的事，不是排版几何。放进 op 数组就能跟着 `Page.ops` 一起切片；如果挂到 `LineBox` 上，就得给页再加一个“链接切片”，页覆盖不变量会多一条。 |
 | `Issue` | `LayoutResult.issues` | 诊断不能混进 op，否则渲染层要认识“只记录不画”的变体。独立一个 `Vec` 让渲染完全不受影响，`IssueCode` 以后加变体也只动这一个枚举。 |
 | `truncated` | `LayoutResult` 最后一个字段（`bool`） | `bool` 在 postcard 里是 1 字节，追加在末尾对旧 golden 的影响最小（每个文件 +1 字节）；放在结构体中间会让后面所有字段错位，等同于 major 变更。 |
+| `GlyphRun.weight` / `style` / `underline` | `GlyphRun` 最后一个字段之后 | 文字样式必须跟着 run 走，不能只靠 FontBook：没装字体时 font id 全是 0，宿主仍要知道“这句是 bold / italic / underline”。追加在 `rotate` 之后，旧字段偏移不变。 |
+| `TextStyle.underline` | `TextStyle` 最后一个字段之后 | 装饰线先只支持下划线；`line-through` / `overline` 还需要更多字段，等有真实需求再加。 |
 | `Limits` | **不进 IR** | 限额是输入，不是输出。写进 IR 会让同一份文档在不同预算下产生不同字节，golden 无法稳定。 |
 | `LayoutStats` | **不进 IR** | 它是 `size_of` + 容量 + 字符串长度的估算，用于诊断与预算；一旦序列化，分配器的容量差异会变成字节差异。 |
 | `DirtyBlock` | 保持独立 | 增量重排要的是“哪块需要重来”，与 op/行都不是一一对应；保留独立数组才能在不改 IR 其余部分的前提下扩展原因。 |

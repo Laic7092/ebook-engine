@@ -4,14 +4,17 @@
 //! [`TextMeasurer::hyphenator`](crate::TextMeasurer::hyphenator) 注入；核心不捆绑
 //! "默认词典"，因为换词典会改变分页，属于政策而不是正确性。
 //!
-//! 内置的 [`English`] 是 ushyphmax 模式（hyph-utf8 / `~/layx/render/hyphen/en`），
-//! 用 Liang 算法求断点，数据由 `data/gen_hyphen.py` 编成二进制后用
-//! `include_bytes!` 带进来，不启动时解析、不持全局状态。
+//! 内置的 `English`（`hyphen-en` feature）是 ushyphmax 模式（hyph-utf8 /
+//! `~/layx/render/hyphen/en`），用 Liang 算法求断点，数据由
+//! `data/gen_hyphen.py` 编成二进制后用 `include_bytes!` 带进来，不启动时解析、
+//! 不持全局状态。默认不编译这份数据。
 
 use alloc::vec::Vec;
 
+#[cfg(feature = "hyphen-en")]
 pub mod en;
 
+#[cfg(feature = "hyphen-en")]
 pub use en::English;
 
 pub trait Hyphenator {

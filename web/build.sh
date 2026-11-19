@@ -7,8 +7,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # 和 xtask 一致：尊重 CARGO_TARGET_DIR，否则每个 worktree 都得建符号链接。
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
-cargo build -p ebook-web --release --target wasm32-unknown-unknown --features epub
+# 默认只带 epub；需要内置英文断字时用 FEATURES=epub,hyphen-en。
+FEATURES="${FEATURES:-epub}"
+cargo build -p ebook-web --release --target wasm32-unknown-unknown --features "$FEATURES"
 rm -rf web/pkg
 wasm-bindgen --target web --out-dir web/pkg "$TARGET_DIR/wasm32-unknown-unknown/release/ebook_web.wasm"
-cp fixtures/en.epub web/en.epub
-cp fixtures/font/test.ttf web/test.ttf
+# 生产用的拉丁回退字体；示例书与 demo.txt 不再进部署包。
+cp fixtures/font/test.ttf web/latin.ttf

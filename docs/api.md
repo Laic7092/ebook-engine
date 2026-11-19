@@ -58,7 +58,7 @@ ByteSource ──format──> StyledDoc ──layout──> LayoutResult ──
 
 ```
 LayoutResult
-├── version: IrVersion       // 1.3
+├── version: IrVersion       // 1.4
 ├── spine: u32               // 与 StyledDoc.meta.spine 一致
 ├── pages: Vec<Page>
 ├── display: DisplayList { ops: Vec<Op>, glyphs: Vec<Glyph> }
@@ -76,6 +76,7 @@ LayoutResult
 | `Page.inset` | 页边距；`box_size()` = 内容尺寸 + 四边 |
 | `Page.anchor` | 页首锚点，可能为空 |
 | `GlyphRun.glyphs` | 指向 `display.glyphs` 的连续切片 |
+| `GlyphRun.weight` / `style` / `underline` | 文字样式随 run 走；宿主没装字体也能合成粗体/斜体/下划线 |
 | `LineBox.src` | 对应 `StyledDoc.text` 的源区间，用于选区；整行只有行内图片时该区间没有意义 |
 | `DirtyBlock` | 需要宿主重排/换字体的块，`reason` 见 2.3 |
 | `Issue` | 排版过程中记录的可恢复问题；只记录，不拦截 |
@@ -150,7 +151,9 @@ IR 里有两个互补的枚举：
 - 排版层只在带 `Node.link` 的行上发射，一行一个（换行就把链接切成多个热区）。
 - `rect` 是**行盒矩形**（`LineBox.rect`），不是文字的墨迹范围；点行间空白不算命中。
 - `href` 是原始属性值，排版层不解析、不改写、不拼基址。
-- 渲染层默认不画（光栅保持透明），SVG 后端输出 `<a>`；命中查询用
+- 链接文字默认是蓝色并带下划线：颜色由格式层 UA 样式写入 `GlyphRun.color`，
+  下划线由 `GlyphRun.underline` 携带；书里的 CSS 可以覆盖。
+- 热区本身不改颜色；光栅保持透明，SVG 后端输出 `<a>`；命中查询用
   `Reader::link_at`（页内坐标）。
 
 `Fit`：`Contain=0`、`Cover=1`、`Fill=2`。
@@ -220,13 +223,15 @@ IR 里有两个互补的枚举：
 
 ### 3.3 版本与兼容策略
 
-当前 `IR_VERSION = 1.3`。
+当前 `IR_VERSION = 1.4`。
 
 - **major 表示字节布局。** 增删字段、改字段顺序、增删/重排枚举变体、改整数宽度，
   必须升 major。旧解码器遇到不同 major 直接拒绝。
 - **minor 表示相容的字段增补。** 新字段只在结构体**末尾追加**，旧版本语义不变：
   1.2 加 `Glyph.ch` / `Op::Link` / `Issue` / `Limits`（`Limits` 不进字节流），
-  1.3 加 `LayoutResult.truncated`（`LayoutStats` 只是内存里的估算，不序列化）。
+  1.3 加 `LayoutResult.truncated`（`LayoutStats` 只是内存里的估算，不序列化）；
+  1.4 给 `GlyphRun` 末尾追加 `weight` / `style` / `underline`，给 `TextStyle`
+  末尾追加 `underline`。
   `read_header` 不因 minor 不同而拒绝。
 - **但 postcard 是位置编码，不是自描述格式。** 旧解码器无法“跳过未知字段”，
   所以 minor 增补后 native 与 JS 必须**一起**升级；`decode` 依赖结构体形状，
@@ -432,6 +437,7 @@ pub trait Hyphenator {
     fn name(&self) -> &str;
 }
 
+#[cfg(feature = "hyphen-en")]
 pub struct English; // ushyphmax（hyph-utf8）的 Liang 算法实现
 ```
 
@@ -444,6 +450,8 @@ pub struct English; // ushyphmax（hyph-utf8）的 Liang 算法实现
   下刀；没有词典时行为与 `hyphens: none` 相同。
 - 换词典会改分页，所以它**不是**排版的默认政策：内置 `English` 也要宿主显式
   返回 `Some(&english)` 才生效（见 `crates/ebook-layout/tests/hyphen.rs`）。
+  `English` 与 `en.pat` 还受 `ebook-layout` 的 `hyphen-en` feature 控制，默认不编译；
+  `ebook-font` 需要时用 `ebook-font/hyphen-en` 打开。
 - `name()` 用于缓存键与诊断；改词典必须改这个名字，否则缓存的旧分页会继续命中。
 
 ### 4.10 `Op::Link` 与 `Location` 的分工
@@ -485,6 +493,8 @@ EPUB 适配器靠它判断“整个输入就是一个 epub 字节流”。
 | `open(src)` | 按 `Probe::Yes` → `Maybe` 选择；都不匹配返回 `Unsupported("no adapter")` |
 | `Opened::chapter(src, index)` | 读第 `index` 章；越界 `OutOfRange` |
 | `Opened::len()` / `is_empty()` | spine 长度 |
+| `txt::TxtReader::from_text(text, name)` | 已解码 UTF-8 文本按标题行分章；超长按行/字符边界兜底 |
+| `TxtReader::chapter_with_anchors(index)` | 逐章 `StyledDoc`，锚点 spine 已改写为本章 |
 
 `Probe`：`No`（明确不支持）、`Maybe`（可能是）、`Yes`（确认）。
 EPUB 先看 `PK\x03\x04`，再确认 `mimetype` 是 `application/epub+zip`。
@@ -571,7 +581,7 @@ trait Renderer {
 |---|---|---|
 | 参考 | `SvgRenderer` + `SvgSurface` | 可直接看的 SVG；文本用 `GlyphRun.text` |
 | 光栅 | `RgbaSurface` | RGBA8，整数混合，跨平台逐字节一致 |
-| Canvas2D | `web/app.js` | 浏览器阅读器，文本可选中 |
+| Canvas2D | `web/reader.js` | 浏览器阅读器，文本可选中 |
 
 `RgbaSurface::to_ppm()` 输出 P6 PPM；`render_page()` 会先清成白色再画。
 `RgbaSurface::from_page(page)` 用 `page.box_size()` 决定画布大小。
@@ -586,11 +596,17 @@ trait Renderer {
 | `eb_layout_text` | `epub` | 同上，命名避开同名导出 |
 | `eb_handle(bytes)` | 任意 | postcard 请求/响应（`Ping` / JSON 之外的二进制协议） |
 | `eb_open(bytes)` | `epub` | 打开 EPUB，返回书目 JSON 或 `{"error":...}` |
+| `eb_open_text(text, name)` | `epub` | 打开已解码的 TXT；按标题行分章，`name` 用于书名 |
+| `eb_open_file(bytes, name)` | `epub` | 按 ZIP 魔数自动选择 EPUB / TXT |
 | `eb_layout_chapter(bytes, name, spine, w, h, margin)` | `epub` | 无缓存地排版一章 |
 | `eb_layout(spine, w, h, margin)` | `epub` | 排版已打开书籍的指定章 |
+| `eb_layout_insets(spine, w, h, left, right, top, bottom, font_scale)` | `epub` | 四边独立页边距 + 只缩放字号/行高；页面容器不变 |
+| `eb_layout_style(spine, w, h, left, right, top, bottom, font_scale, line_scale, letter_px, align)` | `epub` | 在四边页边距上再独立覆盖行距/字距/对齐；`align` 0=原书、1=左、2=中、3=右、4=两端 |
+| `eb_base_font_size()` | `epub` | 当前书首章根节点字号；宿主用它把 px 字号换算成缩放比例 |
 | `eb_font(bytes)` | `epub` | 注册字体，返回 id；失败 `u32::MAX` |
 | `eb_font_reset()` / `eb_font_count()` | `epub` | 字体槽管理 |
 | `eb_font_desc(id)` | `epub` | 返回给 canvas 的字体描述 JSON |
+| `eb_glyph_bitmap(font, gid, px, dx, dy)` | `epub` | 按字形 id 取 alpha 位图（8 字节头 + `w*h`），粗/斜体已在 FontBook 内合成 |
 | `eb_hit(page, x, y)` | 任意 | 页内坐标命中：`{"location":{...}|null}` |
 | `eb_link_at(page, x, y)` | 任意 | 页内坐标上的链接：`{"href":"..."|"null"}` |
 | `eb_selection(a_page,a_line,a_byte,b_page,b_line,b_byte)` | 任意 | 选区：`{start,end,rects:[{page,rect}],text}` |

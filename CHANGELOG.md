@@ -7,7 +7,7 @@
 
 ### Added
 
-**IR 1.2 / 1.3**
+**IR 1.2 / 1.3 / 1.4**
 
 - `Glyph.ch`：字形到原文字节的映射，命中测试与选区不再靠宽度反推。
 - `Op::Link`：链接热区按行发射，与 `LineBox` 同形；渲染默认不画，SVG 输出 `<a>`。
@@ -17,6 +17,17 @@
   `max_lines` / `max_image_pixels`）与 `LayoutResult.truncated`：超限返回合法截断 IR。
 - `LayoutStats` 与 `LayoutResult::stats` / `stats_with_doc`；CLI `--stats` 打印页数、
   行数、字形数、op 数、IR 字节与估算内存。
+- IR 1.4：`GlyphRun.weight` / `style` / `underline` 与 `TextStyle.underline`。
+  文字样式不再依赖 FontBook 是否命中；宿主没装字体时也能用系统字体合成粗体/斜体。
+- `eb_glyph_bitmap`：Web 端按 `GlyphRun` 的 gid 取 FontBook 光栅位图，用
+  `drawImage`/WebGL 自己画字；不再把粗体/斜体/字距交给浏览器合成。
+- 移动端手势：左右 30% 轻点翻页，中间轻点切换工具栏；触屏横向滑动翻页。
+- PWA：`manifest.webmanifest`、Service Worker 应用壳、192/512 图标；可安装、离线打开。
+- 字体缓存：CJK 字体写入 Cache Storage（`ebook-fonts-v1`），第二次冷启动不再下载。
+- 本地预览字体换成 PingFang SC Regular 的 GB2312 一级+二级子集：TTF 2.2 MB，gzip 1.5 MB；
+  优先 gzip + `DecompressionStream`，缺字整段回退系统字体。
+- 阅读设置：字号、粗体、行距、字距、页边距、对齐方式；目录顶部的章节下拉框移除。
+- `eb_layout_style`：行距/字距/对齐作为独立排版入参，不再只能跟着字号等比缩放。
 
 **排版**
 
@@ -31,6 +42,7 @@
   `LineBox.dir` 分离。
 - 断字：`Hyphenator` 接口 + 内置英文 ushyphmax（Liang 算法），由宿主通过
   `TextMeasurer::hyphenator()` 注入；没有词典时 `hyphens: auto` 等同 `none`。
+  内置 `English` / `en.pat` 由 `hyphen-en` feature 控制，默认不链入 wasm。
 - `TextRules`：成对标点挤压、行末标点悬挂、中西文自动间距三个独立开关，默认全关；
   出处与浏览器差异见 [docs/text-rules.md](docs/text-rules.md)。
 - 行内图片与 ruby：不再静默丢节点；尺寸未知时占位并记诊断。
@@ -47,6 +59,26 @@
   书目元数据（作者/出版者/语言/日期/标识符）。
 - 格式层诊断：`EpubIssueCode`（缺 spine 项、缺资源、XHTML 损坏、未支持 CSS、
   nav/ncx 损坏、重复 id、越界路径、重复 manifest、TOC 目标缺失）。
+- `ebook-format::txt::TxtReader`：TXT 按“第 N 章 / Chapter N”标题行分章，
+  超长文本按行兜底切分；spine、TOC 与逐章 `StyledDoc` 和 EPUB 同构。
+- `ebook-web` 新增 `eb_open_text` / `eb_open_file`：纯文本走同一条排版、
+  目录、选中与进度链路；`book_json` 补齐作者、出版者、标识符、日期、简介与封面路径。
+
+**Web 阅读器**
+
+- 书架：IndexedDB 持久化书籍字节、元数据与阅读进度；支持导入、搜索、删除，
+  IndexedDB 不可用时自动退回内存。
+- 阅读页：EPUB / TXT 共用目录、章节选择、进度条、选区复制、链接跳转，
+  新增真实字号（px）、页边距、明亮/护眼/夜间主题设置，设置同样持久化。字号只改文档字形与行高，不改变页面容器；移除“页面铺满屏幕”开关，阅读区始终按可视区域排版。
+- Canvas 阅读器按 `GlyphRun` 的 weight/style 生成字体串，并绘制 `underline`；
+  `<a>` 使用浏览器默认链接蓝与下划线，标题/strong/em 不再丢失粗细和斜体。
+- 移动优先响应式界面：书架 2–6 列自适应；阅读页按真实可视区域排版并铺满，
+  顶部/底部工具栏、移动端底部面板、桌面抽屉、移动端工具栏自动隐藏和面板遮罩统一重做；工具栏改为覆盖层，显隐不触发重排。
+- TXT 编码检测：BOM、严格 UTF-8，再按替换字符/控制字符评分选择
+  GB18030 / Big5 / Shift_JIS / EUC-KR / windows-1252。
+- `web/minify.sh`：生成可部署的 `web/dist`。JS 逐文件 minify 而不 bundle，
+  保持相对 import 与 wasm URL；HTML 内联 CSS 压缩、去注释与缩进压缩；
+  `--wasm-opt` / `--precompress` / `--serve` 按需开启。
 
 **质量与文档**
 
@@ -66,12 +98,20 @@
 ### Changed
 
 - 阅读器在书没有内嵌字体时**按语言取字体**：拉丁仍用仓库内置的 `test.ttf`，
-  中日韩从 jsDelivr 取 LXGW WenKai（`@v1.330` 固定版本，TTF，约 18 MB）——
-  必须是 TTF/OTF，`ttf-parser` / rustybuzz 读不了 woff2。下载带进度条，
-  字节存 IndexedDB（命中不再重复下载），`?font=<url>` 可换源、`?nofont=1`
-  可退回宿主字体栈；缓存查找有 2s 超时，存储被策略禁用时不会卡住首屏。
+  中日韩优先读仓库自带的 CJK 字体（后改为 Noto Sans CJK SC 的 GB2312 子集），
+  本地服务器直接加载，不再等 CDN；远程 jsDelivr 只作兜底。
+  必须是 TTF/OTF，`ttf-parser` / rustybuzz 读不了 woff2。`?font=<url>` 可换源、
+  `?nofont=1` 可退回宿主字体栈；缓存查找有 2s 超时，
+  存储被策略禁用时不会卡住首屏。
+- Web 字形渲染改为共享 atlas（最多 3 张 2048²，按 LRU 换代），字形吸附到整数
+  设备像素：同一 gid 不再因亚像素相位复制成几十张 sprite。翻页/切章少掉每页
+  几百次 `OffscreenCanvas` + `putImageData`，桌面 Edge 实测翻页 15–30 ms → 2–8 ms，
+  切章 45 ms → 27–32 ms。
+- 字体加载与首章排版并行：缓存命中（≤60 ms）直接等字体，冷启动则先用系统字体
+  出首屏，字体就绪后 relayout。同语言换书复用 `FontBook` 与 atlas，不再重置字体、
+  重画第一页；字体请求去掉 `cache: "no-store"`，交回 HTTP 缓存与 Service Worker。
 - 阅读器支持 `?book=<url>&spine=<n>` 深链，直接打开指定章节（也方便截图/回归）。
-- IR 1.1 → 1.3：新字段只在结构体末尾追加；IR 仍是 native 与 wasm 之间唯一的字节契约，
+- IR 1.1 → 1.4：新字段只在结构体末尾追加；IR 仍是 native 与 wasm 之间唯一的字节契约，
   `web/decode.js` / `web/encode.js` 与 `xtask contract` 同步。
 - 分页改为明确的两遍式：flow 只做断行，paginate 只做页起点与切片；
   `Page.origin` 仍是排版流坐标，改分页不重写 op。

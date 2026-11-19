@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use ebook_font::FontBook;
 use ebook_ir::{FontDesc, FontSpec, FontStyle};
+#[cfg(feature = "hyphen-en")]
 use ebook_layout::{Hyphenator, TextMeasurer};
 
 fn bytes() -> Vec<u8> {
@@ -32,6 +33,7 @@ fn styled_face_wins_over_the_default_face() {
     assert_eq!(desc.style, FontStyle::Italic);
 }
 
+#[cfg(feature = "hyphen-en")]
 #[test]
 fn language_is_injected_and_hyphenator_is_available() {
     let mut book = FontBook::new();

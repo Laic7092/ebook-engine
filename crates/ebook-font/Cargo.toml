@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+# 把 ebook-layout 的内置英文词典注入 FontBook；会链入约 100KB 的 en.pat。
+hyphen-en = ["ebook-layout/hyphen-en"]
+
 [dependencies]
 ebook-ir.workspace = true
 ebook-layout.workspace = true

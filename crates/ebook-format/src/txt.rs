@@ -1,4 +1,6 @@
-use alloc::string::String;
+use core::ops::Range;
+
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use ebook_ir::{
@@ -6,7 +8,15 @@ use ebook_ir::{
     StyledDoc, Tag, TextAlign, WritingMode,
 };
 
-use crate::{Book, ByteSource, FormatAdapter, FormatError, Probe, SpineItem};
+use crate::{
+    Book, ByteSource, ChapterAnchor, ChapterLinks, FormatAdapter, FormatError, LinkTarget, Probe,
+    SpineItem, TocEntry,
+};
+
+/// 没有章节标记时的兜底切分：一章最多保留这么多字节。
+/// 单个巨大的 TXT 如果整本排版，首次打开会卡住主线程；按行边界切开既能分页，
+/// 也让“第 N 页/共 M 页”有确定的章节上下文。
+const MAX_CHAPTER_BYTES: usize = 128 * 1024;
 
 pub struct Txt;
 
@@ -158,6 +168,232 @@ fn heading_style() -> ComputedStyle {
     style.margin.top = Len::Em(1.2);
     style.margin.bottom = Len::Em(1.0);
     style
+}
+
+pub struct TxtReader {
+    text: String,
+    book: Book,
+    chapters: Vec<Range<usize>>,
+}
+
+impl TxtReader {
+    /// 把已经解码好的 UTF-8 文本切成章节。编码检测属于宿主（浏览器用
+    /// `TextDecoder` 能处理 GBK/Big5/Shift_JIS），格式层只认字符串。
+    pub fn from_text(text: &str, name: Option<&str>) -> Self {
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text).to_string();
+        let chapters = split_chapters(&text);
+        let title = title_of(&text, name);
+        let lang = detect_lang(&text);
+
+        let mut spine = Vec::with_capacity(chapters.len());
+        let mut toc = Vec::with_capacity(chapters.len());
+        for (index, span) in chapters.iter().enumerate() {
+            let href = alloc::format!("chapter-{index}.txt");
+            let label = chapter_label(&text[span.clone()], index);
+            spine.push(SpineItem {
+                id: alloc::format!("c{index}"),
+                href: href.clone(),
+                media_type: String::from("text/plain"),
+                linear: true,
+            });
+            toc.push(TocEntry {
+                label,
+                href,
+                spine: index,
+                fragment: None,
+                depth: 0,
+            });
+        }
+
+        let book = Book {
+            title: Some(title),
+            lang: Some(lang.clone()),
+            language: Some(lang),
+            spine,
+            toc,
+            ..Book::default()
+        };
+        Self {
+            text,
+            book,
+            chapters,
+        }
+    }
+
+    pub fn book(&self) -> &Book {
+        &self.book
+    }
+
+    pub fn chapter(&self, index: usize) -> Result<StyledDoc, FormatError> {
+        self.chapter_with_anchors(index).map(|(doc, _, _)| doc)
+    }
+
+    pub fn chapter_with_anchors(
+        &self,
+        index: usize,
+    ) -> Result<(StyledDoc, Vec<ChapterLinks>, Vec<ChapterAnchor>), FormatError> {
+        let span = self.chapters.get(index).ok_or(FormatError::OutOfRange)?;
+        let mut doc = build(self.text[span.clone()].as_bytes());
+        doc.meta.spine = index as u32;
+        doc.meta.lang = self.book.lang.clone();
+        doc.meta.title = self.book.toc.get(index).map(|entry| entry.label.clone());
+        // `build` 不知道自己在第几章；把文本节点的锚点改到当前 spine，
+        // 这样 IR 里的 line.anchor 才能与 `Book::spine` 对齐。
+        for id in 0..doc.nodes.len() as u32 {
+            if let Some(src) = doc.node_mut(id).src.as_mut() {
+                src.spine = index as u32;
+            }
+        }
+        Ok((doc, Vec::new(), Vec::new()))
+    }
+
+    pub fn asset<'a>(&'a self, _href: &str) -> Option<(&'a [u8], &'a str)> {
+        None
+    }
+
+    pub fn resolve_link_from(&self, _spine: usize, _href: &str) -> Option<LinkTarget> {
+        None
+    }
+}
+
+/// 按“标题行 + 超长兜底”切章。返回的是原文里的字节区间，避免为每章复制字符串。
+fn split_chapters(text: &str) -> Vec<Range<usize>> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut has_content = false;
+    let mut offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        let line_start = offset;
+        offset += line.len();
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let heading = is_heading(trimmed);
+        let too_long = has_content && offset - start >= MAX_CHAPTER_BYTES;
+        if (heading && has_content) || too_long {
+            out.push(start..line_start);
+            start = line_start;
+            has_content = false;
+        }
+        if !has_content {
+            start = line_start;
+            has_content = true;
+        }
+    }
+    if has_content {
+        out.push(start..text.len());
+    }
+    if out.is_empty() {
+        out.push(0..text.len());
+    }
+    // 单行超过上限（例如整本没有换行的 TXT）时上面不会切；这里按字符边界
+    // 再兜一层，保证任何一章都不会无限大。
+    let mut bounded = Vec::with_capacity(out.len());
+    for span in out {
+        push_bounded(text, span, &mut bounded);
+    }
+    bounded
+}
+
+fn push_bounded(text: &str, span: Range<usize>, out: &mut Vec<Range<usize>>) {
+    if span.start == span.end {
+        out.push(span);
+        return;
+    }
+    let mut start = span.start;
+    while span.end - start > MAX_CHAPTER_BYTES {
+        let mut end = (start + MAX_CHAPTER_BYTES).min(span.end);
+        while end > start && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if let Some(pos) = text[start..end].rfind('\n') {
+            end = start + pos + 1;
+        }
+        if end == start {
+            end = (start + 1).min(span.end);
+            while end < span.end && !text.is_char_boundary(end) {
+                end += 1;
+            }
+        }
+        out.push(start..end);
+        start = end;
+    }
+    if start < span.end {
+        out.push(start..span.end);
+    }
+}
+
+fn title_of(text: &str, name: Option<&str>) -> String {
+    if let Some(name) = name {
+        let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+        let stem = base.rsplit_once('.').map_or(base, |(stem, _)| stem).trim();
+        if !stem.is_empty() {
+            return String::from(stem);
+        }
+    }
+    let first = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    if first.is_empty() {
+        String::from("Untitled")
+    } else {
+        truncate_chars(first, 60)
+    }
+}
+
+fn chapter_label(text: &str, index: usize) -> String {
+    let first = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    if first.is_empty() {
+        alloc::format!("Chapter {}", index + 1)
+    } else {
+        truncate_chars(first, 60)
+    }
+}
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    let mut out = String::new();
+    for (count, ch) in text.chars().enumerate() {
+        if count >= max {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// 语言只用于挑字体与 `locl`：有假名/谚文就分别标成 ja/ko，汉字占多数标 zh，
+/// 其余按英文处理。它不参与排版规则，所以不值得引入完整的语言检测。
+fn detect_lang(text: &str) -> String {
+    let mut cjk = 0usize;
+    let mut kana = 0usize;
+    let mut hangul = 0usize;
+    let mut latin = 0usize;
+    for ch in text.chars().take(20_000) {
+        match ch as u32 {
+            0x3040..=0x30ff => kana += 1,
+            0xac00..=0xd7a3 => hangul += 1,
+            0x3400..=0x9fff => cjk += 1,
+            _ if ch.is_ascii_alphabetic() => latin += 1,
+            _ => {}
+        }
+    }
+    if kana > 0 && kana * 4 >= cjk {
+        String::from("ja")
+    } else if hangul > 0 && hangul * 2 >= cjk {
+        String::from("ko")
+    } else if cjk > 0 && cjk * 3 >= latin {
+        String::from("zh")
+    } else {
+        String::from("en")
+    }
 }
 
 fn is_heading(block: &str) -> bool {
