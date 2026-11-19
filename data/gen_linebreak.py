@@ -21,6 +21,7 @@ DEFAULTS = (
 
 RESOLVE = {
     "AI": "AL",
+    "RI": "AL",
     "SG": "AL",
     "XX": "AL",
     "CJ": "NS",
@@ -30,7 +31,7 @@ KEEP = {
     "AK", "AL", "AP", "AS", "B2", "BA", "BB", "BK", "CB", "CL", "CM", "CP",
     "CR", "EB", "EM", "EX", "GL", "H2", "H3", "HH", "HL", "HY", "ID", "IN",
     "IS", "JL", "JT", "JV", "LF", "NL", "NS", "NU", "OP", "PO", "PR", "QU",
-    "QI", "QF", "RI", "SP", "SY", "VF", "VI", "WJ", "ZW", "ZWJ",
+    "QI", "QF", "SP", "SY", "VF", "VI", "WJ", "ZW", "ZWJ",
 }
 
 NAMES = {
@@ -40,7 +41,7 @@ NAMES = {
     "H3": "H3", "HH": "Hh", "HL": "Hl", "HY": "Hy", "ID": "Id", "IN": "In",
     "IS": "Is", "JL": "Jl", "JT": "Jt", "JV": "Jv", "LF": "Lf", "NL": "Nl",
     "NS": "Ns", "NU": "Nu", "OP": "Op", "PO": "Po", "PR": "Pr", "QU": "Qu",
-    "QI": "Qi", "QF": "Qf", "RI": "Ri", "SP": "Sp", "SY": "Sy", "VF": "Vf",
+    "QI": "Qi", "QF": "Qf", "SP": "Sp", "SY": "Sy", "VF": "Vf",
     "VI": "Vi", "WJ": "Wj", "ZW": "Zw", "ZWJ": "Zwj",
 }
 
