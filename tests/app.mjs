@@ -197,6 +197,11 @@ await settle();
 await settle();
 check("upload swaps the book", text("book-title") !== "The Lantern at the End of Winter", text("book-title"));
 check(
+  "upload of a CJK book does not keep the latin-only builtin font",
+  globalThis.document.getElementById("builtin-font").checked === false,
+  "latin font left registered, CJK would render as missing glyphs",
+);
+check(
   "upload lays out the new chapter",
   drawn.reduce((sum, item) => sum + Array.from(item.text).length, 0) > 50,
   `drawn ${drawn.length} chunks`,

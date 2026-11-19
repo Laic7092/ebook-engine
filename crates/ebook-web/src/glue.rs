@@ -23,6 +23,13 @@ pub fn eb_font(bytes: &[u8]) -> u32 {
     crate::register_font(bytes)
 }
 
+/// 最近一次 `eb_layout` 失败的原因（成功时为空）。
+#[cfg(feature = "epub")]
+#[wasm_bindgen]
+pub fn eb_last_error() -> String {
+    crate::last_error()
+}
+
 #[cfg(feature = "epub")]
 #[wasm_bindgen]
 pub fn eb_font_reset() {

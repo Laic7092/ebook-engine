@@ -142,3 +142,36 @@ fn unknown_entities_do_not_break_the_chapter() {
     let doc = opened.chapter(&src, 0).expect("chapter");
     assert!(!doc.nodes.is_empty());
 }
+
+mod support;
+
+/// pandoc / calibre / Sigil 产出的 XHTML 几乎都带 `<!DOCTYPE html>`。
+/// roxmltree 默认拒绝 DOCTYPE，曾经让整本书每个章节都 `Malformed("xhtml")`。
+#[test]
+fn pandoc_style_doctype_is_accepted() {
+    let opf = r#"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Doctype</dc:title><dc:language>zh-Hans</dc:language><dc:identifier id="id">d</dc:identifier>
+  </metadata>
+  <manifest><item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"#;
+    let chapter = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="zh-Hans" xml:lang="zh-Hans">
+<head><meta charset="utf-8" /><title>ch001.xhtml</title></head>
+<body epub:type="bodymatter"><section id="x" class="level1"><h1>第一卷</h1><p>正文 &amp; 版权</p></section></body>
+</html>"#;
+    let bytes = support::epub(
+        "EPUB/content.opf",
+        opf,
+        &[("EPUB/ch1.xhtml", chapter.as_bytes())],
+    );
+    let src = support::source(bytes);
+    let opened = open(&src).expect("open");
+    let doc = opened.chapter(&src, 0).expect("chapter");
+    let text = doc.text.as_str();
+    assert!(text.contains("第一卷"), "{text:?}");
+    assert!(text.contains("正文 & 版权"), "{text:?}");
+}

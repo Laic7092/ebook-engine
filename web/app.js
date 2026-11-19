@@ -10,6 +10,7 @@ import init, {
   eb_font_face_count,
   eb_font_reset,
   eb_hit,
+  eb_last_error,
   eb_layout,
   eb_link_at,
   eb_progress,
@@ -279,10 +280,25 @@ function drawRun(run, ox, oy) {
         continue;
       }
       if (i > wordStart) {
-        ctx.fillText(chars.slice(wordStart, i).join(""), cursor, startY);
+        const word = chars.slice(wordStart, i).join("");
+        let shaped = 0;
         for (let k = wordStart; k < i; k += 1) {
-          cursor += glyphs[k].dx;
+          shaped += glyphs[k].dx;
         }
+        const measured = ctx.measureText(word).width;
+        if (Math.abs(measured - shaped) <= Math.max(0.75, shaped * 0.02)) {
+          ctx.fillText(word, cursor, startY);
+        } else {
+          // 量度用的字体和画布上这款不是同一个（比如没有内嵌字体时的宿主
+          // 回退）：整词按自然宽画、下一词却按 dx 起笔，会逐词累积漂移并
+          // 互相压字。此时按字形 dx 逐字摆，位置只信 IR。
+          let charCursor = cursor;
+          for (let k = wordStart; k < i; k += 1) {
+            ctx.fillText(chars[k], charCursor, startY);
+            charCursor += glyphs[k].dx;
+          }
+        }
+        cursor += shaped;
       }
       if (i < chars.length) {
         cursor += glyphs[i].dx;
@@ -710,7 +726,8 @@ function layoutChapter(index, targetPage) {
   chapter = Math.max(0, Math.min(index, book.spine.length - 1));
   const bytes = eb_layout(chapter, PAGE_W, PAGE_H, MARGIN);
   if (!bytes.length) {
-    throw new Error(`chapter ${chapter + 1} 排版失败`);
+    const reason = eb_last_error();
+    throw new Error(`chapter ${chapter + 1} 排版失败${reason ? `：${reason}` : ""}`);
   }
   layout = decodeLayout(bytes);
   page = targetPage === "last" ? layout.pages.length - 1 : Number(targetPage || 0);
@@ -721,7 +738,7 @@ function layoutChapter(index, targetPage) {
   loadChapterImages();
 }
 
-async function openBook(bytes) {
+async function openBook(bytes, start = 0) {
   const info = JSON.parse(eb_open(bytes));
   if (info.error) {
     throw new Error(info.error);
@@ -729,12 +746,21 @@ async function openBook(bytes) {
   clearError();
   book = info;
   chapter = 0;
+  // 字体是每本书的入参：换书先清空上一本注册的字，否则英文样书的拉丁
+  // 字体留在 FontBook 里，中文书会被量成缺字。
+  eb_font_reset();
+  fontDescs.clear();
+  builtinEl.checked = false;
   // 先把内嵌字体装进 wasm 与浏览器，再排版，避免第一页用错字脸。
   await loadEmbeddedFonts(info);
   // 没有内嵌字体的书（仓库自带的 en.epub 就是）必须有一个真实量度，否则
   // 排版退回固定 advance 的 stub，而画布用宿主字体：量出来的和画出来的不是
   // 同一套宽度，词内就会裂开。内置字体只在这时兜底，不覆盖内嵌字体。
-  if (eb_font_count() === 0) {
+  // 但内置字体只覆盖拉丁：中日韩书装上它反而整篇 `font missing`，不如让
+  // 宿主字体栈接手（`StubMeasurer` 对全角字符按 1em 记宽，形状与浏览器一致）。
+  const sample = `${info.language || ""} ${info.title || ""}`;
+  const cjk = /(^|[-_ ])(zh|ja|ko)\b/i.test(sample) || /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(sample);
+  if (eb_font_count() === 0 && !cjk) {
     try {
       await loadFont(await fetchFirst(FONT_URLS));
       builtinEl.checked = true;
@@ -743,7 +769,7 @@ async function openBook(bytes) {
     }
   }
   updateBook();
-  layoutChapter(0, 0);
+  layoutChapter(start, 0);
 }
 
 function nextPage() {
@@ -839,8 +865,9 @@ async function boot() {
     const urls = requested ? [requested, resolveBookUrl(requested)] : BOOK_URLS;
     setStatus("loading book");
     try {
+      const spine = Number(query.get("spine") || 0);
       const bookBytes = await fetchFirst(urls);
-      await openBook(bookBytes);
+      await openBook(bookBytes, Number.isInteger(spine) && spine > 0 ? spine : 0);
       setStatus("ready");
     } catch (error) {
       setStatus("pick an epub file to start");

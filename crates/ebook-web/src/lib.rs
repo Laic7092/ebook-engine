@@ -17,6 +17,13 @@ static FONT: Mutex<Option<FontBook>> = Mutex::new(None);
 /// 最近一次排版的 IR 与原文。交互查询（命中/选区/进度）只认这一份，
 /// 与 JS 侧当前显示的章节保持同步；排版层本身仍然无状态。
 static LAST: Mutex<Option<LastLayout>> = Mutex::new(None);
+/// 最近一次排版失败的原因。`eb_layout` 失败时只能返回空 `Vec`，JS 侧靠它
+/// 把“排版失败”变成一个具体错误，而不是让用户对着空页面猜。
+static LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn last_error() -> String {
+    LAST_ERROR.lock().unwrap().clone().unwrap_or_default()
+}
 
 struct LastLayout {
     ir: LayoutResult,
@@ -282,9 +289,14 @@ pub fn layout_cached(spine: u32, width: f32, height: f32, margin: f32) -> Vec<u8
     let Some(reader) = books.as_ref() else {
         return Vec::new();
     };
-    let Ok((doc, _, anchors)) = reader.chapter_with_anchors(spine as usize) else {
-        return Vec::new();
+    let (doc, _, anchors) = match reader.chapter_with_anchors(spine as usize) {
+        Ok(value) => value,
+        Err(error) => {
+            *LAST_ERROR.lock().unwrap() = Some(format!("{error:?}"));
+            return Vec::new();
+        }
     };
+    *LAST_ERROR.lock().unwrap() = None;
     let mut font = FONT.lock().unwrap();
     // 语言是排版入参：文档语言要在 shape 前注入，locl 之类才会生效。
     if let Some(font) = font.as_mut() {

@@ -255,7 +255,15 @@ pub fn build_document(
     resolver: &mut dyn AssetResolver,
 ) -> Result<Built, FormatError> {
     let xml = super::entities::expand(xml);
-    let tree = roxmltree::Document::parse(&xml).map_err(|_| FormatError::Malformed("xhtml"))?;
+    // roxmltree 默认拒绝 DOCTYPE（`allow_dtd: false`），而 pandoc / calibre / Sigil
+    // 产出的 XHTML 几乎都带 `<!DOCTYPE html>`。DOCTYPE 只影响实体声明，实体已经
+    // 由 `entities::expand` 展开，所以这里放行但忽略。
+    let options = roxmltree::ParsingOptions {
+        allow_dtd: true,
+        ..roxmltree::ParsingOptions::default()
+    };
+    let tree = roxmltree::Document::parse_with_options(&xml, options)
+        .map_err(|_| FormatError::Malformed("xhtml"))?;
     let mut builder = Builder {
         doc: StyledDoc::default(),
         keys: Vec::new(),
