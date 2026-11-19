@@ -649,10 +649,12 @@ fn apply(style: &mut ebook_ir::ComputedStyle, decl: &Decl, parent_size: f32, par
             }
         }
         "white-space" => {
-            style.text.white_space = match value {
+            style.text.white_space = match value.to_ascii_lowercase().as_str() {
                 "pre" => WhiteSpace::Pre,
                 "nowrap" => WhiteSpace::Nowrap,
                 "pre-wrap" => WhiteSpace::PreWrap,
+                "pre-line" => WhiteSpace::PreLine,
+                "break-spaces" => WhiteSpace::BreakSpaces,
                 _ => WhiteSpace::Normal,
             }
         }

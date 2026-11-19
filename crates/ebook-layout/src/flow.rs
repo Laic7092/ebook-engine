@@ -101,6 +101,9 @@ struct Ch {
 
 const NO_CLUSTER: u32 = u32::MAX;
 
+/// CSS `tab-size` 的初始值：制表符展开到下一个 8 列制表位。
+const TAB_SIZE: usize = 8;
+
 #[derive(Default)]
 struct Shaped {
     glyphs: Vec<ShapeGlyph>,
@@ -511,8 +514,42 @@ impl<'a> FlowCtx<'a> {
         }
     }
 
+    /// 把一个字符按 `text-transform` 展开成若干 `Ch`，返回实际写入数量。
+    fn push_ch(out: &mut Vec<Ch>, pi: usize, c: char, off: u32, transform: TextTransform) -> usize {
+        let before = out.len();
+        let mut push = |c: char| {
+            out.push(Ch {
+                c,
+                off,
+                piece: pi as u16,
+                cluster: NO_CLUSTER,
+                head: true,
+                level: 0,
+                image: None,
+            });
+        };
+        match transform {
+            TextTransform::None => push(c),
+            TextTransform::Uppercase => {
+                for t in c.to_uppercase() {
+                    push(t);
+                }
+            }
+            TextTransform::Lowercase => {
+                for t in c.to_lowercase() {
+                    push(t);
+                }
+            }
+        }
+        out.len() - before
+    }
+
     fn flatten(&self, pieces: &[Piece], out: &mut Vec<Ch>) {
+        // 折叠状态跨 piece 保留：CSS 的空白折叠不受内联元素边界影响，
+        // 前一个 piece 行尾的空格会让后一个 piece 行首的空格继续被折叠。
         let mut prev_space = true;
+        // 制表位按当前行已有多少列计算；硬换行与 <br> 复位，图片也算一列。
+        let mut col = 0usize;
         for (pi, piece) in pieces.iter().enumerate() {
             match piece.kind {
                 PieceKind::Break => {
@@ -526,6 +563,7 @@ impl<'a> FlowCtx<'a> {
                         image: None,
                     });
                     prev_space = false;
+                    col = 0;
                 }
                 PieceKind::Image { id, .. } => {
                     out.push(Ch {
@@ -538,64 +576,75 @@ impl<'a> FlowCtx<'a> {
                         image: Some(id),
                     });
                     prev_space = false;
+                    col = col.saturating_add(1);
                 }
                 PieceKind::Text | PieceKind::Ruby { .. } => {
                     let text = self.doc.text_of(piece.span);
-                    let collapse = matches!(
-                        piece.style.text.white_space,
-                        WhiteSpace::Normal | WhiteSpace::Nowrap
+                    let white_space = piece.style.text.white_space;
+                    // PreWrap 与 BreakSpaces 在这里都保留空格并允许软换行。
+                    // 规范差异有两点：BreakSpaces 的行末空格不悬挂、也不裁掉，
+                    // 且每个空格之后都是断行机会。当前实现从简：UAX #14 的
+                    // Space 规则本来就在空格后给断点，`emit_line` 也不裁剪行末
+                    // 空格，所以两者共享同一条路径，没有额外的悬挂宽度调整。
+                    // Normal / Nowrap / PreLine 折叠空格序列。
+                    let collapse_spaces = matches!(
+                        white_space,
+                        WhiteSpace::Normal | WhiteSpace::Nowrap | WhiteSpace::PreLine
                     );
+                    // Normal / Nowrap 之外的模式都把换行保留成硬换行。
+                    let preserve_breaks =
+                        !matches!(white_space, WhiteSpace::Normal | WhiteSpace::Nowrap);
+                    // pre 系模式按 tab-size 展开；Normal / Nowrap 折成一个空格。
+                    let expand_tabs = preserve_breaks;
                     let transform = piece.style.text.transform;
-                    for (off, raw) in text.char_indices() {
-                        let c = match raw {
-                            '\n' | '\r' | '\t' => ' ',
-                            c => c,
-                        };
-                        if collapse {
-                            if c == ' ' {
-                                if prev_space {
-                                    continue;
-                                }
-                                prev_space = true;
-                            } else {
-                                prev_space = false;
+                    let mut it = text.char_indices().peekable();
+                    while let Some((off, mut raw)) = it.next() {
+                        // CRLF / 单独的 CR 都算一个硬换行；Normal / Nowrap 下
+                        // 仍然折成一个空格，与改动前一致。
+                        if raw == '\r' {
+                            if matches!(it.peek(), Some((_, '\n'))) {
+                                it.next();
                             }
+                            raw = '\n';
                         }
-                        match transform {
-                            TextTransform::None => out.push(Ch {
-                                c,
-                                off: off as u32,
-                                piece: pi as u16,
-                                cluster: NO_CLUSTER,
-                                head: true,
-                                level: 0,
-                                image: None,
-                            }),
-                            TextTransform::Uppercase => {
-                                for t in c.to_uppercase() {
-                                    out.push(Ch {
-                                        c: t,
-                                        off: off as u32,
-                                        piece: pi as u16,
-                                        cluster: NO_CLUSTER,
-                                        head: true,
-                                        level: 0,
-                                        image: None,
-                                    });
+                        match raw {
+                            '\n' => {
+                                if preserve_breaks {
+                                    // 断行循环已经把 '\n' 当硬换行，这里只负责保留它。
+                                    Self::push_ch(out, pi, '\n', off as u32, transform);
+                                    prev_space = true;
+                                    col = 0;
+                                } else if !prev_space {
+                                    Self::push_ch(out, pi, ' ', off as u32, transform);
+                                    prev_space = true;
+                                    col = col.saturating_add(1);
                                 }
                             }
-                            TextTransform::Lowercase => {
-                                for t in c.to_lowercase() {
-                                    out.push(Ch {
-                                        c: t,
-                                        off: off as u32,
-                                        piece: pi as u16,
-                                        cluster: NO_CLUSTER,
-                                        head: true,
-                                        level: 0,
-                                        image: None,
-                                    });
+                            '\t' => {
+                                if expand_tabs {
+                                    let count = TAB_SIZE - col % TAB_SIZE;
+                                    for _ in 0..count {
+                                        Self::push_ch(out, pi, ' ', off as u32, transform);
+                                    }
+                                    col = col.saturating_add(count);
+                                    prev_space = true;
+                                } else if !prev_space {
+                                    Self::push_ch(out, pi, ' ', off as u32, transform);
+                                    prev_space = true;
+                                    col = col.saturating_add(1);
                                 }
+                            }
+                            ' ' if collapse_spaces => {
+                                if !prev_space {
+                                    Self::push_ch(out, pi, ' ', off as u32, transform);
+                                    prev_space = true;
+                                    col = col.saturating_add(1);
+                                }
+                            }
+                            c => {
+                                let count = Self::push_ch(out, pi, c, off as u32, transform);
+                                prev_space = c == ' ';
+                                col = col.saturating_add(count);
                             }
                         }
                     }
@@ -958,10 +1007,25 @@ impl<'a> FlowCtx<'a> {
             .unwrap_or(0.0)
             .clamp(0.0, w);
 
-        let nowrap = base_style.text.white_space == WhiteSpace::Nowrap
-            || pieces
-                .iter()
-                .any(|p| p.style.text.white_space == WhiteSpace::Nowrap);
+        let nowrap = matches!(
+            base_style.text.white_space,
+            WhiteSpace::Nowrap | WhiteSpace::Pre
+        ) || pieces.iter().any(|p| {
+            matches!(
+                p.style.text.white_space,
+                WhiteSpace::Nowrap | WhiteSpace::Pre
+            )
+        });
+        // pre 系模式保留行首空格；Normal / Nowrap / PreLine 在软换行后跳过行首空白。
+        let preserve_spaces = matches!(
+            base_style.text.white_space,
+            WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::BreakSpaces
+        ) || pieces.iter().any(|p| {
+            matches!(
+                p.style.text.white_space,
+                WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::BreakSpaces
+            )
+        });
         let mut line_start = 0usize;
         let mut last_break: Option<usize> = None;
         let mut used = indent;
@@ -1061,8 +1125,10 @@ impl<'a> FlowCtx<'a> {
                 );
                 first = false;
                 line_start = brk;
-                while line_start < chars.len() && chars[line_start].c == ' ' {
-                    line_start += 1;
+                if !preserve_spaces {
+                    while line_start < chars.len() && chars[line_start].c == ' ' {
+                        line_start += 1;
+                    }
                 }
                 i = line_start;
                 used = 0.0;
