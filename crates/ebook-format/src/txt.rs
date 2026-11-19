@@ -75,7 +75,7 @@ impl FormatAdapter for Txt {
 
 pub fn build(bytes: &[u8]) -> StyledDoc {
     let raw = String::from_utf8_lossy(bytes).into_owned();
-    let blocks = split_blocks(&raw);
+    let blocks = split_lines(&raw);
 
     let mut doc = StyledDoc::default();
     doc.meta = DocMeta {
@@ -101,8 +101,9 @@ pub fn build(bytes: &[u8]) -> StyledDoc {
 
     let mut para_ids: Vec<NodeId> = Vec::new();
     for block in &blocks {
+        // TXT 没有结构信息：认出来的章节标题行包成 H1，其余每一行各自成段。
         let heading = is_heading(block);
-        let kind = if heading { Tag::H2 } else { Tag::P };
+        let kind = if heading { Tag::H1 } else { Tag::P };
         para_ids.push(doc.push_node(Node {
             kind: NodeKind::Element(kind),
             style: if heading {
@@ -414,43 +415,12 @@ fn is_heading(block: &str) -> bool {
     lower.starts_with("chapter") || lower.starts_with("part ")
 }
 
-fn split_blocks(raw: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    for line in raw.lines() {
-        let line = line.trim_end_matches('\r').trim();
-        if line.is_empty() {
-            if !cur.is_empty() {
-                out.push(core::mem::take(&mut cur));
-            }
-            continue;
-        }
-        if cur.is_empty() {
-            cur.push_str(line);
-        } else {
-            let last_wide = cur.chars().next_back().map_or(false, is_wide);
-            let next_wide = line.chars().next().map_or(false, is_wide);
-            if !last_wide && !next_wide {
-                cur.push(' ');
-            }
-            cur.push_str(line);
-        }
-    }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
-    out
-}
-
-fn is_wide(c: char) -> bool {
-    matches!(
-        c as u32,
-        0x2E80..=0x303E
-            | 0x3041..=0x33FF
-            | 0x3400..=0x4DBF
-            | 0x4E00..=0x9FFF
-            | 0xAC00..=0xD7A3
-            | 0xF900..=0xFAFF
-            | 0xFF00..=0xFF60
-    )
+/// 每个非空行都是一个独立的段落。TXT 的换行就是作者给出的分段边界，
+/// 不再把连续行合并成一段（那样会在行尾丢换行、还给中英混排补空格）。
+fn split_lines(raw: &str) -> Vec<String> {
+    raw.lines()
+        .map(|line| line.trim_end_matches('\r').trim())
+        .filter(|line| !line.is_empty())
+        .map(String::from)
+        .collect()
 }

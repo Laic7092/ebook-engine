@@ -450,8 +450,16 @@ input[type="range"] { accent-color: var(--accent); }
   user-select: none;
   -webkit-user-select: none;
 }
-body.theme-sepia #page { filter: sepia(0.18) saturate(0.94) brightness(1.01); }
-body.theme-dark #page { filter: invert(0.9) hue-rotate(180deg) brightness(0.92) contrast(0.94); }
+#selection-layer {
+  position: absolute;
+  z-index: 1;
+  display: block;
+  background: transparent;
+  pointer-events: none;
+  border-radius: 0;
+}
+body.theme-sepia #page, body.theme-sepia #selection-layer { filter: sepia(0.18) saturate(0.94) brightness(1.01); }
+body.theme-dark #page, body.theme-dark #selection-layer { filter: invert(0.9) hue-rotate(180deg) brightness(0.92) contrast(0.94); }
 #reader-bottom {
   bottom: 0;
   min-height: var(--reader-chrome-bottom);
@@ -581,10 +589,16 @@ body.toc-open #panel-backdrop, body.settings-open #panel-backdrop {
   border-radius: 24px 24px 0 0;
   box-shadow: 0 -24px 60px -30px rgba(20, 15, 10, 0.6);
   transform: translateY(105%);
-  transition: transform 220ms cubic-bezier(0.22, 0.85, 0.32, 1);
+  /* 关闭时彻底隐藏：只靠 translate 移出屏幕，阴影仍会从视口底部漏出来。 */
+  visibility: hidden;
+  transition: transform 220ms cubic-bezier(0.22, 0.85, 0.32, 1), visibility 0s linear 220ms;
   overflow: hidden;
 }
-body.toc-open #toc-panel, body.settings-open #settings-panel { transform: translateY(0); }
+body.toc-open #toc-panel, body.settings-open #settings-panel {
+  transform: translateY(0);
+  visibility: visible;
+  transition: transform 220ms cubic-bezier(0.22, 0.85, 0.32, 1), visibility 0s;
+}
 .panel-grab {
   flex: none;
   width: 36px;
@@ -609,7 +623,8 @@ body.toc-open #toc-panel, body.settings-open #settings-panel { transform: transl
 .panel-body {
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
   padding: 14px 18px calc(24px + var(--safe-bottom));
@@ -631,6 +646,10 @@ body.toc-open #toc-panel, body.settings-open #settings-panel { transform: transl
   text-align: left;
   font-size: 13.5px;
   line-height: 1.45;
+  /* 章节名可能是一长串没有空格的文字（URL、编号、英文单词），必须允许任意断行，
+     否则目录面板会出现横向滚动条。 */
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .toc-entry:hover { background: var(--surface-2); }
 .toc-entry.active { background: var(--accent-soft); color: var(--accent); font-weight: 650; }
@@ -826,7 +845,7 @@ body.toc-open #toc-panel, body.settings-open #settings-panel { transform: transl
   </header>
 
   <main id="reader-main">
-    <div id="reader-stage"><canvas id="page"></canvas></div>
+    <div id="reader-stage"><canvas id="page"></canvas><canvas id="selection-layer" aria-hidden="true"></canvas></div>
   </main>
 
   <footer id="reader-bottom" class="reader-chrome">
@@ -900,6 +919,14 @@ body.toc-open #toc-panel, body.settings-open #settings-panel { transform: transl
         <option value="center">居中</option>
         <option value="end">右对齐</option>
         <option value="justify">两端对齐</option>
+      </select>
+    </label>
+    <label class="setting">
+      <span class="setting-label">翻页动画</span>
+      <select id="page-animation">
+        <option value="slide">滑动（跟手）</option>
+        <option value="fade">淡入淡出</option>
+        <option value="none">无动画</option>
       </select>
     </label>
     <label class="setting">

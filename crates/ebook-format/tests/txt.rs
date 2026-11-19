@@ -64,3 +64,37 @@ fn empty_text_still_opens() {
     assert_eq!(reader.book().title.as_deref(), Some("empty"));
     assert!(reader.chapter(0).is_ok());
 }
+
+#[test]
+fn headings_are_h1_and_every_line_is_a_paragraph() {
+    use ebook_ir::{NodeKind, Tag};
+
+    let reader = TxtReader::from_text(
+        "第一章 雪夜\n第一行\n第二行\n\n第二章 旧书\n第三行\n",
+        Some("story.txt"),
+    );
+    let doc = reader.chapter(0).unwrap();
+    let tags: Vec<Tag> = doc
+        .nodes
+        .iter()
+        .filter_map(|node| match node.kind {
+            NodeKind::Element(tag) => Some(tag),
+            _ => None,
+        })
+        .collect();
+    // root 下：标题 H1 + 两个正文行 P（空行不产生节点）。
+    assert_eq!(tags, vec![Tag::Root, Tag::H1, Tag::P, Tag::P]);
+    assert!(doc.text.contains("第一行"));
+    assert!(doc.text.contains("第二行"));
+
+    let second = reader.chapter(1).unwrap();
+    let tags: Vec<Tag> = second
+        .nodes
+        .iter()
+        .filter_map(|node| match node.kind {
+            NodeKind::Element(tag) => Some(tag),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tags, vec![Tag::Root, Tag::H1, Tag::P]);
+}

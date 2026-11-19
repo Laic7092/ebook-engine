@@ -10,7 +10,12 @@
 const DRAG_THRESHOLD = 3;
 const CANCEL_SLIDE = 8;
 const LONG_PRESS_MS = 320;
+const SWIPE_START = 12;
 const SWIPE_MIN = 44;
+
+function now() {
+  return typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
+}
 
 export function createSelection(options) {
   const { canvas, page, hit, select, linkAt, onLink, onTap, onSwipe, setStatus, onChange } = options;
@@ -22,6 +27,9 @@ export function createSelection(options) {
   let pressed = false;
   let dragging = false;
   let moved = false;
+  let swiping = false;
+  let swipeBlocked = false;
+  let swipeStart = 0;
   let startClient = { x: 0, y: 0 };
   let timer = 0;
 
@@ -33,6 +41,8 @@ export function createSelection(options) {
     pressed = false;
     dragging = false;
     moved = false;
+    swiping = false;
+    swipeBlocked = false;
     if (timer) {
       clearTimeout(timer);
       timer = 0;
@@ -204,13 +214,20 @@ export function createSelection(options) {
     moved = false;
     const point = toPage(event);
     if (event.pointerType === "touch") {
-      // 触屏：先等长按，长按前移动/抬手都算轻点。
+      // 触屏：先等长按，长按前移动/抬手都算轻点；横向拖动则进入翻页手势。
       timer = setTimeout(() => {
         timer = 0;
         if (pressed) {
           begin(point);
         }
       }, LONG_PRESS_MS);
+      if (canvas.setPointerCapture) {
+        try {
+          canvas.setPointerCapture(event.pointerId);
+        } catch (error) {
+          // 不支持的浏览器仍可收到 move/up。
+        }
+      }
       return;
     }
     begin(point);
@@ -231,22 +248,54 @@ export function createSelection(options) {
     const dx = event.clientX - startClient.x;
     const dy = event.clientY - startClient.y;
     if (!dragging) {
-      // 触屏横向滑动：还没成长按，直接算翻页，不再等 pointerup。
-      if (timer && Math.abs(dx) > SWIPE_MIN && Math.abs(dx) > Math.abs(dy) * 1.4) {
-        clearTimeout(timer);
-        timer = 0;
-        pressed = false;
-        if (onSwipe) {
-          onSwipe(dx < 0 ? "next" : "prev");
+      if (swiping) {
+        if (onSwipeMove) {
+          onSwipeMove(dx, dy);
         }
         event.preventDefault();
         return;
       }
-      if (timer && Math.hypot(dx, dy) > CANCEL_SLIDE) {
-        // 长按前就开始滑：不算选区，交给宿主滚动/翻页。
-        clearTimeout(timer);
-        timer = 0;
-        pressed = false;
+      if (swipeBlocked) {
+        // 已经决定横向翻页，但宿主没有跟手动画：等抬手时再按阈值翻页。
+        if (Math.abs(dx) < Math.abs(dy)) {
+          pressed = false;
+        }
+        event.preventDefault();
+        return;
+      }
+      if (timer) {
+        const horizontal = Math.abs(dx) > Math.abs(dy) * 1.3;
+        if (horizontal && Math.abs(dx) > SWIPE_START) {
+          clearTimeout(timer);
+          timer = 0;
+          const direction = dx < 0 ? "next" : "prev";
+          if (onSwipeStart) {
+            if (onSwipeStart(direction)) {
+              swiping = true;
+              swipeStart = now();
+              if (onSwipeMove) {
+                onSwipeMove(dx, dy);
+              }
+            } else {
+              swipeBlocked = true;
+            }
+          } else {
+            // 没有跟手宿主：保持旧行为，越过阈值立即翻页。
+            pressed = false;
+            if (onSwipe) {
+              onSwipe(direction);
+            }
+          }
+          event.preventDefault();
+          return;
+        }
+        if (Math.hypot(dx, dy) > CANCEL_SLIDE) {
+          // 长按前就开始竖向滑：不算选区，交给宿主滚动/翻页。
+          clearTimeout(timer);
+          timer = 0;
+          pressed = false;
+        }
+        return;
       }
       return;
     }
@@ -267,10 +316,42 @@ export function createSelection(options) {
   }
 
   function pointerUp(event) {
+    if (!pressed) {
+      return;
+    }
+    if (swiping) {
+      const dx = event.clientX - startClient.x;
+      const dt = Math.max(1, now() - swipeStart);
+      pressed = false;
+      swiping = false;
+      if (onSwipeEnd) {
+        onSwipeEnd(dx, dt);
+      }
+      event.preventDefault();
+      return;
+    }
+    if (swipeBlocked) {
+      const dx = event.clientX - startClient.x;
+      const dy = event.clientY - startClient.y;
+      pressed = false;
+      swipeBlocked = false;
+      if (Math.abs(dx) >= SWIPE_MIN && Math.abs(dx) > Math.abs(dy) * 1.3 && onSwipe) {
+        onSwipe(dx < 0 ? "next" : "prev");
+      }
+      if (timer) {
+        clearTimeout(timer);
+        timer = 0;
+      }
+      event.preventDefault();
+      return;
+    }
     end(event);
   }
 
   function pointerCancel(event) {
+    if (swiping && onSwipeCancel) {
+      onSwipeCancel();
+    }
     clear();
     if (onChange) {
       onChange();

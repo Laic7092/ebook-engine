@@ -26,6 +26,7 @@ import {
   eb_resolve_link,
   eb_selection,
   eb_toc,
+  eb_use_layout,
 } from "./pkg/ebook_web.js";
 import {
   decodeAnchor,
@@ -64,6 +65,11 @@ const GLYPH_CACHE_MAX = 16384;
 const FONT_CACHE = "ebook-fonts-v1";
 // 字体没就绪时先画系统字体，超过这个时间就不再等；通常缓存命中会低于它。
 const FONT_WAIT_MS = 60;
+// 翻页动画：淡入淡出 / 跟手滑动。
+const FADE_MS = 180;
+const SLIDE_MS = 240;
+const SLIDE_EASE = "cubic-bezier(0.22,0.61,0.36,1)";
+const SWIPE_COMMIT_RATIO = 0.22;
 
 const NARROW = typeof window !== "undefined" && (window.innerWidth || 1200) < 700;
 
@@ -77,6 +83,7 @@ export const DEFAULT_SETTINGS = {
   margin: NARROW ? 30 : 48,
   align: "book",
   theme: "light",
+  animation: "slide",
 };
 
 const ALIGN_CODES = { book: 0, start: 1, center: 2, end: 3, justify: 4 };
@@ -134,7 +141,11 @@ export function createReader(options) {
   const onLoaded = options.onLoaded || (() => {});
 
   const canvas = element("page");
-  const ctx = canvas.getContext("2d");
+  // 绘图函数都读这个变量；预渲染到离屏 canvas 时临时替换，避免复制整套 drawOp。
+  let ctx = canvas.getContext("2d");
+  const canCopy = Boolean(ctx && typeof ctx.drawImage === "function");
+  const selectionCanvas = element("selection-layer");
+  const selectionCtx = selectionCanvas ? selectionCanvas.getContext("2d") : null;
   const titleEl = element("book-title");
   const metaEl = element("book-meta");
   const statusEl = element("status");
@@ -160,6 +171,7 @@ export function createReader(options) {
   const letterSpacingEl = element("letter-spacing");
   const letterSpacingLabelEl = element("letter-spacing-label");
   const alignEl = element("text-align");
+  const animationEl = element("page-animation");
   const marginEl = element("margin");
   const marginLabelEl = element("margin-label");
   const settingsResetEl = element("settings-reset");
@@ -199,6 +211,19 @@ export function createReader(options) {
   // “字体 1.2 / 1.5 MB”盖掉。
   let fontProgressVisible = true;
   let openToken = 0;
+  // 翻页动画的临时画布、计时器与当前滑动状态。
+  let animationEls = [];
+  let animationTimer = 0;
+  let animationToken = 0;
+  let animating = false;
+  let turn = null;
+  // 页面位图缓存：当前页 ±1 的离屏 canvas，翻页/滑动直接搬图，不再重画字形。
+  const pageSnapshots = new Map();
+  let prefetchTimer = 0;
+  // 排版 worker：主线程不再阻塞在 Layout::layout 上。
+  let layoutWorker = null;
+  let layoutRequestId = 0;
+  const layoutPending = new Map();
 
   function hasClass(name) {
     const list = document.body && document.body.classList;
@@ -814,25 +839,41 @@ export function createReader(options) {
     const dpr = Math.min(window.devicePixelRatio || 1, 3);
     const w = (info.size.w || PAGE_W) + info.inset.left + info.inset.right;
     const h = (info.size.h || PAGE_H) + info.inset.top + info.inset.bottom;
-    canvas.width = Math.round(w * dpr);
-    canvas.height = Math.round(h * dpr);
+    const pixelW = Math.round(w * dpr);
+    const pixelH = Math.round(h * dpr);
+    // 尺寸没变就不要重设 width/height：那会重新分配整个后备缓冲。
+    if (canvas.width !== pixelW || canvas.height !== pixelH) {
+      canvas.width = pixelW;
+      canvas.height = pixelH;
+    }
     canvas.style.width = `${w}px`;
     canvas.style.height = `${h}px`;
+    if (renderDpr !== dpr) {
+      clearPageCache();
+    }
     renderDpr = dpr;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, w, h);
-    ctx.fontKerning = "none";
-    ctx.textBaseline = "alphabetic";
-    const ox = info.origin.x - info.inset.left;
-    const oy = info.origin.y - info.inset.top;
-    const start = info.ops.start;
-    const end = start + info.ops.len;
-    for (let i = start; i < end; i += 1) {
-      drawOp(layout.display.ops[i], ox, oy);
+    const cached = canCopy ? cachedPageCanvas(shown) : null;
+    if (cached && cached.width === pixelW && cached.height === pixelH) {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.drawImage(cached, 0, 0);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    } else {
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, w, h);
+      ctx.fontKerning = "none";
+      ctx.textBaseline = "alphabetic";
+      const ox = info.origin.x - info.inset.left;
+      const oy = info.origin.y - info.inset.top;
+      const start = info.ops.start;
+      const end = start + info.ops.len;
+      for (let i = start; i < end; i += 1) {
+        drawOp(layout.display.ops[i], ox, oy);
+      }
     }
     flushRetiredGlyphAtlases();
-    selection.draw(ctx, shown);
+    syncSelectionLayer(w, h, dpr);
+    paintSelection();
     if (labelEl) {
       labelEl.textContent = `第 ${chapter + 1} 章 · ${shown + 1}/${layout.pages.length}`;
     }
@@ -848,6 +889,162 @@ export function createReader(options) {
     }
     prevEl.disabled = shown === 0 && chapter === 0;
     nextEl.disabled = shown === layout.pages.length - 1 && chapter === book.spine.length - 1;
+    schedulePrefetch();
+  }
+
+  function pageCanvasKey(index) {
+    return `${layoutToken}:${index}:${renderDpr}`;
+  }
+
+  function clearPageCache() {
+    pageSnapshots.clear();
+    if (prefetchTimer) {
+      clearTimeout(prefetchTimer);
+      prefetchTimer = 0;
+    }
+  }
+
+  function cachedPageCanvas(index) {
+    return pageSnapshots.get(pageCanvasKey(index)) || null;
+  }
+
+  function cachePageCanvas(index, snap) {
+    if (!snap) {
+      return;
+    }
+    pageSnapshots.set(pageCanvasKey(index), snap);
+    while (pageSnapshots.size > 4) {
+      const oldest = pageSnapshots.keys().next().value;
+      pageSnapshots.delete(oldest);
+    }
+  }
+
+  // 把任意一页画到离屏 canvas。绘图函数读闭包里的 ctx，这里临时换掉再还原，
+  // 比给每个 drawOp 复制一份 context 参数改动小得多。
+  function renderPageCanvas(index) {
+    if (!canCopy || !layout || !layout.pages[index]) {
+      return null;
+    }
+    const dpr = renderDpr || Math.min(window.devicePixelRatio || 1, 3);
+    const info = layout.pages[index];
+    const w = (info.size.w || PAGE_W) + info.inset.left + info.inset.right;
+    const h = (info.size.h || PAGE_H) + info.inset.top + info.inset.bottom;
+    const snap = document.createElement("canvas");
+    snap.width = Math.round(w * dpr);
+    snap.height = Math.round(h * dpr);
+    const snapCtx = snap.getContext("2d");
+    if (!snapCtx) {
+      return null;
+    }
+    const saved = ctx;
+    ctx = snapCtx;
+    try {
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, w, h);
+      ctx.fontKerning = "none";
+      ctx.textBaseline = "alphabetic";
+      const ox = info.origin.x - info.inset.left;
+      const oy = info.origin.y - info.inset.top;
+      const start = info.ops.start;
+      const end = start + info.ops.len;
+      for (let i = start; i < end; i += 1) {
+        drawOp(layout.display.ops[i], ox, oy);
+      }
+    } finally {
+      ctx = saved;
+    }
+    flushRetiredGlyphAtlases();
+    return snap;
+  }
+
+  function schedulePrefetch() {
+    if (!canCopy || !layout || animating || turn) {
+      return;
+    }
+    if (prefetchTimer) {
+      clearTimeout(prefetchTimer);
+    }
+    prefetchTimer = setTimeout(() => {
+      prefetchTimer = 0;
+      prefetchNeighbor();
+    }, 120);
+  }
+
+  function prefetchNeighbor() {
+    if (!canCopy || !layout || animating || turn) {
+      return;
+    }
+    const token = layoutToken;
+    const index = [page + 1, page - 1].find(
+      (candidate) =>
+        candidate >= 0 &&
+        candidate < layout.pages.length &&
+        !cachedPageCanvas(candidate),
+    );
+    if (index === undefined) {
+      return;
+    }
+    const run = () => {
+      if (token !== layoutToken || !layout || animating || turn) {
+        return;
+      }
+      cachePageCanvas(index, renderPageCanvas(index));
+      // 一次只预渲染一页：首屏交互优先，另一页留给下一次空闲。
+      if (
+        [page + 1, page - 1].some(
+          (candidate) =>
+            candidate >= 0 &&
+            candidate < layout.pages.length &&
+            !cachedPageCanvas(candidate),
+        )
+      ) {
+        prefetchTimer = setTimeout(() => {
+          prefetchTimer = 0;
+          prefetchNeighbor();
+        }, 90);
+      }
+    };
+    if (typeof requestIdleCallback === "function") {
+      requestIdleCallback(run, { timeout: 800 });
+    } else {
+      setTimeout(run, 40);
+    }
+  }
+
+  function syncSelectionLayer(width, height, dpr) {
+    if (!selectionCanvas) {
+      return;
+    }
+    const pixelW = Math.round(width * dpr);
+    const pixelH = Math.round(height * dpr);
+    if (selectionCanvas.width !== pixelW || selectionCanvas.height !== pixelH) {
+      selectionCanvas.width = pixelW;
+      selectionCanvas.height = pixelH;
+    }
+    selectionCanvas.style.width = `${width}px`;
+    selectionCanvas.style.height = `${height}px`;
+    selectionCanvas.style.left = `${canvas.offsetLeft || 0}px`;
+    selectionCanvas.style.top = `${canvas.offsetTop || 0}px`;
+    if (selectionCtx && typeof selectionCtx.setTransform === "function") {
+      selectionCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+  }
+
+  // 选区画在独立透明层上；拖动选区只清这一层，正文页不重绘。
+  function paintSelection() {
+    if (!selectionCanvas || !selectionCtx) {
+      return;
+    }
+    if (typeof selectionCtx.clearRect === "function") {
+      selectionCtx.save();
+      selectionCtx.setTransform(1, 0, 0, 1, 0, 0);
+      selectionCtx.clearRect(0, 0, selectionCanvas.width, selectionCanvas.height);
+      selectionCtx.restore();
+    }
+    if (layout && layout.pages.length) {
+      selection.draw(selectionCtx, clamp(page, 0, layout.pages.length - 1));
+    }
   }
 
   function bookProgress(shown) {
@@ -1077,30 +1274,30 @@ export function createReader(options) {
   }
 
   async function layoutChapter(index, target) {
+    if (animating || turn) {
+      cancelAnimation();
+    }
+    clearPageCache();
     selection.clear();
     chapter = clamp(index, 0, book.spine.length - 1);
+    const spine = chapter;
     const dims = layoutDims();
     layoutDimsUsed = dims;
     const token = ++layoutToken;
-    const bytes = eb_layout_style(
-      chapter,
-      dims.width,
-      dims.height,
-      dims.left,
-      dims.right,
-      dims.top,
-      dims.bottom,
-      layoutFontScale(),
-      settings.lineHeight,
-      settings.letterSpacing,
-      ALIGN_CODES[settings.align] ?? 0,
-    );
-    if (!bytes.length) {
-      const reason = eb_last_error();
-      throw new Error(`第 ${chapter + 1} 章排版失败${reason ? `：${reason}` : ""}`);
-    }
+    const result = await requestLayout(spine, dims, layoutFontScale());
     if (token !== layoutToken) {
       return;
+    }
+    const bytes = result.bytes;
+    if (!bytes || !bytes.length) {
+      const reason = eb_last_error();
+      throw new Error(`第 ${spine + 1} 章排版失败${reason ? `：${reason}` : ""}`);
+    }
+    if (result.worker) {
+      const error = eb_use_layout(spine, bytes);
+      if (error) {
+        throw new Error(`第 ${spine + 1} 章交互状态同步失败：${error}`);
+      }
     }
     layout = decodeLayout(bytes);
     page = resolveTarget(target);
@@ -1121,43 +1318,479 @@ export function createReader(options) {
     await layoutChapter(chapter, keep);
   }
 
-  function nextPage() {
-    if (!layout || busy) {
+  // ---- 排版 worker ---------------------------------------------------------
+
+  function failLayoutWorker(reason = "排版 worker 不可用") {
+    const worker = layoutWorker;
+    layoutWorker = null;
+    if (worker && typeof worker.terminate === "function") {
+      worker.terminate();
+    }
+    for (const [id, pending] of layoutPending) {
+      layoutPending.delete(id);
+      pending.reject(new Error(reason));
+    }
+  }
+
+  function postWorker(message, transfer) {
+    if (!layoutWorker) {
+      return false;
+    }
+    try {
+      layoutWorker.postMessage(message, transfer || []);
+      return true;
+    } catch (error) {
+      failLayoutWorker(String((error && error.message) || error));
+      return false;
+    }
+  }
+
+  function startLayoutWorker() {
+    if (typeof Worker !== "function") {
       return;
     }
-    if (page + 1 < layout.pages.length) {
+    try {
+      layoutWorker = new Worker(new URL("./layout-worker.js", import.meta.url), {
+        type: "module",
+      });
+    } catch (error) {
+      layoutWorker = null;
+      return;
+    }
+    layoutWorker.addEventListener("message", (event) => {
+      const msg = event.data || {};
+      if (msg.type === "fatal") {
+        failLayoutWorker(msg.error || "排版 worker 不可用");
+        return;
+      }
+      if (msg.type !== "layout") {
+        return;
+      }
+      const pending = layoutPending.get(msg.id);
+      if (!pending) {
+        return;
+      }
+      layoutPending.delete(msg.id);
+      if (msg.error) {
+        pending.reject(new Error(msg.error));
+      } else {
+        pending.resolve(new Uint8Array(msg.bytes));
+      }
+    });
+    layoutWorker.addEventListener("error", (event) => {
+      failLayoutWorker((event && event.message) || "排版 worker 加载失败");
+    });
+  }
+
+  function workerLayout(params) {
+    return new Promise((resolve, reject) => {
+      const id = ++layoutRequestId;
+      const timer = setTimeout(() => {
+        if (!layoutPending.has(id)) {
+          return;
+        }
+        layoutPending.delete(id);
+        reject(new Error("排版 worker 超时"));
+      }, 8000);
+      layoutPending.set(id, {
+        resolve: (bytes) => {
+          clearTimeout(timer);
+          resolve(bytes);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      });
+      if (!postWorker({ type: "layout", id, ...params })) {
+        layoutPending.delete(id);
+        clearTimeout(timer);
+        reject(new Error("排版 worker 不可用"));
+      }
+    });
+  }
+
+  function workerBook(message) {
+    if (!layoutWorker) {
+      return;
+    }
+    postWorker({ type: "open", ...message });
+  }
+
+  function workerFont(bytes) {
+    if (!layoutWorker || !bytes || !bytes.length) {
+      return;
+    }
+    const copy = new Uint8Array(bytes);
+    postWorker({ type: "font", bytes: copy }, [copy.buffer]);
+  }
+
+  function workerFontReset() {
+    postWorker({ type: "font-reset" });
+  }
+
+  // 主线程拿 worker 的 IR 装回交互状态；worker 不可用时退回主线程排版。
+  async function requestLayout(spine, dims, fontScale) {
+    const params = {
+      spine,
+      width: dims.width,
+      height: dims.height,
+      left: dims.left,
+      right: dims.right,
+      top: dims.top,
+      bottom: dims.bottom,
+      fontScale,
+      lineScale: settings.lineHeight,
+      letter: settings.letterSpacing,
+      align: ALIGN_CODES[settings.align] ?? 0,
+    };
+    if (layoutWorker) {
+      try {
+        const bytes = await workerLayout(params);
+        return { bytes, worker: true };
+      } catch (error) {
+        failLayoutWorker(String((error && error.message) || error));
+      }
+    }
+    const bytes = eb_layout_style(
+      params.spine,
+      params.width,
+      params.height,
+      params.left,
+      params.right,
+      params.top,
+      params.bottom,
+      params.fontScale,
+      params.lineScale,
+      params.letter,
+      params.align,
+    );
+    return { bytes, worker: false };
+  }
+
+  // ---- 翻页动画 -----------------------------------------------------------
+
+  function snapshotPage() {
+    if (!canvas.width || !canvas.height) {
+      return null;
+    }
+    try {
+      const snap = document.createElement("canvas");
+      snap.width = canvas.width;
+      snap.height = canvas.height;
+      const snapCtx = snap.getContext("2d");
+      if (!snapCtx || typeof snapCtx.drawImage !== "function") {
+        return null;
+      }
+      snapCtx.drawImage(canvas, 0, 0);
+      return snap;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function pageCssWidth() {
+    const width = parseFloat(canvas.style.width);
+    return width > 0 ? width : canvas.clientWidth || canvas.width || 1;
+  }
+
+  // 把快照铺在 #page 上面；canvas 本身留在下面，动画结束再显示。
+  function placeOverlay(snap) {
+    const stage = stageEl || canvas.parentNode;
+    if (!stage || !snap) {
+      return null;
+    }
+    const width = pageCssWidth();
+    const height = parseFloat(canvas.style.height) || canvas.clientHeight || canvas.height;
+    snap.style.position = "absolute";
+    snap.style.left = `${canvas.offsetLeft || 0}px`;
+    snap.style.top = `${canvas.offsetTop || 0}px`;
+    snap.style.width = `${width}px`;
+    snap.style.height = `${height}px`;
+    snap.style.background = "#fff";
+    snap.style.pointerEvents = "none";
+    snap.style.zIndex = "2";
+    snap.style.willChange = "transform, opacity";
+    if (canvas.style.borderRadius) {
+      snap.style.borderRadius = canvas.style.borderRadius;
+    }
+    if (typeof stage.appendChild === "function") {
+      stage.appendChild(snap);
+    } else if (typeof stage.append === "function") {
+      stage.append(snap);
+    } else {
+      return null;
+    }
+    animationEls.push(snap);
+    return snap;
+  }
+
+  function dropOverlays() {
+    for (const el of animationEls) {
+      if (el && typeof el.remove === "function") {
+        el.remove();
+      } else if (el && el.parentNode && typeof el.parentNode.removeChild === "function") {
+        el.parentNode.removeChild(el);
+      }
+    }
+    animationEls = [];
+  }
+
+  function resetCanvasStyle() {
+    canvas.style.transform = "";
+    canvas.style.transition = "";
+    canvas.style.visibility = "";
+  }
+
+  function nextFrame(fn) {
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => requestAnimationFrame(fn));
+    } else {
+      setTimeout(fn, 0);
+    }
+  }
+
+  // 所有动画都走同一个 token：新动画/取消会让旧回调自动作废，避免快速翻页时
+  // 旧计时器把新快照删掉。
+  function beginAnimation(ms, after) {
+    const token = ++animationToken;
+    animating = true;
+    if (animationTimer) {
+      clearTimeout(animationTimer);
+    }
+    animationTimer = setTimeout(() => {
+      animationTimer = 0;
+      if (token !== animationToken) {
+        return;
+      }
+      animating = false;
+      dropOverlays();
+      resetCanvasStyle();
+      if (after) {
+        after();
+      }
+    }, ms);
+  }
+
+  function cancelAnimation() {
+    animationToken += 1;
+    if (animationTimer) {
+      clearTimeout(animationTimer);
+      animationTimer = 0;
+    }
+    animating = false;
+    turn = null;
+    dropOverlays();
+    resetCanvasStyle();
+  }
+
+  function playFade(snap) {
+    const el = placeOverlay(snap);
+    if (!el) {
+      return;
+    }
+    el.style.opacity = "1";
+    el.style.transition = `opacity ${FADE_MS}ms ease`;
+    nextFrame(() => {
+      el.style.opacity = "0";
+    });
+    beginAnimation(FADE_MS + 60);
+  }
+
+  function playSlide(snap, direction, targetSnap) {
+    const toSnap = targetSnap || snapshotPage();
+    if (!toSnap) {
+      return;
+    }
+    const oldEl = placeOverlay(snap);
+    const newEl = placeOverlay(toSnap);
+    if (!oldEl || !newEl) {
+      dropOverlays();
+      return;
+    }
+    const width = pageCssWidth();
+    canvas.style.visibility = "hidden";
+    oldEl.style.transform = "translate3d(0,0,0)";
+    newEl.style.transform = `translate3d(${direction * width}px,0,0)`;
+    nextFrame(() => {
+      oldEl.style.transition = `transform ${SLIDE_MS}ms ${SLIDE_EASE}`;
+      newEl.style.transition = `transform ${SLIDE_MS}ms ${SLIDE_EASE}`;
+      oldEl.style.transform = `translate3d(${-direction * width}px,0,0)`;
+      newEl.style.transform = "translate3d(0,0,0)";
+    });
+    beginAnimation(SLIDE_MS + 60);
+  }
+
+  function animatePageTo(target, direction) {
+    const mode = settings.animation;
+    if (mode === "none") {
       selection.clear();
-      page += 1;
+      page = target;
       render();
       saveProgressSoon();
-    } else if (chapter + 1 < book.spine.length) {
-      layoutChapter(chapter + 1, 0).catch((error) => setStatus(String(error.message || error)));
+      return;
+    }
+    const from = page;
+    const snap = snapshotPage();
+    if (snap) {
+      cachePageCanvas(from, snap);
+    }
+    const targetSnap = cachedPageCanvas(target);
+    selection.clear();
+    page = target;
+    render();
+    saveProgressSoon();
+    if (!snap) {
+      return;
+    }
+    if (mode === "fade") {
+      playFade(snap);
+    } else {
+      playSlide(snap, direction, targetSnap);
+    }
+  }
+
+  async function animateChapterTo(index, direction) {
+    const mode = settings.animation;
+    const snap = mode === "none" ? null : snapshotPage();
+    await layoutChapter(index, direction > 0 ? 0 : "last");
+    if (!snap || mode === "none") {
+      return;
+    }
+    if (mode === "fade") {
+      playFade(snap);
+    } else {
+      playSlide(snap, direction);
+    }
+  }
+
+  function turnPage(direction) {
+    if (!layout || busy || animating) {
+      return;
+    }
+    if (direction > 0) {
+      if (page + 1 < layout.pages.length) {
+        animatePageTo(page + 1, 1);
+      } else if (chapter + 1 < book.spine.length) {
+        animateChapterTo(chapter + 1, 1).catch((error) =>
+          setStatus(String(error.message || error)),
+        );
+      }
+    } else if (page > 0) {
+      animatePageTo(page - 1, -1);
+    } else if (chapter > 0) {
+      animateChapterTo(chapter - 1, -1).catch((error) =>
+        setStatus(String(error.message || error)),
+      );
     }
     if (!hasClass("chrome-hidden")) {
       scheduleChromeHide(1800);
     }
   }
 
+  function nextPage() {
+    turnPage(1);
+  }
+
   function prevPage() {
-    if (!layout || busy) {
+    turnPage(-1);
+  }
+
+  // 跟手滑动：先抓当前页，再把目标页临时画到 canvas 上抓第二张快照，
+  // 随后恢复原页。两张快照跟手指移动，松手时按位移+速度决定翻页或回弹。
+  function beginSwipe(direction) {
+    if (!layout || busy || animating || settings.animation !== "slide") {
+      return false;
+    }
+    const forward = direction === "next";
+    const target = forward ? page + 1 : page - 1;
+    if (target < 0 || target >= layout.pages.length) {
+      return false;
+    }
+    const fromSnap = snapshotPage();
+    if (!fromSnap) {
+      return false;
+    }
+    // 邻页已经预渲染好时，起手不再临时排版/重绘两次；缓存缺失就退回
+    // 普通滑动动画，避免在手指刚动时同步画整页。
+    const toSnap = cachedPageCanvas(target);
+    if (!toSnap) {
+      return false;
+    }
+    cachePageCanvas(page, fromSnap);
+    const oldEl = placeOverlay(fromSnap);
+    const newEl = placeOverlay(toSnap);
+    if (!oldEl || !newEl) {
+      cancelAnimation();
+      return false;
+    }
+    canvas.style.visibility = "hidden";
+    turn = {
+      direction: forward ? 1 : -1,
+      target,
+      oldEl,
+      newEl,
+      width: pageCssWidth(),
+      dx: 0,
+    };
+    animating = true;
+    applySwipeDrag(0);
+    return true;
+  }
+
+  function applySwipeDrag(dx) {
+    if (!turn) {
       return;
     }
-    if (page > 0) {
-      selection.clear();
-      page -= 1;
-      render();
-      saveProgressSoon();
-    } else if (chapter > 0) {
-      layoutChapter(chapter - 1, "last").catch((error) => setStatus(String(error.message || error)));
+    const width = Math.max(1, turn.width);
+    const distance = turn.direction > 0 ? clamp(dx, -width, 0) : clamp(dx, 0, width);
+    turn.dx = distance;
+    turn.oldEl.style.transform = `translate3d(${distance}px,0,0)`;
+    turn.newEl.style.transform =
+      `translate3d(${distance + turn.direction * width}px,0,0)`;
+  }
+
+  function endSwipe(dx, dt) {
+    if (!turn) {
+      return;
     }
+    const active = turn;
+    const width = Math.max(1, active.width);
+    const velocity = dx / Math.max(1, dt);
+    const projected = active.dx + velocity * 120;
+    const commit = Math.abs(projected) > width * SWIPE_COMMIT_RATIO;
+    const finalDx = commit ? -active.direction * width : 0;
+    active.oldEl.style.transition = `transform ${SLIDE_MS}ms ${SLIDE_EASE}`;
+    active.newEl.style.transition = `transform ${SLIDE_MS}ms ${SLIDE_EASE}`;
+    nextFrame(() => {
+      active.oldEl.style.transform = `translate3d(${finalDx}px,0,0)`;
+      active.newEl.style.transform =
+        `translate3d(${finalDx + active.direction * width}px,0,0)`;
+    });
+    beginAnimation(SLIDE_MS + 40, () => {
+      turn = null;
+      if (commit) {
+        page = active.target;
+        selection.clear();
+        render();
+        saveProgressSoon();
+      }
+    });
     if (!hasClass("chrome-hidden")) {
       scheduleChromeHide(1800);
     }
+  }
+
+  function cancelSwipe() {
+    cancelAnimation();
   }
 
   async function seekTo(fraction) {
     if (!book || !layout) {
       return;
+    }
+    if (animating || turn) {
+      cancelAnimation();
     }
     const total = book.spine.length || 1;
     const pos = clamp(fraction, 0, 1) * total;
@@ -1252,6 +1885,9 @@ export function createReader(options) {
   }
 
   async function jumpToAnchor(anchor) {
+    if (animating || turn) {
+      cancelAnimation();
+    }
     const index = Number(anchor.spine || 0);
     if (index !== chapter) {
       await layoutChapter(index, 0);
@@ -1341,11 +1977,13 @@ export function createReader(options) {
         prevPage();
       }
     },
+    onSwipeStart: (direction) => beginSwipe(direction),
+    onSwipeMove: (dx) => applySwipeDrag(dx),
+    onSwipeEnd: (dx, dt) => endSwipe(dx, dt),
+    onSwipeCancel: () => cancelSwipe(),
     setStatus,
     onChange: () => {
-      if (layout) {
-        render();
-      }
+      paintSelection();
     },
   });
 
@@ -1380,6 +2018,7 @@ export function createReader(options) {
       }
     }
     if (changed && token === layoutToken) {
+      clearPageCache();
       render();
     }
   }
@@ -1428,6 +2067,7 @@ export function createReader(options) {
 
   async function loadFont(bytes, family = FONT_FAMILY) {
     eb_font(bytes);
+    workerFont(bytes);
     const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
     try {
       if (typeof FontFace === "function" && document.fonts) {
@@ -1568,6 +2208,7 @@ export function createReader(options) {
         ? "cjk"
         : "latin";
     eb_font_reset();
+    workerFontReset();
     fontDescs.clear();
     clearGlyphSprites();
     atlasReady = false;
@@ -1709,6 +2350,9 @@ export function createReader(options) {
     if (alignEl) {
       alignEl.value = settings.align;
     }
+    if (animationEl) {
+      animationEl.value = settings.animation;
+    }
   }
 
   function normalizeSettings(input) {
@@ -1731,6 +2375,9 @@ export function createReader(options) {
       6,
     );
     next.align = ALIGNS.includes(next.align) ? next.align : "book";
+    if (!["none", "fade", "slide"].includes(next.animation)) {
+      next.animation = DEFAULT_SETTINGS.animation;
+    }
     if (!["light", "sepia", "dark"].includes(next.theme)) {
       next.theme = "light";
     }
@@ -1738,6 +2385,9 @@ export function createReader(options) {
   }
 
   async function applySettings(next, persist = true) {
+    if (animating || turn) {
+      cancelAnimation();
+    }
     const merged = normalizeSettings(next);
     const layoutChanged =
       merged.fontSize !== settings.fontSize ||
@@ -1764,6 +2414,7 @@ export function createReader(options) {
 
   // ---- 事件 ---------------------------------------------------------------
 
+  startLayoutWorker();
   // 选区/翻页期间不要把工具栏从用户脚下抽走。
   canvas.addEventListener("pointerdown", clearChromeTimer);
   prevEl.addEventListener("click", prevPage);
@@ -1866,6 +2517,13 @@ export function createReader(options) {
       );
     });
   }
+  if (animationEl) {
+    animationEl.addEventListener("change", () => {
+      applySettings({ animation: animationEl.value }).catch((error) =>
+        setStatus(String(error.message || error)),
+      );
+    });
+  }
   if (marginEl) {
     marginEl.addEventListener("input", () => {
       if (marginLabelEl) {
@@ -1899,6 +2557,7 @@ export function createReader(options) {
           fontState = null;
         } else {
           eb_font_reset();
+          workerFontReset();
           fontDescs.clear();
           clearGlyphSprites();
           atlasReady = false;
@@ -1940,6 +2599,7 @@ export function createReader(options) {
     if (busy) {
       throw new Error("正在处理上一本书");
     }
+    cancelAnimation();
     busy = true;
     const token = ++openToken;
     try {
@@ -1949,12 +2609,13 @@ export function createReader(options) {
         throw new Error("书籍数据不存在");
       }
       let info;
+      let openedText = "";
       if (record.format === "txt") {
-        const text = decodeText(raw);
-        if (!text.trim()) {
+        openedText = decodeText(raw);
+        if (!openedText.trim()) {
           throw new Error("TXT 内容为空");
         }
-        info = JSON.parse(eb_open_text(text, record.name || record.title || "untitled.txt"));
+        info = JSON.parse(eb_open_text(openedText, record.name || record.title || "untitled.txt"));
       } else {
         info = JSON.parse(eb_open(raw));
       }
@@ -1972,6 +2633,16 @@ export function createReader(options) {
       chapterImages = [];
       imageCache.clear();
       const plan = planFonts(info, record);
+      if (record.format === "txt") {
+        workerBook({
+          kind: "txt",
+          text: openedText,
+          name: record.name || record.title || "untitled.txt",
+          loadEmbedded: !plan.reuse,
+        });
+      } else {
+        workerBook({ kind: "epub", bytes: raw, loadEmbedded: !plan.reuse });
+      }
       // 字体和首章排版并行：缓存命中通常能在 FONT_WAIT_MS 内完成，直接等；
       // 冷启动要下载 1.5 MB 时先用系统字体画一页，字体到齐后再 relayout。
       const fontReady = prepareFonts(info, plan, token).catch((error) => {
@@ -2035,6 +2706,7 @@ export function createReader(options) {
 
   function close() {
     openToken += 1;
+    cancelAnimation();
     clearChromeTimer();
     hideHint();
     saveProgress();
@@ -2046,6 +2718,7 @@ export function createReader(options) {
     book = null;
     currentRecord = null;
     layout = null;
+    clearPageCache();
     layoutDimsUsed = null;
     chapterImages = [];
     imageCache.clear();

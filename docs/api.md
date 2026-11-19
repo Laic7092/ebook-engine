@@ -493,7 +493,7 @@ EPUB 适配器靠它判断“整个输入就是一个 epub 字节流”。
 | `open(src)` | 按 `Probe::Yes` → `Maybe` 选择；都不匹配返回 `Unsupported("no adapter")` |
 | `Opened::chapter(src, index)` | 读第 `index` 章；越界 `OutOfRange` |
 | `Opened::len()` / `is_empty()` | spine 长度 |
-| `txt::TxtReader::from_text(text, name)` | 已解码 UTF-8 文本按标题行分章；超长按行/字符边界兜底 |
+| `txt::TxtReader::from_text(text, name)` | 已解码 UTF-8 文本按标题行分章；章内标题行包成 `H1`，其余每个非空行单独包成 `P`；超长按行/字符边界兜底 |
 | `TxtReader::chapter_with_anchors(index)` | 逐章 `StyledDoc`，锚点 spine 已改写为本章 |
 
 `Probe`：`No`（明确不支持）、`Maybe`（可能是）、`Yes`（确认）。
@@ -602,6 +602,7 @@ trait Renderer {
 | `eb_layout(spine, w, h, margin)` | `epub` | 排版已打开书籍的指定章 |
 | `eb_layout_insets(spine, w, h, left, right, top, bottom, font_scale)` | `epub` | 四边独立页边距 + 只缩放字号/行高；页面容器不变 |
 | `eb_layout_style(spine, w, h, left, right, top, bottom, font_scale, line_scale, letter_px, align)` | `epub` | 在四边页边距上再独立覆盖行距/字距/对齐；`align` 0=原书、1=左、2=中、3=右、4=两端 |
+| `eb_use_layout(spine, bytes)` | `epub` | 把 worker 排版好的 IR 装回主线程的命中/选区/链接状态；空串表示成功 |
 | `eb_base_font_size()` | `epub` | 当前书首章根节点字号；宿主用它把 px 字号换算成缩放比例 |
 | `eb_font(bytes)` | `epub` | 注册字体，返回 id；失败 `u32::MAX` |
 | `eb_font_reset()` / `eb_font_count()` | `epub` | 字体槽管理 |

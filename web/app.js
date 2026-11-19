@@ -359,6 +359,7 @@ async function boot() {
         margin: Number(saved.margin) || DEFAULT_SETTINGS.margin,
         align: saved.align || DEFAULT_SETTINGS.align,
         theme: saved.theme || DEFAULT_SETTINGS.theme,
+        animation: saved.animation || DEFAULT_SETTINGS.animation,
       };
     }
   } catch (error) {

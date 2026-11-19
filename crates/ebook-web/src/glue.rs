@@ -112,6 +112,14 @@ pub fn eb_layout_book_style(
     )
 }
 
+/// worker 排版好之后，把 IR 装回主线程的交互状态（命中/选区/链接/进度）。
+/// 返回空串表示成功。
+#[cfg(feature = "epub")]
+#[wasm_bindgen]
+pub fn eb_use_layout(spine: u32, bytes: &[u8]) -> String {
+    crate::adopt_layout(spine as usize, bytes)
+}
+
 /// 当前书第一章根节点的字号，宿主用它把“字号 18px”换算成缩放比例。
 #[cfg(feature = "epub")]
 #[wasm_bindgen]

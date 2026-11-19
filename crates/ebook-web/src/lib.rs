@@ -631,6 +631,27 @@ fn with_last<T>(read: impl FnOnce(&LastLayout) -> T) -> Option<T> {
     slot.as_ref().map(read)
 }
 
+/// 把 worker 排版好的 IR 装回主线程。命中、选区、链接、进度都读 `LAST`，
+/// 主线程不需要再跑一遍 `Layout`；只重建 `StyledDoc` 取回选区原文与图片表。
+/// 返回空串表示成功，否则是给宿主显示的错误。
+pub fn adopt_layout(spine: usize, bytes: &[u8]) -> String {
+    let ir: LayoutResult = match codec::decode(bytes) {
+        Ok(ir) => ir,
+        Err(error) => return format!("decode: {error:?}"),
+    };
+    let books = BOOK.lock().unwrap();
+    let Some(reader) = books.as_ref() else {
+        return String::from("no book");
+    };
+    match reader.chapter_with_anchors(spine) {
+        Ok((doc, _, anchors)) => {
+            *LAST.lock().unwrap() = Some(LastLayout { ir, doc, anchors });
+            String::new()
+        }
+        Err(error) => format!("chapter: {error:?}"),
+    }
+}
+
 /// 页内坐标 → 原文位置。`{"location":{...}}` 或 `{"location":null}`。
 pub fn hit_json(page: u32, x: f32, y: f32) -> String {
     let hit = with_last(|last| last.reader().hit(page, PointF::new(x, y))).flatten();

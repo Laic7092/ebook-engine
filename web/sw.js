@@ -1,7 +1,7 @@
 // PWA 缓存：应用壳 + wasm + 第一次读到的字体/书。
 // 字体 19 MB，HTTP 缓存不可靠时每次冷启动都会重新下载；这里 cache-first。
 
-const CACHE_NAME = "ebook-v7";
+const CACHE_NAME = "ebook-v9";
 const FONT_CACHE = "ebook-fonts-v1";
 const SHELL = [
   "./index.html",
@@ -11,6 +11,7 @@ const SHELL = [
   "./db.js",
   "./text.js",
   "./selection.js",
+  "./layout-worker.js",
   "./decode.js",
   "./encode.js",
   "./pkg/ebook_web.js",
