@@ -65,6 +65,11 @@
 
 ### Changed
 
+- 阅读器在书没有内嵌字体时**按语言取字体**：拉丁仍用仓库内置的 `test.ttf`，
+  中日韩从 jsDelivr 取 LXGW WenKai（`@v1.330` 固定版本，TTF，约 18 MB）——
+  必须是 TTF/OTF，`ttf-parser` / rustybuzz 读不了 woff2。下载带进度条，
+  字节存 IndexedDB（命中不再重复下载），`?font=<url>` 可换源、`?nofont=1`
+  可退回宿主字体栈；缓存查找有 2s 超时，存储被策略禁用时不会卡住首屏。
 - 阅读器支持 `?book=<url>&spine=<n>` 深链，直接打开指定章节（也方便截图/回归）。
 - IR 1.1 → 1.3：新字段只在结构体末尾追加；IR 仍是 native 与 wasm 之间唯一的字节契约，
   `web/decode.js` / `web/encode.js` 与 `xtask contract` 同步。

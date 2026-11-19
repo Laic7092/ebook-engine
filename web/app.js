@@ -39,6 +39,15 @@ const MIN_SCALE = 0.55;
 const BOOK_URLS = ["./en.epub", "../fixtures/en.epub", "fixtures/en.epub"];
 const FONT_URLS = ["./test.ttf", "../fixtures/font/test.ttf", "fixtures/font/test.ttf"];
 const FONT_FAMILY = "ebook-demo";
+// 书里没带字体时按语言兜底：拉丁用仓库里的 test.ttf，中日韩直接取 CDN 上的
+// 开源 CJK 字体。ttf-parser / rustybuzz 读不了 woff2，所以必须拿 TTF/OTF。
+// 用标签固定版本：同一份字节才会进 IndexedDB 缓存，也才能保证量度可复现。
+const CJK_FONT_URLS = [
+  "https://cdn.jsdelivr.net/gh/lxgw/LxgwWenKai@v1.330/fonts/TTF/LXGWWenKai-Regular.ttf",
+  "https://fastly.jsdelivr.net/gh/lxgw/LxgwWenKai@v1.330/fonts/TTF/LXGWWenKai-Regular.ttf",
+];
+const FONT_CACHE_DB = "ebook-engine";
+const FONT_CACHE_STORE = "fonts";
 const FONT_FALLBACK =
   '"ebook-demo", "Noto Serif CJK SC", "Songti SC", "Source Han Serif SC", "Noto Sans CJK SC", Georgia, serif';
 
@@ -760,12 +769,23 @@ async function openBook(bytes, start = 0) {
   // 宿主字体栈接手（`StubMeasurer` 对全角字符按 1em 记宽，形状与浏览器一致）。
   const sample = `${info.language || ""} ${info.title || ""}`;
   const cjk = /(^|[-_ ])(zh|ja|ko)\b/i.test(sample) || /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(sample);
-  if (eb_font_count() === 0 && !cjk) {
-    try {
-      await loadFont(await fetchFirst(FONT_URLS));
-      builtinEl.checked = true;
-    } catch (error) {
-      setStatus("no font: layout falls back to fixed advances");
+  if (eb_font_count() === 0) {
+    if (cjk) {
+      // 内置的 test.ttf 只覆盖拉丁，中文书装上它只会满篇 `font missing`。
+      try {
+        await loadRemoteFont();
+        builtinEl.checked = true;
+      } catch (error) {
+        // 离线或 CDN 不通：退回宿主字体栈（stub 量度，全角按 1em）。
+        setStatus("no CJK font: using host fonts");
+      }
+    } else {
+      try {
+        await loadFont(await fetchFirst(FONT_URLS));
+        builtinEl.checked = true;
+      } catch (error) {
+        setStatus("no font: layout falls back to fixed advances");
+      }
     }
   }
   updateBook();
@@ -826,6 +846,123 @@ async function loadFont(bytes) {
     setStatus("font loaded for layout only");
   }
   fontDescs.clear();
+}
+
+function fontCacheOpen() {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === "undefined") {
+      reject(new Error("no indexeddb"));
+      return;
+    }
+    const request = indexedDB.open(FONT_CACHE_DB, 1);
+    request.onupgradeneeded = () => request.result.createObjectStore(FONT_CACHE_STORE);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+/// IndexedDB 在隐私模式、存储被策略禁用时 `open()` 可能永远不回调，
+/// 所以缓存查找必须有超时：拿不到就当没有，不能把排版卡死。
+function withTimeout(promise, ms, fallback) {
+  return Promise.race([
+    promise,
+    new Promise((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
+
+async function fontCacheGet(key) {
+  try {
+    const db = await fontCacheOpen();
+    return await new Promise((resolve, reject) => {
+      const request = db.transaction(FONT_CACHE_STORE, "readonly").objectStore(FONT_CACHE_STORE).get(key);
+      request.onsuccess = () => resolve(request.result || null);
+      request.onerror = () => reject(request.error);
+    });
+  } catch (error) {
+    return null;
+  }
+}
+
+async function fontCachePut(key, buffer) {
+  try {
+    const db = await fontCacheOpen();
+    await new Promise((resolve, reject) => {
+      const request = db.transaction(FONT_CACHE_STORE, "readwrite").objectStore(FONT_CACHE_STORE).put(buffer, key);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
+  } catch (error) {
+    // 隐私模式或配额不足：不缓存也能用，只是下次还得再下。
+  }
+}
+
+async function fetchFontBytes(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 180000);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`font ${response.status}: ${url}`);
+    }
+    if (!response.body || typeof response.body.getReader !== "function") {
+      return new Uint8Array(await response.arrayBuffer());
+    }
+    const total = Number(response.headers.get("content-length") || 0);
+    const reader = response.body.getReader();
+    const chunks = [];
+    let received = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      chunks.push(value);
+      received += value.length;
+      const mb = (received / 1048576).toFixed(1);
+      setStatus(total ? `font ${mb} / ${(total / 1048576).toFixed(1)} MB` : `font ${mb} MB`);
+    }
+    const bytes = new Uint8Array(received);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return bytes;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/// 中日韩书没有内嵌字体时，从 CDN 取一份开源 CJK 字体喂给 wasm 与画布。
+/// 命中 IndexedDB 就不再下载；`?font=<url>` 可换源，`?nofont=1` 可关掉。
+async function loadRemoteFont() {
+  const query = new URLSearchParams(window.location.search);
+  if (query.get("nofont") === "1") {
+    throw new Error("remote font disabled");
+  }
+  const override = query.get("font");
+  const urls = override ? [override] : CJK_FONT_URLS;
+  let lastError = null;
+  for (const url of urls) {
+    try {
+      setStatus("loading font");
+      const cached = await withTimeout(fontCacheGet(url), 2000, null);
+      if (cached) {
+        await loadFont(new Uint8Array(cached));
+        setStatus("font cached");
+        return;
+      }
+      const bytes = await fetchFontBytes(url);
+      await loadFont(bytes);
+      const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+      // 写入不阻塞首屏：缓存失败不影响这次阅读。
+      fontCachePut(url, buffer).catch(() => {});
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("no remote font");
 }
 
 async function relayout() {
