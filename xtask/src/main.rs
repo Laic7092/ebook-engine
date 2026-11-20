@@ -8,7 +8,9 @@ use ebook_ir::{codec, EdgesF, LayoutResult};
 use ebook_layout::{Layout, LayoutEnv, NoImageSizes, PageConstraint, StubMeasurer};
 use ebook_raster::RgbaSurface;
 
-const GZIP_BUDGET: usize = 512 * 1024;
+// 512 KiB 是原始预算；EPUB 容错（ZIP64、编码回退、病态输入限额）合入后
+// 实测约 533 KiB，留出约 10 KiB 波动余量后调整到 544 KiB。
+const GZIP_BUDGET: usize = 544 * 1024;
 fn target_dir() -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
