@@ -253,6 +253,158 @@ pub(crate) const NAMED: [(&str, char); 252] = [
     ("zwnj", '\u{200c}'),
 ];
 
+/// 把 XML 1.0 不允许的控制字符替换成 U+FFFD。真实书里偶尔混入 NUL / 垂直制表
+/// 之类字节，roxmltree 会因此拒绝整章；文本语义已经不可靠，但至少可以继续读。
+pub(crate) fn sanitize(text: &str) -> alloc::borrow::Cow<'_, str> {
+    use alloc::borrow::Cow;
+    use alloc::string::String;
+
+    let invalid = |ch: char| {
+        !matches!(
+            ch as u32,
+            0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF
+        )
+    };
+    if !text.chars().any(invalid) {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        out.push(if invalid(ch) { '\u{FFFD}' } else { ch });
+    }
+    Cow::Owned(out)
+}
+
+/// roxmltree 的解析器在极深嵌套上仍会递归。解析前先做一次线性的标签深度
+/// 扫描：超过上限直接拒绝，避免在解析器内部栈溢出（release 下是 abort）。
+pub(crate) fn xml_too_deep(text: &str, max: usize) -> bool {
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    let mut depth = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        let rest = &bytes[i..];
+        if rest.starts_with(b"<!--") {
+            i = find_after(bytes, i + 4, b"-->");
+            continue;
+        }
+        if rest.starts_with(b"<![CDATA[") {
+            i = find_after(bytes, i + 9, b"]]>");
+            continue;
+        }
+        if rest.starts_with(b"<?") {
+            i = find_after(bytes, i + 2, b"?>");
+            continue;
+        }
+        if rest.starts_with(b"<!") {
+            i = skip_declaration(bytes, i + 2);
+            continue;
+        }
+        if rest.starts_with(b"</") {
+            i = tag_end(bytes, i + 2);
+            depth = depth.saturating_sub(1);
+            continue;
+        }
+        // 文本里未转义的 `<` 很常见；只有后面像标签名时才计入深度。
+        let Some(&first) = bytes.get(i + 1) else {
+            break;
+        };
+        if !(first.is_ascii_alphabetic() || first == b'_' || first == b':') {
+            i += 1;
+            continue;
+        }
+        let end = tag_end(bytes, i + 1);
+        let mut tail = end;
+        while tail > i && bytes[tail - 1].is_ascii_whitespace() {
+            tail -= 1;
+        }
+        if tail > i && bytes[tail - 1] != b'/' {
+            depth += 1;
+            if depth > max {
+                return true;
+            }
+        }
+        i = end.saturating_add(1);
+    }
+    false
+}
+
+fn find_after(bytes: &[u8], from: usize, needle: &[u8]) -> usize {
+    if needle.is_empty() || from >= bytes.len() {
+        return bytes.len();
+    }
+    let mut i = from;
+    while i + needle.len() <= bytes.len() {
+        if &bytes[i..i + needle.len()] == needle {
+            return i + needle.len();
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+fn tag_end(bytes: &[u8], from: usize) -> usize {
+    let mut i = from;
+    let mut quote = None;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        match quote {
+            Some(q) => {
+                if byte == q {
+                    quote = None;
+                }
+            }
+            None => match byte {
+                b'\'' | b'"' => quote = Some(byte),
+                b'>' => return i,
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+fn skip_declaration(bytes: &[u8], from: usize) -> usize {
+    let mut i = from;
+    let mut bracket = 0usize;
+    let mut quote = None;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        match quote {
+            Some(q) => {
+                if byte == q {
+                    quote = None;
+                }
+            }
+            None => match byte {
+                b'\'' | b'"' => quote = Some(byte),
+                b'[' => bracket += 1,
+                b']' => bracket = bracket.saturating_sub(1),
+                b'>' if bracket == 0 => return i + 1,
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+/// 解析前的统一预处理：去掉 XML 非法控制字符，再展开已知命名实体。
+pub(crate) fn normalized(text: &str) -> alloc::borrow::Cow<'_, str> {
+    use alloc::borrow::Cow;
+
+    match sanitize(text) {
+        Cow::Borrowed(text) => expand(text),
+        Cow::Owned(text) => Cow::Owned(expand(&text).into_owned()),
+    }
+}
+
+const MAX_EXPANDED_BYTES: usize = 64 * 1024 * 1024;
+
 pub(crate) fn expand(text: &str) -> alloc::borrow::Cow<'_, str> {
     use alloc::borrow::Cow;
     use alloc::string::String;
@@ -260,11 +412,14 @@ pub(crate) fn expand(text: &str) -> alloc::borrow::Cow<'_, str> {
     if !text.contains('&') {
         return Cow::Borrowed(text);
     }
-    let mut out = String::with_capacity(text.len() + 16);
+    let mut out = String::with_capacity(text.len().saturating_add(16).min(MAX_EXPANDED_BYTES));
     let mut cursor = 0usize;
     while let Some(offset) = text[cursor..].find('&') {
+        if out.len() >= MAX_EXPANDED_BYTES {
+            break;
+        }
         let start = cursor + offset;
-        out.push_str(&text[cursor..start]);
+        push_limited(&mut out, &text[cursor..start]);
         // 实体名很短：只在有限窗口里找分号，避免一整章没有分号时退化成 O(n²)。
         let window_end = (start + 1 + 64).min(text.len());
         let resolved = text[start + 1..window_end].find(';').and_then(|end| {
@@ -276,21 +431,37 @@ pub(crate) fn expand(text: &str) -> alloc::borrow::Cow<'_, str> {
         });
         match resolved {
             Some((end, Some(ch))) => {
+                if out.len().saturating_add(ch.len_utf8()) > MAX_EXPANDED_BYTES {
+                    break;
+                }
                 out.push(ch);
                 cursor = start + 1 + end + 1;
             }
             Some((end, None)) => {
-                out.push_str(&text[start..start + 1 + end + 1]);
+                push_limited(&mut out, &text[start..start + 1 + end + 1]);
                 cursor = start + 1 + end + 1;
             }
             None => {
-                out.push_str("&amp;");
+                push_limited(&mut out, "&amp;");
                 cursor = start + 1;
             }
         }
     }
-    out.push_str(&text[cursor..]);
+    push_limited(&mut out, &text[cursor..]);
     Cow::Owned(out)
+}
+
+fn push_limited(out: &mut alloc::string::String, text: &str) {
+    let remaining = MAX_EXPANDED_BYTES.saturating_sub(out.len());
+    if text.len() <= remaining {
+        out.push_str(text);
+        return;
+    }
+    let mut end = remaining;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    out.push_str(&text[..end]);
 }
 
 fn is_xml_builtin(name: &str) -> bool {
@@ -328,5 +499,27 @@ mod tests {
     #[test]
     fn borrows_when_nothing_to_do() {
         assert!(matches!(expand("plain"), alloc::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn detects_pathological_nesting_without_parsing() {
+        use super::xml_too_deep;
+        assert!(!xml_too_deep("<a><b><c/></b></a>", 8));
+        assert!(!xml_too_deep(
+            "<!DOCTYPE html><a><!-- <x> --><b>ok</b></a>",
+            8
+        ));
+        assert!(!xml_too_deep("<![CDATA[<not-a-tag>]]><a/>", 8));
+        assert!(!xml_too_deep("<p>a < b and c > d</p>", 8));
+        let deep = format!("{}x{}", "<div>".repeat(20), "</div>".repeat(20));
+        assert!(xml_too_deep(&deep, 10));
+    }
+
+    #[test]
+    fn sanitizes_xml_control_characters() {
+        use super::{normalized, sanitize};
+        assert!(matches!(sanitize("plain"), alloc::borrow::Cow::Borrowed(_)));
+        assert_eq!(sanitize("a\0b\u{0b}c"), "a\u{fffd}b\u{fffd}c");
+        assert_eq!(normalized("a&nbsp;b\0"), "a\u{a0}b\u{fffd}");
     }
 }

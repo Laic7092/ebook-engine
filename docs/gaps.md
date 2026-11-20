@@ -164,19 +164,24 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 
 ### G-07 EPUB 容器层：加密、编码、ZIP64
 
-- **状态**：未修复
-- **现象**：
+- **状态**：部分
+- **已修复**：`ZipArchive` 支持 ZIP64 EOCD 与中央目录扩展字段；单个非 UTF-8
+  文件名只跳过该条目，不再让整包失败；`read_text` 支持 UTF-8 BOM、UTF-16
+  LE/BE、`iso-8859-1` 与 `windows-1252`；container 缺失/坏路径会回退扫描 `.opf`；
+  XML 非法控制字符替换为 U+FFFD 后继续解析。测试见 `zip.rs` 单测与
+  `tests/robust.rs`。
+- **仍未修复**：
   - 不处理 `META-INF/encryption.xml`：DRM、IDPF/Adobe 字体混淆的字体
     会以原始加密字节交给 `ttf-parser`，解析失败。
-  - `ZipArchive::parse` 用 `u16` 读条目数、`u32` 读 offset，不支持 ZIP64。
-  - `read_text` 只做 UTF-8 lossy，不支持 UTF-16 或旧编码。
-- **影响**：商业 EPUB、老书、超大合集直接打不开或字体全丢。
+  - GBK / Big5 / Shift_JIS 等 CJK 旧编码仍由 Web 宿主先解码；格式层只认
+    UTF-8/UTF-16/latin-1。
+- **影响**：商业 EPUB 的混淆字体仍会丢；无 BOM 且无法识别的旧编码正文仍可能乱码。
 - **证据**：
-  - `crates/ebook-format/src/zip.rs`：EOCD / central directory 解析。
+  - `crates/ebook-format/src/zip.rs`：EOCD / central directory / 文本解码。
   - `crates/ebook-format/src/epub.rs`：没有 encryption.xml 分支。
-  - `docs/limits.md`：文本编码写明 UTF-8 lossy。
-- **修复**：先处理 `encryption.xml` 的 `font/obfuscation`（IDPF 算法不复杂，
-  且不需要 DRM 解密）；ZIP64 和编码转换按真实书样本决定优先级。
+  - `docs/limits.md`：文本编码与 ZIP64 行。
+- **修复**：继续处理 `encryption.xml` 的 `font/obfuscation`（IDPF 算法不复杂，
+  且不需要 DRM 解密）；CJK 旧编码仍建议由宿主用平台解码器处理。
 
 ### G-08 字体：WOFF、可变字体、彩色字体、子集化
 

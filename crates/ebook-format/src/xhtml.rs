@@ -9,6 +9,17 @@ use ebook_ir::{
 use crate::css::{self, ElemKey, StyleSheet};
 use crate::{ChapterAnchor, ChapterLinks, FormatError};
 
+/// 一次章节解析的硬边界。数量级与 `ebook_ir::Limits` 的默认值接近；限额触发的
+/// 章节返回可读的 `Malformed("xhtml")`，由阅读器按章报告，不拖垮整本书。
+const MAX_XHTML_BYTES: usize = 32 * 1024 * 1024;
+const MAX_XHTML_NODES: usize = 1_048_576;
+const MAX_XHTML_DEPTH: usize = 64;
+const MAX_XHTML_PARSE_DEPTH: usize = 128;
+const MAX_XHTML_TEXT_BYTES: usize = 20_000_000;
+/// 每节点保存一份锚点路径，宽而深的病态文档会把这份重复开销放大。
+const MAX_XHTML_PATH_ENTRIES: usize = 8_000_000;
+const MAX_XHTML_IMAGES: usize = u16::MAX as usize;
+
 pub trait AssetResolver {
     fn css(&mut self, href: &str) -> Option<String>;
 
@@ -54,6 +65,8 @@ struct Builder {
     ids: Vec<String>,
     duplicate_ids: Vec<String>,
     spine: u32,
+    path_entries: usize,
+    limit: Option<&'static str>,
 }
 
 impl Builder {
@@ -63,18 +76,49 @@ impl Builder {
         id
     }
 
+    fn hit_limit(&mut self, reason: &'static str) -> Option<NodeId> {
+        if self.limit.is_none() {
+            self.limit = Some(reason);
+        }
+        None
+    }
+
     fn node(
         &mut self,
         xml: roxmltree::Node<'_, '_>,
         parent: Option<NodeId>,
         path: &mut Vec<u16>,
         resolver: &mut dyn AssetResolver,
+        depth: usize,
     ) -> Option<NodeId> {
+        if self.limit.is_some() {
+            return None;
+        }
+        if depth > MAX_XHTML_DEPTH {
+            return self.hit_limit("depth");
+        }
         if xml.is_text() {
             let text = xml.text().unwrap_or("");
             if text.is_empty() {
                 return None;
             }
+            if self
+                .doc
+                .text
+                .len()
+                .checked_add(text.len())
+                .is_none_or(|len| len > MAX_XHTML_TEXT_BYTES)
+            {
+                return self.hit_limit("text");
+            }
+            if self
+                .path_entries
+                .checked_add(path.len())
+                .is_none_or(|entries| entries > MAX_XHTML_PATH_ENTRIES)
+            {
+                return self.hit_limit("anchors");
+            }
+            self.path_entries += path.len();
             let start = self.doc.text.len() as u32;
             self.doc.text.push_str(text);
             let key = ElemKey {
@@ -103,6 +147,16 @@ impl Builder {
         }
         if !xml.is_element() {
             return None;
+        }
+        if self.doc.nodes.len() >= MAX_XHTML_NODES {
+            return self.hit_limit("nodes");
+        }
+        if self
+            .path_entries
+            .checked_add(path.len())
+            .is_none_or(|entries| entries > MAX_XHTML_PATH_ENTRIES)
+        {
+            return self.hit_limit("anchors");
         }
 
         let name = xml.tag_name().name();
@@ -154,6 +208,9 @@ impl Builder {
             }
         }
         let image = if tag == Tag::Img {
+            if self.doc.images.len() >= MAX_XHTML_IMAGES {
+                return self.hit_limit("images");
+            }
             let id = self.doc.images.len() as ImageId;
             // `src` 由 resolver 解析成归档内路径；解析不了就保留属性原文。
             let src = xml
@@ -200,6 +257,7 @@ impl Builder {
                 offset: 0,
             }),
         };
+        self.path_entries += path.len();
         let id = self.push(node, key);
         if let Some(name) = self.keys[id as usize].id.clone() {
             self.anchors.push(ChapterAnchor {
@@ -226,11 +284,14 @@ impl Builder {
         let mut index: u16 = 0;
         let children: Vec<roxmltree::Node<'_, '_>> = xml.children().collect();
         for child in children {
+            if self.limit.is_some() {
+                break;
+            }
             if !(child.is_element() || child.is_text()) {
                 continue;
             }
             path.push(index);
-            if let Some(kid) = self.node(child, Some(id), path, resolver) {
+            if let Some(kid) = self.node(child, Some(id), path, resolver, depth + 1) {
                 kids.push(kid);
             }
             path.pop();
@@ -254,13 +315,19 @@ pub fn build_document(
     spine: u32,
     resolver: &mut dyn AssetResolver,
 ) -> Result<Built, FormatError> {
-    let xml = super::entities::expand(xml);
+    if xml.len() > MAX_XHTML_BYTES {
+        return Err(FormatError::Malformed("xhtml"));
+    }
+    let xml = super::entities::normalized(xml);
+    if xml.len() > MAX_XHTML_BYTES || super::entities::xml_too_deep(&xml, MAX_XHTML_PARSE_DEPTH) {
+        return Err(FormatError::Malformed("xhtml"));
+    }
     // roxmltree 默认拒绝 DOCTYPE（`allow_dtd: false`），而 pandoc / calibre / Sigil
     // 产出的 XHTML 几乎都带 `<!DOCTYPE html>`。DOCTYPE 只影响实体声明，实体已经
     // 由 `entities::expand` 展开，所以这里放行但忽略。
     let options = roxmltree::ParsingOptions {
         allow_dtd: true,
-        ..roxmltree::ParsingOptions::default()
+        nodes_limit: MAX_XHTML_NODES as u32,
     };
     let tree = roxmltree::Document::parse_with_options(&xml, options)
         .map_err(|_| FormatError::Malformed("xhtml"))?;
@@ -273,11 +340,16 @@ pub fn build_document(
         ids: Vec::new(),
         duplicate_ids: Vec::new(),
         spine,
+        path_entries: 0,
+        limit: None,
     };
     builder.doc.meta.spine = spine;
     let root = builder
-        .node(tree.root_element(), None, &mut Vec::new(), resolver)
+        .node(tree.root_element(), None, &mut Vec::new(), resolver, 0)
         .ok_or(FormatError::Malformed("xhtml"))?;
+    if builder.limit.is_some() {
+        return Err(FormatError::Malformed("xhtml"));
+    }
     builder.doc.root = root;
 
     let mut sheet = StyleSheet::default();

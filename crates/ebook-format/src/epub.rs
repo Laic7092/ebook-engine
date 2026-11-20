@@ -4,7 +4,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::{OnceCell, RefCell};
 
-use ebook_ir::StyledDoc;
+use ebook_ir::{SizeF, StyledDoc};
 
 use crate::css;
 use crate::xhtml::{self, AssetResolver};
@@ -16,6 +16,20 @@ use crate::{
 
 /// 单个字体文件的上限。内嵌字体是排版入参，过大就直接当坏资产报告。
 const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
+/// 包文档（container/OPF）与导航文档的上限。正常书远小于这些值；限额只用来
+/// 挡住病态输入，触限时返回可读错误或跳过该导航源。
+const MAX_PACKAGE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_NAV_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CHAPTER_BYTES: usize = 32 * 1024 * 1024;
+const MAX_XML_NODES: u32 = 1_000_000;
+const MAX_XML_DEPTH: usize = 128;
+/// 目录递归与条目上限。深度上限优先于 XML 解析器的节点上限，避免栈溢出。
+const MAX_TOC_DEPTH: u16 = 64;
+const MAX_TOC_ENTRIES: usize = 100_000;
+const MAX_NAV_DOCS: usize = 32;
+const MAX_COVER_CANDIDATES: usize = 32;
+const MAX_COVER_BYTES: usize = 2 * 1024 * 1024;
+const MAX_FONTS: usize = 1_024;
 
 pub struct Epub;
 
@@ -31,11 +45,6 @@ pub struct EpubReader<'a> {
 impl<'a> EpubReader<'a> {
     pub fn open(raw: &'a [u8]) -> Result<Self, FormatError> {
         let zip = ZipArchive::parse(raw).map_err(|_| FormatError::Malformed("zip"))?;
-        let opf_path = container_opf(&zip).ok_or(FormatError::Missing("container.xml"))?;
-        let opf = zip
-            .read_text(&opf_path)
-            .ok_or(FormatError::Missing("opf"))?;
-
         let mut issues = Vec::new();
         for name in zip.rejected() {
             push_issue(
@@ -45,6 +54,39 @@ impl<'a> EpubReader<'a> {
                 "archive entry escapes the package root and was ignored",
             );
         }
+
+        // container.xml 缺失或指向不存在的 OPF 时，退一步在归档里找一个 .opf。
+        // 这比整本书白屏更接近用户预期，同时把降级原因作为 issue 带出去。
+        let from_container = container_opf(&zip);
+        let opf_path = match from_container {
+            Some(path) if zip.has(&path) => path,
+            Some(path) => {
+                push_issue(
+                    &mut issues,
+                    EpubIssueCode::MissingAsset,
+                    Some(path),
+                    "container.xml points at a missing OPF; falling back to an archive scan",
+                );
+                find_package(&zip).ok_or(FormatError::Missing("opf"))?
+            }
+            None => match find_package(&zip) {
+                Some(path) => {
+                    push_issue(
+                        &mut issues,
+                        EpubIssueCode::MissingAsset,
+                        Some(String::from("META-INF/container.xml")),
+                        "container.xml is missing or malformed; falling back to an archive scan",
+                    );
+                    path
+                }
+                None => return Err(FormatError::Missing("container.xml")),
+            },
+        };
+        let opf = zip
+            .read_text(&opf_path)
+            .filter(|text| text.len() <= MAX_PACKAGE_BYTES)
+            .ok_or(FormatError::Missing("opf"))?;
+
         let mut package = parse_package(&opf, &opf_path, &mut issues)?;
         let mut book = core::mem::take(&mut package.book);
 
@@ -87,12 +129,18 @@ impl<'a> EpubReader<'a> {
         let built = match build_chapter(&self.zip, &self.book, index) {
             Ok(built) => built,
             Err(err) => {
-                if err == FormatError::Malformed("xhtml") {
-                    self.record(
+                match err {
+                    FormatError::Malformed(_) => self.record(
                         EpubIssueCode::MalformedXhtml,
                         href,
-                        "chapter XHTML could not be parsed",
-                    );
+                        "chapter XHTML is malformed or exceeds the format layer limits",
+                    ),
+                    FormatError::Missing("chapter") => self.record(
+                        EpubIssueCode::MissingAsset,
+                        href,
+                        "chapter file is missing from the archive or could not be decompressed",
+                    ),
+                    _ => {}
                 }
                 return Err(err);
             }
@@ -231,8 +279,18 @@ impl<'a> EpubReader<'a> {
             .enumerate()
             .find_map(|(index, item)| {
                 let text = self.zip.read_text(&item.href)?;
-                let expanded = crate::entities::expand(&text);
-                let doc = roxmltree::Document::parse(&expanded).ok()?;
+                if text.len() > MAX_CHAPTER_BYTES {
+                    return None;
+                }
+                let expanded = crate::entities::normalized(&text);
+                if crate::entities::xml_too_deep(&expanded, MAX_XML_DEPTH) {
+                    return None;
+                }
+                let options = roxmltree::ParsingOptions {
+                    allow_dtd: true,
+                    nodes_limit: MAX_XML_NODES,
+                };
+                let doc = roxmltree::Document::parse_with_options(&expanded, options).ok()?;
                 let found = doc
                     .descendants()
                     .any(|node| node.is_element() && attr(node, "id") == Some(id));
@@ -313,21 +371,44 @@ fn build_chapter(
     let mut built = xhtml::build_document(&text, index as u32, &mut resolver)
         .map_err(|_| FormatError::Malformed("xhtml"))?;
     // 固有尺寸与 MIME 属于格式层：排版只认入参，不应该自己读图。
+    // 同一张图可能在一章里出现很多次；按 src 缓存，避免反复解压与线性查 manifest。
+    let mut mime_exact: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut mime_folded: BTreeMap<String, &str> = BTreeMap::new();
+    for asset in &book.assets {
+        mime_exact
+            .entry(asset.href.as_str())
+            .or_insert(&asset.media_type);
+        mime_folded
+            .entry(asset.href.to_ascii_lowercase())
+            .or_insert(&asset.media_type);
+    }
+    let mut images: BTreeMap<String, (Option<SizeF>, Option<String>)> = BTreeMap::new();
     for meta in &mut built.doc.images {
         let Some(src) = meta.src.clone() else {
             continue;
         };
-        let Some(bytes) = zip.read(&src) else {
-            continue;
-        };
+        let (size, mime) = images.entry(src.clone()).or_insert_with(|| {
+            let bytes = zip.read(&src);
+            let declared = mime_exact
+                .get(src.as_str())
+                .copied()
+                .or_else(|| mime_folded.get(&src.to_ascii_lowercase()).copied());
+            let size = bytes
+                .as_ref()
+                .and_then(|bytes| crate::image::image_size(bytes));
+            let mime = declared.map(str::to_string).or_else(|| {
+                bytes
+                    .as_ref()
+                    .and_then(|bytes| crate::image::image_mime(bytes))
+                    .map(str::to_string)
+            });
+            (size, mime)
+        });
         if meta.size.is_none() {
-            meta.size = crate::image::image_size(&bytes);
+            meta.size = *size;
         }
         if meta.mime.is_none() {
-            meta.mime = book
-                .asset(&src)
-                .map(|asset| asset.media_type.clone())
-                .or_else(|| crate::image::image_mime(&bytes).map(str::to_string));
+            meta.mime = mime.clone();
         }
     }
     built.doc.meta.title = book.title.clone();
@@ -380,13 +461,50 @@ struct Package {
 
 fn container_opf(zip: &ZipArchive<'_>) -> Option<String> {
     let text = zip.read_text("META-INF/container.xml")?;
-    let text = super::entities::expand(&text);
-    let doc = roxmltree::Document::parse(&text).ok()?;
+    if text.len() > MAX_PACKAGE_BYTES {
+        return None;
+    }
+    let text = super::entities::normalized(&text);
+    if super::entities::xml_too_deep(&text, MAX_XML_DEPTH) {
+        return None;
+    }
+    let options = roxmltree::ParsingOptions {
+        allow_dtd: true,
+        nodes_limit: 4_096,
+    };
+    let doc = roxmltree::Document::parse_with_options(&text, options).ok()?;
     doc.descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "rootfile")
         .and_then(|n| attr(n, "full-path"))
-        .map(|s| normalize_href(s))
+        .map(|s| path_from_href(s))
         .filter(|s| !s.is_empty())
+}
+
+/// 没有可用的 container 时按归档内容找包文档：优先浅层路径，再按名字稳定排序。
+fn find_package(zip: &ZipArchive<'_>) -> Option<String> {
+    let mut best: Option<&str> = None;
+    for name in zip.names() {
+        if !name.to_ascii_lowercase().ends_with(".opf") {
+            continue;
+        }
+        if name.eq_ignore_ascii_case("META-INF/container.xml") {
+            continue;
+        }
+        let key = (name.matches('/').count(), name.len(), name);
+        if best.is_none_or(|current| {
+            let current_key = (current.matches('/').count(), current.len(), current);
+            key < current_key
+        }) {
+            best = Some(name);
+        }
+    }
+    best.map(str::to_string)
+}
+
+/// container.xml 的 `full-path` 也是 URL 路径：百分号解码、反斜杠归一化。
+fn path_from_href(value: &str) -> String {
+    let value = percent_decode(value.trim());
+    join("", value.replace('\\', "/").trim_start_matches('/'))
 }
 
 fn parse_package(
@@ -394,10 +512,23 @@ fn parse_package(
     opf_path: &str,
     issues: &mut Vec<EpubIssue>,
 ) -> Result<Package, FormatError> {
-    let text = super::entities::expand(text);
-    let doc = roxmltree::Document::parse(&text).map_err(|_| FormatError::Malformed("opf"))?;
+    if text.len() > MAX_PACKAGE_BYTES {
+        return Err(FormatError::Malformed("opf"));
+    }
+    let text = super::entities::normalized(text);
+    if super::entities::xml_too_deep(&text, MAX_XML_DEPTH) {
+        return Err(FormatError::Malformed("opf"));
+    }
+    let options = roxmltree::ParsingOptions {
+        allow_dtd: true,
+        nodes_limit: MAX_XML_NODES,
+    };
+    let doc = roxmltree::Document::parse_with_options(&text, options)
+        .map_err(|_| FormatError::Malformed("opf"))?;
 
     let mut manifest: Vec<ManifestItem> = Vec::new();
+    let mut by_id: BTreeMap<String, usize> = BTreeMap::new();
+    let mut by_href: BTreeMap<String, usize> = BTreeMap::new();
     for node in doc.descendants() {
         if !node.is_element() || node.tag_name().name() != "item" {
             continue;
@@ -406,7 +537,7 @@ fn parse_package(
             continue;
         };
         let resolved = resolve_href(opf_path, href);
-        if manifest.iter().any(|item| item.id == id) {
+        if by_id.contains_key(id) {
             push_issue(
                 issues,
                 EpubIssueCode::DuplicateManifest,
@@ -415,7 +546,7 @@ fn parse_package(
             );
             continue;
         }
-        if manifest.iter().any(|item| item.href == resolved) {
+        if by_href.contains_key(&resolved) {
             push_issue(
                 issues,
                 EpubIssueCode::DuplicateManifest,
@@ -423,6 +554,8 @@ fn parse_package(
                 "manifest href is declared more than once",
             );
         }
+        by_id.insert(id.to_string(), manifest.len());
+        by_href.entry(resolved.clone()).or_insert(manifest.len());
         manifest.push(ManifestItem {
             id: id.to_string(),
             href: resolved,
@@ -446,7 +579,7 @@ fn parse_package(
         let Some(idref) = attr(node, "idref") else {
             continue;
         };
-        let Some(item) = manifest.iter().find(|item| item.id == idref) else {
+        let Some(item) = by_id.get(idref).and_then(|&index| manifest.get(index)) else {
             push_issue(
                 issues,
                 EpubIssueCode::MissingSpineItem,
@@ -595,16 +728,27 @@ fn find_cover(zip: &ZipArchive<'_>, package: &Package, book: &Book) -> Option<St
         }
     }
 
+    let mut seen: BTreeMap<String, ()> = BTreeMap::new();
+    let mut attempts = 0usize;
     for href in candidates {
+        if attempts >= MAX_COVER_CANDIDATES {
+            break;
+        }
+        if seen.insert(href.clone(), ()).is_some() {
+            continue;
+        }
+        attempts += 1;
         if is_image_asset(book, &href) {
             return Some(href);
         }
         // EPUB2 的封面常是一个包装页：跟到它的第一张图。
         if let Some(text) = zip.read_text(&href) {
-            if let Some(src) = first_img_src(&text) {
-                let resolved = resolve_href(&href, &src);
-                if is_image_asset(book, &resolved) || zip.has(&resolved) {
-                    return Some(resolved);
+            if text.len() <= MAX_COVER_BYTES {
+                if let Some(src) = first_img_src(&text) {
+                    let resolved = resolve_href(&href, &src);
+                    if is_image_asset(book, &resolved) || zip.has(&resolved) {
+                        return Some(resolved);
+                    }
                 }
             }
         }
@@ -619,8 +763,18 @@ fn is_image_asset(book: &Book, href: &str) -> bool {
 }
 
 fn first_img_src(text: &str) -> Option<String> {
-    let expanded = crate::entities::expand(text);
-    let doc = roxmltree::Document::parse(&expanded).ok()?;
+    if text.len() > MAX_PACKAGE_BYTES {
+        return None;
+    }
+    let expanded = crate::entities::normalized(text);
+    if crate::entities::xml_too_deep(&expanded, MAX_XML_DEPTH) {
+        return None;
+    }
+    let options = roxmltree::ParsingOptions {
+        allow_dtd: true,
+        nodes_limit: 100_000,
+    };
+    let doc = roxmltree::Document::parse_with_options(&expanded, options).ok()?;
     doc.descendants()
         .find(|n| n.is_element() && n.tag_name().name() == "img")
         .and_then(|n| attr(n, "src"))
@@ -633,8 +787,12 @@ fn collect_fonts(
     book: &mut Book,
     issues: &mut Vec<EpubIssue>,
 ) {
+    let mut seen_css: BTreeMap<String, ()> = BTreeMap::new();
     for item in &package.manifest {
         if !item.media_type.eq_ignore_ascii_case("text/css") {
+            continue;
+        }
+        if seen_css.insert(item.href.clone(), ()).is_some() {
             continue;
         }
         let Some(text) = zip.read_text(&item.href) else {
@@ -676,6 +834,15 @@ fn collect_fonts(
                 href,
                 bytes,
             });
+            if book.fonts.len() >= MAX_FONTS {
+                push_issue(
+                    issues,
+                    EpubIssueCode::MissingAsset,
+                    None,
+                    "embedded font count exceeds the format layer limit; remaining faces were skipped",
+                );
+                return;
+            }
         }
     }
 }
@@ -698,10 +865,21 @@ fn collect_toc(
     issues: &mut Vec<EpubIssue>,
 ) {
     let mut rows: Vec<TocRow> = Vec::new();
+    let mut nav_docs = 0usize;
     for item in &package.manifest {
         if !has_property(&item.properties, "nav") {
             continue;
         }
+        if nav_docs >= MAX_NAV_DOCS {
+            push_issue(
+                issues,
+                EpubIssueCode::BadNav,
+                Some(item.href.clone()),
+                "too many navigation documents; remaining candidates were skipped",
+            );
+            break;
+        }
+        nav_docs += 1;
         match zip.read_text(&item.href) {
             Some(text) => match parse_nav(&text, &item.href) {
                 Ok(found) if !found.is_empty() => {
@@ -766,8 +944,21 @@ fn collect_toc(
         }
     }
 
+    let mut spine_exact: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut spine_folded: BTreeMap<String, usize> = BTreeMap::new();
+    for (index, item) in book.spine.iter().enumerate() {
+        spine_exact.entry(item.href.as_str()).or_insert(index);
+        spine_folded
+            .entry(item.href.to_ascii_lowercase())
+            .or_insert(index);
+    }
     for row in rows {
-        let spine = book.spine_index(&row.path).unwrap_or(TocEntry::NO_SPINE);
+        let folded = row.path.to_ascii_lowercase();
+        let spine = spine_exact
+            .get(row.path.as_str())
+            .or_else(|| spine_folded.get(&folded))
+            .copied()
+            .unwrap_or(TocEntry::NO_SPINE);
         if spine == TocEntry::NO_SPINE {
             push_issue(
                 issues,
@@ -787,8 +978,18 @@ fn collect_toc(
 }
 
 fn parse_nav(text: &str, nav_path: &str) -> Result<Vec<TocRow>, ()> {
-    let expanded = crate::entities::expand(text);
-    let doc = roxmltree::Document::parse(&expanded).map_err(|_| ())?;
+    if text.len() > MAX_NAV_BYTES {
+        return Err(());
+    }
+    let expanded = crate::entities::normalized(text);
+    if crate::entities::xml_too_deep(&expanded, MAX_XML_DEPTH) {
+        return Err(());
+    }
+    let options = roxmltree::ParsingOptions {
+        allow_dtd: true,
+        nodes_limit: MAX_XML_NODES,
+    };
+    let doc = roxmltree::Document::parse_with_options(&expanded, options).map_err(|_| ())?;
     let nav = doc
         .descendants()
         .find(|node| node.is_element() && node.tag_name().name() == "nav" && is_toc_nav(*node));
@@ -813,10 +1014,16 @@ fn is_toc_nav(node: roxmltree::Node<'_, '_>) -> bool {
 }
 
 fn nav_list(list: roxmltree::Node<'_, '_>, base: &str, depth: u16, out: &mut Vec<TocRow>) {
+    if depth > MAX_TOC_DEPTH || out.len() >= MAX_TOC_ENTRIES {
+        return;
+    }
     for item in list
         .children()
         .filter(|node| node.is_element() && node.tag_name().name() == "li")
     {
+        if out.len() >= MAX_TOC_ENTRIES {
+            break;
+        }
         let (label, href) = nav_label(item);
         let mut children = Vec::new();
         for child in item
@@ -826,7 +1033,7 @@ fn nav_list(list: roxmltree::Node<'_, '_>, base: &str, depth: u16, out: &mut Vec
             nav_list(child, base, depth.saturating_add(1), &mut children);
         }
         if label.is_empty() && href.as_deref().unwrap_or("").is_empty() {
-            out.extend(children);
+            append_toc(out, children);
             continue;
         }
         let (path, fragment) = match href {
@@ -839,7 +1046,16 @@ fn nav_list(list: roxmltree::Node<'_, '_>, base: &str, depth: u16, out: &mut Vec
             fragment,
             depth,
         });
-        out.extend(children);
+        append_toc(out, children);
+    }
+}
+
+fn append_toc(out: &mut Vec<TocRow>, rows: Vec<TocRow>) {
+    for row in rows {
+        if out.len() >= MAX_TOC_ENTRIES {
+            break;
+        }
+        out.push(row);
     }
 }
 
@@ -856,7 +1072,10 @@ fn nav_label(item: roxmltree::Node<'_, '_>) -> (String, Option<String>) {
 fn first_nav_link<'a, 'input>(
     node: roxmltree::Node<'a, 'input>,
 ) -> Option<roxmltree::Node<'a, 'input>> {
-    for child in node.children().filter(|child| child.is_element()) {
+    let mut stack: Vec<roxmltree::Node<'a, 'input>> =
+        node.children().filter(|child| child.is_element()).collect();
+    stack.reverse();
+    while let Some(child) = stack.pop() {
         let name = child.tag_name().name();
         if matches!(name, "ol" | "ul") {
             continue;
@@ -864,9 +1083,7 @@ fn first_nav_link<'a, 'input>(
         if name == "a" {
             return Some(child);
         }
-        if let Some(found) = first_nav_link(child) {
-            return Some(found);
-        }
+        stack.extend(child.children().filter(|child| child.is_element()).rev());
     }
     None
 }
@@ -895,8 +1112,18 @@ fn text_content(node: roxmltree::Node<'_, '_>) -> String {
 }
 
 fn parse_ncx(text: &str, ncx_path: &str) -> Result<Vec<TocRow>, ()> {
-    let expanded = crate::entities::expand(text);
-    let doc = roxmltree::Document::parse(&expanded).map_err(|_| ())?;
+    if text.len() > MAX_NAV_BYTES {
+        return Err(());
+    }
+    let expanded = crate::entities::normalized(text);
+    if crate::entities::xml_too_deep(&expanded, MAX_XML_DEPTH) {
+        return Err(());
+    }
+    let options = roxmltree::ParsingOptions {
+        allow_dtd: true,
+        nodes_limit: MAX_XML_NODES,
+    };
+    let doc = roxmltree::Document::parse_with_options(&expanded, options).map_err(|_| ())?;
     let nav_map = doc
         .descendants()
         .find(|node| node.is_element() && node.tag_name().name() == "navMap");
@@ -909,10 +1136,16 @@ fn parse_ncx(text: &str, ncx_path: &str) -> Result<Vec<TocRow>, ()> {
 }
 
 fn ncx_points(parent: roxmltree::Node<'_, '_>, base: &str, depth: u16, out: &mut Vec<TocRow>) {
+    if depth > MAX_TOC_DEPTH || out.len() >= MAX_TOC_ENTRIES {
+        return;
+    }
     for point in parent
         .children()
         .filter(|node| node.is_element() && node.tag_name().name() == "navPoint")
     {
+        if out.len() >= MAX_TOC_ENTRIES {
+            break;
+        }
         let label = point
             .children()
             .find(|node| node.is_element() && node.tag_name().name() == "navLabel")
@@ -935,7 +1168,7 @@ fn ncx_points(parent: roxmltree::Node<'_, '_>, base: &str, depth: u16, out: &mut
         let mut children = Vec::new();
         ncx_points(point, base, depth.saturating_add(1), &mut children);
         if label.is_empty() && path.is_empty() {
-            out.extend(children);
+            append_toc(out, children);
             continue;
         }
         out.push(TocRow {
@@ -944,7 +1177,7 @@ fn ncx_points(parent: roxmltree::Node<'_, '_>, base: &str, depth: u16, out: &mut
             fragment,
             depth,
         });
-        out.extend(children);
+        append_toc(out, children);
     }
 }
 
@@ -1053,7 +1286,11 @@ fn split_href(base: &str, href: &str) -> (String, Option<String>) {
 
 fn normalize_href(value: &str) -> String {
     let value = value.trim().trim_start_matches('/');
-    value.to_string()
+    if value.contains('\\') {
+        value.replace('\\', "/")
+    } else {
+        value.to_string()
+    }
 }
 
 fn has_property(properties: &str, wanted: &str) -> bool {

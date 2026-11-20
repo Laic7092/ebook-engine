@@ -6,6 +6,18 @@ use ebook_ir::{
     Tag, TextAlign, TextTransform, VerticalAlign, WhiteSpace, WordBreak, WritingMode,
 };
 
+/// 异常 CSS 的硬边界。真实书远低于这些值；限额把病态输入变成确定性的截断，
+/// 而不是让栈溢出或 `cascade` 跑成 O(nodes × rules × depth) 的无底洞。
+const MAX_CSS_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CSS_NESTING: usize = 32;
+const MAX_RULES: usize = 16_384;
+const MAX_FONT_FACES: usize = 256;
+const MAX_DECLS: usize = 2_048;
+const MAX_RULE_BODY_BYTES: usize = 4 * 1024 * 1024;
+const MAX_SELECTOR_BYTES: usize = 4_096;
+const MAX_SELECTOR_COMPOUNDS: usize = 32;
+const MAX_CASCADE_STEPS: usize = 20_000_000;
+
 #[derive(Clone, Debug)]
 pub struct Decl {
     pub name: String,
@@ -89,7 +101,7 @@ pub struct StyleSheet {
 
 impl StyleSheet {
     pub fn parse_into(&mut self, css: &str) {
-        self.parse_level(css);
+        self.parse_level(truncate_utf8(css, MAX_CSS_BYTES), 0);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -112,7 +124,15 @@ impl StyleSheet {
 
     /// 逐层解析。`@media` 只取 screen（或无条件）分支，`@font-face` 收集起来，
     /// 其余块级 at-rule（`@supports` / `@document` / `@layer`）按无条件处理。
-    fn parse_level(&mut self, css: &str) {
+    fn parse_level(&mut self, css: &str, depth: usize) {
+        if self.rules.len() >= MAX_RULES {
+            self.note_unsupported("@rules");
+            return;
+        }
+        if depth > MAX_CSS_NESTING {
+            self.note_unsupported("@nesting");
+            return;
+        }
         let bytes = css.as_bytes();
         let mut i = 0usize;
         while i < bytes.len() {
@@ -150,11 +170,14 @@ impl StyleSheet {
                 match name.as_str() {
                     "media" => {
                         if media_is_screen(&css[j..k]) {
-                            self.parse_level(body);
+                            self.parse_level(body, depth + 1);
                         }
                     }
-                    "supports" | "document" | "layer" => self.parse_level(body),
-                    "font-face" => {
+                    "supports" | "document" | "layer" => self.parse_level(body, depth + 1),
+                    "font-face"
+                        if self.font_faces.len() < MAX_FONT_FACES
+                            && body.len() <= MAX_RULE_BODY_BYTES =>
+                    {
                         if let Some(face) = parse_font_face(body) {
                             self.font_faces.push(face);
                         }
@@ -179,6 +202,10 @@ impl StyleSheet {
             let end = match_brace(bytes, i);
             let body = &css[i + 1..end];
             i = end.saturating_add(1);
+            if body.len() > MAX_RULE_BODY_BYTES {
+                self.note_unsupported("@rule");
+                continue;
+            }
             let decls = parse_decls(body);
             if decls.is_empty() {
                 continue;
@@ -189,6 +216,14 @@ impl StyleSheet {
                 }
             }
             for selector_text in selector_text.split(',') {
+                if self.rules.len() >= MAX_RULES {
+                    self.note_unsupported("@rules");
+                    break;
+                }
+                if selector_text.len() > MAX_SELECTOR_BYTES {
+                    self.note_unsupported("@selector");
+                    continue;
+                }
                 if let Some(selector) = parse_selector(selector_text) {
                     let spec = specificity(&selector);
                     self.rules.push(Rule {
@@ -206,6 +241,9 @@ impl StyleSheet {
 pub fn parse_decls(body: &str) -> Vec<Decl> {
     let mut out = Vec::new();
     for part in body.split(';') {
+        if out.len() >= MAX_DECLS {
+            break;
+        }
         let part = part.trim();
         if part.is_empty() {
             continue;
@@ -482,7 +520,10 @@ fn match_brace(bytes: &[u8], open: usize) -> usize {
 
 pub fn cascade(doc: &mut StyledDoc, keys: &[ElemKey], sheet: &StyleSheet) {
     let order: Vec<NodeId> = doc.walk().collect();
+    let aux = MatchAux::new(doc, keys);
     let mut matched: Vec<(Spec, usize)> = Vec::new();
+    let mut budget = MAX_CASCADE_STEPS;
+    let mut exhausted = false;
     for id in order {
         let parent_style = doc
             .node(id)
@@ -493,9 +534,15 @@ pub fn cascade(doc: &mut StyledDoc, keys: &[ElemKey], sheet: &StyleSheet) {
         ua_apply(&mut style, keys[id as usize].tag);
 
         matched.clear();
-        for (i, rule) in sheet.rules.iter().enumerate() {
-            if matches(doc, keys, id, &rule.selector) {
-                matched.push((rule.spec, i));
+        if !exhausted {
+            for (i, rule) in sheet.rules.iter().enumerate() {
+                if budget == 0 {
+                    exhausted = true;
+                    break;
+                }
+                if matches(doc, keys, &aux, id, &rule.selector, &mut budget) {
+                    matched.push((rule.spec, i));
+                }
             }
         }
         matched.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
@@ -521,6 +568,42 @@ pub fn cascade(doc: &mut StyledDoc, keys: &[ElemKey], sheet: &StyleSheet) {
             apply(&mut style, decl, parent_size, parent_weight, parent_color);
         }
         doc.node_mut(id).style = style;
+    }
+}
+
+/// 预先算好元素兄弟关系，避免每个节点都重新扫一遍 `kids`：
+/// `li + li` / `li:last-child` 这类规则在长列表上原本是 O(n²)。
+struct MatchAux {
+    prev_element: Vec<Option<NodeId>>,
+    first_element: Vec<Option<NodeId>>,
+    last_element: Vec<Option<NodeId>>,
+}
+
+impl MatchAux {
+    fn new(doc: &StyledDoc, keys: &[ElemKey]) -> Self {
+        let count = doc.nodes.len();
+        let mut aux = Self {
+            prev_element: alloc::vec![None; count],
+            first_element: alloc::vec![None; count],
+            last_element: alloc::vec![None; count],
+        };
+        let mut last_by_parent = alloc::vec![None; count];
+        for id in doc.walk() {
+            if !keys[id as usize].is_element {
+                continue;
+            }
+            let Some(parent) = doc.node(id).parent else {
+                continue;
+            };
+            let parent = parent as usize;
+            if aux.first_element[parent].is_none() {
+                aux.first_element[parent] = Some(id);
+            }
+            aux.last_element[parent] = Some(id);
+            aux.prev_element[id as usize] = last_by_parent[parent];
+            last_by_parent[parent] = Some(id);
+        }
+        aux
     }
 }
 
@@ -1276,6 +1359,9 @@ fn parse_selector(text: &str) -> Option<Vec<Compound>> {
         } else {
             compound.combinator = pending.take().unwrap_or(Combinator::Descendant);
         }
+        if out.len() >= MAX_SELECTOR_COMPOUNDS {
+            return None;
+        }
         out.push(compound);
     }
     if pending.is_some() || out.is_empty() {
@@ -1391,33 +1477,7 @@ fn compound_matches(key: &ElemKey, compound: &Compound) -> bool {
     true
 }
 
-/// 只看元素兄弟的第一个/最后一个孩子；文本、换行等非元素节点跳过。
-fn element_child(doc: &StyledDoc, keys: &[ElemKey], parent: NodeId, last: bool) -> Option<NodeId> {
-    let kids = doc.kids(parent);
-    if last {
-        kids.iter()
-            .rev()
-            .copied()
-            .find(|&kid| keys[kid as usize].is_element)
-    } else {
-        kids.iter()
-            .copied()
-            .find(|&kid| keys[kid as usize].is_element)
-    }
-}
-
-fn previous_element_sibling(doc: &StyledDoc, keys: &[ElemKey], node: NodeId) -> Option<NodeId> {
-    let parent = doc.node(node).parent?;
-    let kids = doc.kids(parent);
-    let index = kids.iter().position(|&kid| kid == node)?;
-    kids[..index]
-        .iter()
-        .rev()
-        .copied()
-        .find(|&kid| keys[kid as usize].is_element)
-}
-
-fn pseudo_matches(doc: &StyledDoc, keys: &[ElemKey], node: NodeId, compound: &Compound) -> bool {
+fn pseudo_matches(doc: &StyledDoc, aux: &MatchAux, node: NodeId, compound: &Compound) -> bool {
     if compound.pseudos.is_empty() {
         return true;
     }
@@ -1427,8 +1487,8 @@ fn pseudo_matches(doc: &StyledDoc, keys: &[ElemKey], node: NodeId, compound: &Co
     };
     for pseudo in &compound.pseudos {
         let hit = match pseudo {
-            PseudoClass::FirstChild => element_child(doc, keys, parent, false),
-            PseudoClass::LastChild => element_child(doc, keys, parent, true),
+            PseudoClass::FirstChild => aux.first_element[parent as usize],
+            PseudoClass::LastChild => aux.last_element[parent as usize],
         };
         if hit != Some(node) {
             return false;
@@ -1439,24 +1499,37 @@ fn pseudo_matches(doc: &StyledDoc, keys: &[ElemKey], node: NodeId, compound: &Co
 
 /// 从右往左匹配。遇到 `>` 固定检查直接父节点，遇到 `+` 只检查紧邻的元素兄弟；
 /// 后代组合器逐个向上找，找不到就返回 false。
-fn matches(doc: &StyledDoc, keys: &[ElemKey], node: NodeId, selector: &[Compound]) -> bool {
+fn matches(
+    doc: &StyledDoc,
+    keys: &[ElemKey],
+    aux: &MatchAux,
+    node: NodeId,
+    selector: &[Compound],
+    budget: &mut usize,
+) -> bool {
     let Some(last) = selector.len().checked_sub(1) else {
         return false;
     };
-    match_at(doc, keys, node, selector, last)
+    match_at(doc, keys, aux, node, selector, last, budget)
 }
 
 fn match_at(
     doc: &StyledDoc,
     keys: &[ElemKey],
+    aux: &MatchAux,
     node: NodeId,
     selector: &[Compound],
     index: usize,
+    budget: &mut usize,
 ) -> bool {
+    if *budget == 0 {
+        return false;
+    }
+    *budget -= 1;
     let compound = &selector[index];
     if !keys[node as usize].is_element
         || !compound_matches(&keys[node as usize], compound)
-        || !pseudo_matches(doc, keys, node, compound)
+        || !pseudo_matches(doc, aux, node, compound)
     {
         return false;
     }
@@ -1467,7 +1540,7 @@ fn match_at(
         Combinator::Descendant => {
             let mut ancestor = doc.node(node).parent;
             while let Some(candidate) = ancestor {
-                if match_at(doc, keys, candidate, selector, index - 1) {
+                if match_at(doc, keys, aux, candidate, selector, index - 1, budget) {
                     return true;
                 }
                 ancestor = doc.node(candidate).parent;
@@ -1477,10 +1550,21 @@ fn match_at(
         Combinator::Child => doc
             .node(node)
             .parent
-            .is_some_and(|parent| match_at(doc, keys, parent, selector, index - 1)),
-        Combinator::AdjacentSibling => previous_element_sibling(doc, keys, node)
-            .is_some_and(|sibling| match_at(doc, keys, sibling, selector, index - 1)),
+            .is_some_and(|parent| match_at(doc, keys, aux, parent, selector, index - 1, budget)),
+        Combinator::AdjacentSibling => aux.prev_element[node as usize]
+            .is_some_and(|sibling| match_at(doc, keys, aux, sibling, selector, index - 1, budget)),
     }
+}
+
+fn truncate_utf8(value: &str, max: usize) -> &str {
+    if value.len() <= max {
+        return value;
+    }
+    let mut end = max;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 fn skip_space_and_comments(bytes: &[u8], mut i: usize) -> usize {

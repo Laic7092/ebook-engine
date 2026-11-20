@@ -59,12 +59,31 @@ face 下标。`FontId::NONE = u16::MAX`。
 | 项 | 默认/上限 | 超限行为 | 位置 |
 |---|---:|---|---|
 | ZIP EOCD 搜索窗口 | 最后 `66_000` 字节 | 找不到返回 `BadSignature` → `Malformed("zip")` | `zip.rs` |
+| ZIP 中央目录条目 | `1_000_000` | 超出 `Unsupported` → `Malformed("zip")` | `zip.rs` |
+| ZIP64 | EOCD / 中央目录 size+offset | 支持；字段损坏返回 `Truncated`/`Unsupported` | `zip.rs` |
 | ZIP 压缩方法 | `0` stored / `8` deflate | 其他方法 `read` 返回 `None` → 章节 `Missing` | `zip.rs` |
-| ZIP 文件名 | 必须 UTF-8 | 非 UTF-8 → `Malformed("zip")` | `zip.rs` |
+| ZIP 文件名 | UTF-8 | 单个非 UTF-8 条目跳过，不再拖垮整包 | `zip.rs` |
+| ZIP 单条目解压 | `64 MiB` | 超出返回 `None` → 对应资产/章节 `Missing` | `zip.rs` |
 | EPUB mimetype | 必须以 `application/epub+zip` 开头 | 不匹配时 probe 降为 `Maybe` | `epub.rs` |
+| container.xml | 缺失/坏/指向不存在的 OPF | 回退扫描归档内 `.opf`，并记 `MissingAsset` issue；找不到才报错 | `epub.rs` |
+| 包文档/导航文档 | `16 MiB`；XML 深度 `128`；节点 `1_000_000` | 超限 `Malformed("opf")` 或跳过该导航源 | `epub.rs` |
+| 章节 XHTML | `32 MiB`；解析器深度 `128`；构建深度 `64`；节点 `1_048_576` | 超限 `Malformed("xhtml")`，只失败该章并记 issue | `xhtml.rs` |
+| 章节文本 | `20_000_000` 字节 | 超限 `Malformed("xhtml")` | `xhtml.rs` |
+| 章节锚点路径总量 | `8_000_000` 项 | 超限 `Malformed("xhtml")` | `xhtml.rs` |
+| 单章图片数 | `u16::MAX` | 超限 `Malformed("xhtml")`（`ImageId` 是 u16） | `xhtml.rs` |
+| CSS 输入 | `16 MiB` | 在 UTF-8 边界截断 | `css.rs` |
+| CSS 规则数 | `16_384` | 保留已解析前缀，记不支持项 | `css.rs` |
+| CSS at-rule 嵌套 | `32` 层 | 更深分支跳过，记不支持项 | `css.rs` |
+| CSS 选择器 | `4 KiB` / `32` 个复合选择器 | 整条规则丢弃 | `css.rs` |
+| CSS 单规则体 | `4 MiB` | 整条规则跳过 | `css.rs` |
+| CSS 声明数 | `2_048` / 规则 | 保留前缀 | `css.rs` |
+| CSS 级联匹配预算 | `20_000_000` 步 | 用尽后停止应用样式表规则（仍保留行内样式） | `css.rs` |
+| 内嵌字体数 | `1_024` | 超出记 `MissingAsset`，剩余跳过 | `epub.rs` |
+| 目录深度/条目 | `64` 层 / `100_000` 条 | 更深/更多条目截断 | `epub.rs` |
 | spine 下标 | `0..len` | 越界 `FormatError::OutOfRange` | `chapter` |
-| 章节文件 | 必须存在且可解压 | 缺失 `Missing("chapter")` | `epub.rs` |
-| 文本编码 | UTF-8（lossy 解码） | 非法字节替换为 U+FFFD | `txt.rs` / `zip.rs` |
+| 章节文件 | 必须存在且可解压 | 缺失 `Missing("chapter")` 并记 `MissingAsset` | `epub.rs` |
+| 文本编码 | UTF-8（含 BOM）/ UTF-16 LE+BE / latin-1 / windows-1252 | 其它非法字节替换为 U+FFFD | `txt.rs` / `zip.rs` |
+| XML 非法控制字符 | XML 1.0 合法字符集 | 替换为 U+FFFD 后继续解析 | `entities.rs` |
 | CSS 未知属性/值 | 忽略 | 不影响打开 | `css.rs` |
 | 未命名实体 | 保留原文本 | 例如 `&bogus;` 原样进入正文 | `entities.rs` |
 
@@ -88,7 +107,7 @@ face 下标。`FontId::NONE = u16::MAX`。
 | IR magic | `EBIR` | 4 字节 |
 | IR header | `8` 字节 | magic + major/minor（LE u16） |
 | IR 版本 | `1.4` | 见 [api.md](api.md#33-版本与兼容策略) |
-| wasm gzip 预算 | `512 KiB` | `xtask size`；core 与 core+epub 分别卡 |
+| wasm gzip 预算 | `544 KiB` | `xtask size`；core 与 core+epub 分别卡 |
 | `wasm-bindgen` | `0.2.129` | 与 `ebook-web` 精确锁定 |
 | wasm target | `wasm32-unknown-unknown` | `rust-toolchain.toml` |
 
