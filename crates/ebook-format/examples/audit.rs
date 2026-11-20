@@ -55,8 +55,8 @@ fn main() -> ExitCode {
         }
 
         let (mut ok, mut empty, mut errs) = (0usize, 0usize, 0usize);
-        for index in 0..book.spine.len() {
-            let href = &book.spine[index].href;
+        for (index, entry) in book.spine.iter().enumerate() {
+            let href = &entry.href;
             match reader.chapter(index) {
                 Ok(doc) if doc.text.is_empty() => {
                     empty += 1;
