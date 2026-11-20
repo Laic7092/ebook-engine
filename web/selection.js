@@ -18,7 +18,22 @@ function now() {
 }
 
 export function createSelection(options) {
-  const { canvas, page, hit, select, linkAt, onLink, onTap, onSwipe, setStatus, onChange } = options;
+  const {
+    canvas,
+    page,
+    hit,
+    select,
+    linkAt,
+    onLink,
+    onTap,
+    onSwipe,
+    onSwipeStart,
+    onSwipeMove,
+    onSwipeEnd,
+    onSwipeCancel,
+    setStatus,
+    onChange,
+  } = options;
 
   let anchor = null;
   let focus = null;

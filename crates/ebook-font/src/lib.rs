@@ -397,6 +397,24 @@ impl FontBook {
         self.is_synthetic(id) && id.0 & SYNTH_ITALIC != 0
     }
 
+    /// 把 face 换成“同一 family 的合成粗体”（已经是粗体时原样返回）。
+    ///
+    /// 排版层按 CSS `font-weight` 选 face，宿主级的“全局加粗”开关则没有 CSS 来源：
+    /// 它只能作用在绘制阶段，而绘制只拿到 `FontId`。这个方法就是那条转换。
+    /// 与 `is_synthetic_bold` 对称，不引入新的状态。
+    pub fn bold_face(&self, id: FontId) -> FontId {
+        let base = self.base_font(id);
+        let Some(metrics) = self.faces.get(base.0 as usize) else {
+            return id;
+        };
+        if metrics.desc.weight >= 600 {
+            return id;
+        }
+        // 保留 italic 位：斜体合成与粗体合成共用同一个 id 空间。
+        let kept = id.0 & (SYNTH_BASE_MASK | SYNTH_ITALIC);
+        FontId(SYNTH_FLAG | SYNTH_BOLD | kept)
+    }
+
     fn synthesize(&self, base: FontId, weight: u16, style: FontStyle) -> FontId {
         if base.0 > SYNTH_BASE_MASK {
             return base;

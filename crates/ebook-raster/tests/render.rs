@@ -443,3 +443,70 @@ fn to_ppm_is_byte_identical_across_runs_and_op_order() {
     assert_eq!(a.to_ppm(), b.to_ppm());
     assert_eq!(a.to_ppm(), c.to_ppm());
 }
+
+/// 下划线是 `GlyphRun` 的属性，宽度按 advance 求和：字形中间是墨，
+/// 基线下方 `size * 0.08` 处有一条同色的横条。
+#[test]
+fn underline_is_drawn_below_the_baseline() {
+    let mut ir = blank_ir();
+    for gid in [1u16, 2] {
+        ir.display.glyphs.push(Glyph {
+            gid,
+            dx: 10.0,
+            dy: 0.0,
+            ch: 0,
+        });
+    }
+    let run = GlyphRun {
+        font: FontId(0),
+        size: 16.0,
+        color: Rgba8::BLACK,
+        origin: PointF::new(20.0, 30.0),
+        glyphs: Span::new(0, 2),
+        text: String::from("AB"),
+        dir: Dir::Ltr,
+        rotate: Rotate::None,
+        weight: 400,
+        style: ebook_ir::FontStyle::Normal,
+        underline: true,
+    };
+    append_op(&mut ir, Op::GlyphRun(run));
+
+    let mut surface = RgbaSurface::new(200, 200);
+    render(&ir, &mut surface);
+
+    // 16px 字号：横条从 y = 30 + max(1, 1.28) ≈ 31 开始，厚度 max(1, 0.88) = 1。
+    assert_eq!(surface.pixel(20, 31), Some(Rgba8::BLACK));
+    assert_eq!(surface.pixel(39, 31), Some(Rgba8::BLACK));
+    // 宽度是 advance 之和，右端之外不该有横条。
+    assert_eq!(surface.pixel(41, 31), Some(Rgba8::WHITE));
+    // 横条只有一行高：再往下就是纸面。
+    assert_eq!(surface.pixel(20, 33), Some(Rgba8::WHITE));
+}
+
+/// 链接的 UA 样式（蓝色 + 下划线）现在由引擎画：字形用资源给的蒙版，
+/// 下划线用 `GlyphRun.color`。这条以前是 `tests/app.mjs` 里的 JS 断言。
+#[test]
+fn link_text_is_blue_and_underlined() {
+    let html = r##"<html><body><p style="margin:0;font-size:16px"><a href="#x">link</a></p></body></html>"##;
+    let doc: StyledDoc =
+        ebook_format::xhtml::build(html, 0, &mut NoAssets).expect("xhtml");
+    let env = LayoutEnv {
+        measurer: &StubMeasurer,
+        resources: &NoImageSizes,
+    };
+    let constraint = PageConstraint::new(200.0, 120.0).with_margin(EdgesF::all(0.0));
+    let ir = layout(&doc, &env, &constraint);
+    let run = first_run(&ir);
+    assert!(run.underline, "UA 样式给链接加下划线");
+    assert_eq!(run.color, Rgba8::new(26, 95, 180, 255), "UA 链接蓝");
+
+    let mut surface = RgbaSurface::new(200, 120);
+    render(&ir, &mut surface);
+    let blue = surface
+        .pixels()
+        .iter()
+        .filter(|pixel| **pixel == Rgba8::new(26, 95, 180, 255))
+        .count();
+    assert!(blue > 0, "下划线用 run.color 画，页面上应该有纯链接蓝像素");
+}

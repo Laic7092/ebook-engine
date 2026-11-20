@@ -270,6 +270,18 @@ impl RgbaSurface {
         out
     }
 
+    /// 打包成 RGBA8（每像素 4 字节，行优先，无填充）。
+    ///
+    /// 与 [`to_ppm`](Self::to_ppm) 同源：像素值完全相同，只是去掉 PPM 头。
+    /// 宿主直接把这段字节交给 `ImageData` / `putImageData` 即可。
+    pub fn to_rgba(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.pixels.len() * 4);
+        for pixel in &self.pixels {
+            out.extend_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
+        }
+        out
+    }
+
     /// 当前生效的裁剪范围，已经与画布求过交。
     fn clip(&self) -> Clip {
         self.clips.last().copied().unwrap_or(Clip {
@@ -608,6 +620,16 @@ impl Surface for RgbaSurface {
                 self.draw_glyph(run.color, &bitmap, origin_x, origin_y);
             }
             pen_x += advance;
+        }
+        if run.underline {
+            // 下划线是 `GlyphRun` 的属性：宽度按已经结算好的 advance 求和，
+            // 所以两端对齐撑开的字距也会跟着变长。
+            let width = pen_x - run.origin.x;
+            if width > 0.0 {
+                let y = baseline + (run.size * 0.08).max(1.0);
+                let height = (run.size * 0.055).max(1.0);
+                self.rect(RectF::new(run.origin.x, y, width, height), run.color);
+            }
         }
     }
 

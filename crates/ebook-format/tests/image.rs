@@ -1,6 +1,6 @@
 //! 图片头解析：PNG / JPEG / GIF / WebP / SVG 与截断输入。
 
-use ebook_format::image::{decode_png, image_mime, image_size};
+use ebook_format::image::{decode_image, decode_png, image_mime, image_size};
 
 #[test]
 fn png_ihdr_gives_the_size() {
@@ -186,4 +186,27 @@ fn fixture_epub() -> Vec<u8> {
         "/../../fixtures/images.epub"
     ))
     .expect("fixtures/images.epub")
+}
+
+/// JPEG 走 `zune-jpeg`。真图来自 Go 标准库的测试图（4:2:0 色度抽样），
+/// 夹具说明见 `fixtures/media/README.md`。
+#[test]
+fn jpeg_decodes_to_rgba() {
+    let bytes = include_bytes!("../../../fixtures/media/go-video-001-q50-420.jpg");
+    let size = image_size(bytes).expect("jpeg size");
+    let image = decode_image(bytes).expect("jpeg decode");
+    assert_eq!((image.w as f32, image.h as f32), (size.w, size.h));
+    assert_eq!(image.rgba.len(), image.w as usize * image.h as usize * 4);
+    assert!(
+        image.rgba.as_chunks::<4>().0.iter().all(|px| px[3] == 255),
+        "JPEG 没有 alpha 通道，补齐成不透明"
+    );
+}
+
+/// 不认识的格式给 `None`，不 panic：渲染层据此画占位。
+#[test]
+fn unknown_image_bytes_are_not_decoded() {
+    assert!(decode_image(b"GIF89a").is_none());
+    assert!(decode_image(b"RIFF....WEBPVP8 ").is_none());
+    assert!(decode_image(&[0xff, 0xd8, 0xff]).is_none());
 }

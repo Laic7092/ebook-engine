@@ -10,8 +10,13 @@ use ebook_font::FontBook;
 use ebook_format::epub::EpubReader;
 use ebook_format::txt::TxtReader;
 use ebook_format::{Book, ChapterAnchor, ChapterLinks, FormatError, LinkTarget};
-use ebook_ir::{codec, EdgesF, FontId, LayoutResult, Location, PointF, StyledDoc};
+use ebook_ir::{
+    codec, EdgesF, FontId, GlyphBitmap, ImageData, ImageId, LayoutResult, Location, PointF,
+    Resources, Rgba8, StyledDoc,
+};
 use ebook_layout::{Layout, LayoutEnv, NoImageSizes, PageConstraint, Reader, StubMeasurer};
+use ebook_raster::{RgbaSurface, Tone};
+use ebook_render::ScaledSurface;
 
 static BOOK: Mutex<Option<Backend>> = Mutex::new(None);
 static FONT: Mutex<Option<FontBook>> = Mutex::new(None);
@@ -127,6 +132,8 @@ pub fn open_file(bytes: &[u8], name: &str) -> String {
 fn install(backend: Backend) -> String {
     let json = book_json(backend.book());
     *BOOK.lock().unwrap() = Some(backend);
+    // 图片缓存属于上一本书：href 空间会变，留着只会浪费内存。
+    IMAGES.lock().unwrap().clear();
     json
 }
 
@@ -150,27 +157,193 @@ pub fn reset_fonts() {
     clear_font_error();
 }
 
-/// 宿主按 `GlyphRun` 的 glyph id 取回光栅位图，自己合成页面。
+/// 当前章整页 RGBA：引擎自己在 wasm 上把一页画完，宿主只负责 `putImageData`。
 ///
-/// 返回 8 字节小端头 + `w*h` 的 alpha：
-/// `[w:u16, h:u16, left:i16, top:i16, alpha...]`。
-/// `left/top` 是相对整像素落点的偏移，`top` 为负；没有位图时返回空数组。
-/// 合成粗体/斜体在 `FontBook` 内部完成，宿主不需要再猜浏览器会不会合成。
-pub fn glyph_bitmap(font: u32, gid: u32, px: f32, dx: f32, dy: f32) -> Vec<u8> {
-    let slot = FONT.lock().unwrap();
-    let Some(book) = slot.as_ref() else {
+/// 返回 8 字节小端头 + 像素：`[w:u32, h:u32, rgba...]`，后面是 `w*h*4` 字节。
+/// `scale` 是设备像素比（非有限/`<=0` 按 1，上限 4）；`ink` / `paper` 是
+/// `0xRRGGBBAA`：`ink` 为 `0` 时不做墨色/伽马修正，`paper` 为 `0` 时是白纸。
+/// 主题反转仍由宿主做（引擎只认纸色/墨色，不认识 sepia/dark）。
+/// `bold` 是宿主的“全局加粗”开关：绘制阶段把 face 换成同一 family 的合成粗体。
+///
+/// 与 native `--ppm` 走同一个 `paint()` + `RgbaSurface`，所以两边几何一致；
+/// 页号越界、还没排版、没有书、或像素数超上限时返回空数组。
+pub fn page_bitmap(page: u32, scale: f32, ink: u32, paper: u32, bold: bool) -> Vec<u8> {
+    // 锁序与 `layout_cached_edges` 一致：BOOK → FONT → LAST。
+    let books = BOOK.lock().unwrap();
+    let Some(book) = books.as_ref() else {
         return Vec::new();
     };
-    let Some(bitmap) = book.rasterize_at(FontId(font as u16), gid as u16, px, dx, dy) else {
+    let mut font = FONT.lock().unwrap();
+    let last = LAST.lock().unwrap();
+    let Some(last) = last.as_ref() else {
         return Vec::new();
     };
-    let mut out = Vec::with_capacity(8 + bitmap.alpha.len());
-    out.extend_from_slice(&bitmap.w.to_le_bytes());
-    out.extend_from_slice(&bitmap.h.to_le_bytes());
-    out.extend_from_slice(&bitmap.left.to_le_bytes());
-    out.extend_from_slice(&bitmap.top.to_le_bytes());
-    out.extend_from_slice(&bitmap.alpha);
+    let Some(info) = last.ir.page(page) else {
+        return Vec::new();
+    };
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale.clamp(0.25, 4.0)
+    } else {
+        1.0
+    };
+    let box_size = info.box_size();
+    let w = (box_size.w * scale).round().max(1.0) as u32;
+    let h = (box_size.h * scale).round().max(1.0) as u32;
+    if (w as u64) * (h as u64) > MAX_PAGE_PIXELS {
+        return Vec::new();
+    }
+
+    let mut surface = RgbaSurface::new(w, h);
+    if ink != 0 {
+        surface.set_tone(Some(Tone::ink(unpack_rgba(ink))));
+    }
+    surface.clear(if paper == 0 {
+        Rgba8::WHITE
+    } else {
+        unpack_rgba(paper)
+    });
+    {
+        let mut res = PageResources {
+            font: font.as_mut(),
+            bold,
+            book,
+            images: &last.doc.images,
+            srcs: Vec::new(),
+        };
+        let mut scaled = ScaledSurface::new(&mut surface, scale);
+        if ebook_render::paint(&last.ir, page, &mut scaled, &mut res).is_err() {
+            return Vec::new();
+        }
+    }
+
+    let mut out = Vec::with_capacity(8 + surface.pixels().len() * 4);
+    out.extend_from_slice(&w.to_le_bytes());
+    out.extend_from_slice(&h.to_le_bytes());
+    out.extend_from_slice(&surface.to_rgba());
     out
+}
+
+/// 一页设备像素的上限：4096×4096。1170×2532@3x ≈ 2.96M，余量足够，
+/// 但拦得住“把 `scale` 传成 1000”的那种调用。
+const MAX_PAGE_PIXELS: u64 = 4096 * 4096;
+
+/// 书级图片缓存的上限。CJK 字体、整本 zip 已经在内存里，图片再不设上限，
+/// 移动端 wasm 很容易触顶（G-16）。
+const IMAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+fn unpack_rgba(value: u32) -> Rgba8 {
+    Rgba8::new(
+        (value >> 24) as u8,
+        (value >> 16) as u8,
+        (value >> 8) as u8,
+        value as u8,
+    )
+}
+
+/// 解码后的图片按归档路径缓存，换书时整体清空。
+///
+/// 图片字节本身还在 `EpubReader` 里，这里只留 RGBA，省掉翻页时重复解码。
+/// 用 `Vec` 而不是哈希表：一页涉及的图很少，线性查找比哈希更省内存，
+/// 也与“IR 里禁止哈希容器”的取向一致。
+#[derive(Default)]
+struct ImageCache {
+    entries: Vec<(String, Option<ImageData>)>,
+    bytes: usize,
+}
+
+impl ImageCache {
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+    }
+
+    fn get(&mut self, src: &str) -> Option<ImageData> {
+        if let Some((_, hit)) = self.entries.iter().find(|(cached, _)| cached == src) {
+            return hit.clone();
+        }
+        None
+    }
+
+    fn insert(&mut self, src: String, data: Option<ImageData>) {
+        if let Some(image) = data.as_ref() {
+            self.bytes += image.rgba.len();
+        }
+        self.entries.push((src, data));
+        // 超预算就丢最旧的条目，直到回到预算内（至少留一条，避免反复解码同一张）。
+        while self.bytes > IMAGE_CACHE_BYTES && self.entries.len() > 1 {
+            let (_, dropped) = self.entries.remove(0);
+            if let Some(image) = dropped {
+                self.bytes = self.bytes.saturating_sub(image.rgba.len());
+            }
+        }
+    }
+}
+
+static IMAGES: Mutex<ImageCache> = Mutex::new(ImageCache {
+    entries: Vec::new(),
+    bytes: 0,
+});
+
+/// 一页的资源视图：字形来自 `FontBook`，图片来自当前书的归档。
+///
+/// `ImageId` 只是本章图片表的下标，缓存键用归档路径（`src`），
+/// 所以跨章复用同一张图不会重复解码。
+struct PageResources<'a> {
+    font: Option<&'a mut FontBook>,
+    bold: bool,
+    book: &'a Backend,
+    images: &'a [ebook_ir::ImageMeta],
+    /// 本页用到的 `id → src`，避免每画一次都重新取元信息。
+    srcs: Vec<(ImageId, Option<String>)>,
+}
+
+impl PageResources<'_> {
+    fn src_of(&mut self, id: ImageId) -> Option<String> {
+        if let Some((_, hit)) = self.srcs.iter().find(|(cached, _)| *cached == id) {
+            return hit.clone();
+        }
+        let src = self
+            .images
+            .get(id as usize)
+            .and_then(|meta| meta.src.clone());
+        self.srcs.push((id, src.clone()));
+        src
+    }
+}
+
+impl Resources for PageResources<'_> {
+    fn glyph_alpha(&mut self, font: FontId, gid: u16, px: f32) -> Option<GlyphBitmap> {
+        self.glyph_alpha_at(font, gid, px, 0.0, 0.0)
+    }
+
+    fn glyph_alpha_at(
+        &mut self,
+        font: FontId,
+        gid: u16,
+        px: f32,
+        dx: f32,
+        dy: f32,
+    ) -> Option<GlyphBitmap> {
+        let book = self.font.as_mut()?;
+        // 全局加粗只影响取哪张 face，不改 IR：同一份 IR 可以按开关重画。
+        let face = if self.bold { book.bold_face(font) } else { font };
+        book.rasterize_at(face, gid, px, dx, dy)
+    }
+
+    fn image(&mut self, id: ImageId) -> Option<ImageData> {
+        let src = self.src_of(id)?;
+        let mut cache = IMAGES.lock().unwrap();
+        if let Some(hit) = cache.get(&src) {
+            return Some(hit);
+        }
+        let decoded = self
+            .book
+            .asset(&src)
+            .and_then(|(bytes, _)| ebook_format::image::decode_image(bytes));
+        let hit = decoded.clone();
+        cache.insert(src, decoded);
+        hit
+    }
 }
 
 pub fn font_count() -> u32 {
@@ -214,47 +387,6 @@ pub fn load_font_face(index: usize) -> u32 {
             u32::MAX
         }
     }
-}
-
-/// 内嵌字体的原始字节，用于浏览器 `new FontFace(family, bytes)`。
-pub fn load_font_face_bytes(index: usize) -> Vec<u8> {
-    let books = BOOK.lock().unwrap();
-    books
-        .as_ref()
-        .and_then(|reader| reader.book().fonts().get(index))
-        .map(|face| face.bytes.clone())
-        .unwrap_or_default()
-}
-
-/// 按归档路径取资产字节（图片、字体……）。找不到返回空数组，JS 侧按长度判空。
-pub fn asset_bytes(href: &str) -> Vec<u8> {
-    let books = BOOK.lock().unwrap();
-    books
-        .as_ref()
-        .and_then(|reader| reader.asset(href))
-        .map(|(bytes, _)| bytes.to_vec())
-        .unwrap_or_default()
-}
-
-/// 本章图片表：`[{"id":0,"href":"OEBPS/pics/a.png","mime":"image/png"}]`。
-/// `id` 是最近一次排版的 `StyledDoc::images` 下标，也就是 `Op::Image.id`。
-pub fn chapter_images_json() -> String {
-    with_last(|last| {
-        let mut out = String::from("[");
-        for (id, image) in last.doc.images.iter().enumerate() {
-            if id > 0 {
-                out.push(',');
-            }
-            let _ = write!(out, "{{\"id\":{id},\"href\":");
-            push_json_opt(&mut out, image.src.as_deref());
-            out.push_str(",\"mime\":");
-            push_json_opt(&mut out, image.mime.as_deref());
-            out.push('}');
-        }
-        out.push(']');
-        out
-    })
-    .unwrap_or_else(|| String::from("[]"))
 }
 
 /// 目录：`[{"label","spine","fragment","depth"}]`。
@@ -350,53 +482,6 @@ pub fn resolve_link_json(href: &str) -> String {
     out
 }
 
-pub fn font_desc(id: u32) -> String {
-    let fonts = FONT.lock().unwrap();
-    let Some(book) = fonts.as_ref() else {
-        return String::from("{\"family\":null}");
-    };
-    let font = ebook_ir::FontId(id as u16);
-    match book.desc(font) {
-        Some(desc) => {
-            let mut out = String::from("{\"family\":");
-            push_json_str(&mut out, &desc.family);
-            out.push_str(",\"weight\":");
-            let _ = write!(out, "{}", desc.weight);
-            out.push_str(",\"style\":");
-            push_json_str(&mut out, font_style_name(desc.style));
-            out.push_str(",\"bold\":");
-            out.push_str(if desc.weight >= 600 || book.is_synthetic_bold(font) {
-                "true"
-            } else {
-                "false"
-            });
-            out.push_str(",\"italic\":");
-            out.push_str(
-                if !matches!(desc.style, ebook_ir::FontStyle::Normal)
-                    || book.is_synthetic_italic(font)
-                {
-                    "true"
-                } else {
-                    "false"
-                },
-            );
-            out.push('}');
-            out
-        }
-        None => String::from("{\"family\":null}"),
-    }
-}
-
-fn font_style_name(style: ebook_ir::FontStyle) -> &'static str {
-    match style {
-        ebook_ir::FontStyle::Normal => "normal",
-        ebook_ir::FontStyle::Italic => "italic",
-        ebook_ir::FontStyle::Oblique => "oblique",
-    }
-}
-
-/// 网页“字号”不是缩放整页，而是只改文档里的字号/行高；页面约束、分页
-/// 几何都不变，所以容器不会跟着字号一起变。
 fn scale_doc_fonts(doc: &mut ebook_ir::StyledDoc, scale: f32) {
     if !scale.is_finite() || scale <= 0.0 || (scale - 1.0).abs() < 1.0e-4 {
         return;
@@ -854,6 +939,14 @@ fn push_json_opt(out: &mut String, value: Option<&str>) {
     match value {
         Some(value) => push_json_str(out, value),
         None => out.push_str("null"),
+    }
+}
+
+fn font_style_name(style: ebook_ir::FontStyle) -> &'static str {
+    match style {
+        ebook_ir::FontStyle::Normal => "normal",
+        ebook_ir::FontStyle::Italic => "italic",
+        ebook_ir::FontStyle::Oblique => "oblique",
     }
 }
 

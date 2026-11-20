@@ -99,13 +99,15 @@ op 坐标是**排版流坐标**，不是页面内坐标。`Page.origin` 表示�
 | 交互 | `Reader`（命中、锚点、进度、链接、夹取）、`Selection`/`SelectionRect`（分页矩形与原文）、wasm 侧 JSON 查询 |
 | 缓存 | `ebook-cache`：输入指纹为键的有界 LRU，命中/未命中/淘汰统计 |
 | 并发 | `Layout::layout_parallel`：一次调用内的 `thread::scope`，输出与串行逐字节相同；wasm 走串行 |
-| 渲染 | SVG 参考后端、RGBA8 整数光栅（tone/线性光、嵌套裁剪、双线性图片）、Canvas2D 阅读器 |
+| 渲染 | RGBA8 整数光栅（tone/线性光、嵌套裁剪、双线性图片、PNG+JPEG 图片）、SVG 导出（CLI）、Canvas2D 阅读器（只搬位图） |
 
 ## 现状与限制
 
 完整的缺口清单、证据与建议修复顺序见 [docs/gaps.md](docs/gaps.md)。这里只列当前最影响使用的几条：
 
 - 只做横排；`WritingMode` 字段保留。
+- 文字只能来自已注册的字体：缺字（例如没装中文字体）时该段直接空白，
+  不再退回浏览器系统字体（以前那条回退路径已删）。
 - `layout_parallel` 并行的是分页单元映射，不是段落断行本身；真正按段并行需要改 `flow` 的内部拆分，留给后续。
 - 缓存用默认 `Limits`，没有 `layout_with` 变体；字体身份由调用方 `set_fonts` 显式登记。
 - 整行只有行内图片时，`LineBox.src` 不指向真实原文（图片占位字符按 3 字节计）；选区会跳过这类行，修复需要动 `flow` 的源区间计算。
@@ -122,7 +124,7 @@ op 坐标是**排版流坐标**，不是页面内坐标。`Page.origin` 表示�
 |---|---|---|
 | SVG | `ebook-render` | 参考实现，输出可以直接看，也方便和浏览器排同一份 XHTML 做差分 |
 | 光栅 | `ebook-raster` | 整数混合，跨平台逐字节一致；`to_ppm()` 可以落到文件 |
-| Canvas2D | `web/` | 浏览器阅读器，按 `GlyphRun.gid` 取 FontBook 位图画，文本可选中 |
+| Canvas2D | `web/` | 浏览器阅读器：整页位图来自 `eb_page_bitmap`，宿主只做 `putImageData` + 交互 |
 
 `paint()` 是三个后端共用的 op 遍历，坐标只在这里被平移到页面内，后端自己不碰坐标。
 

@@ -296,7 +296,7 @@ export function decodeProgress(input) {
 }
 
 // ---- 资源 / 目录 / fragment ----------------------------------------------
-// `eb_toc` 与 `eb_chapter_images` 返回裸数组；`eb_anchor` / `eb_resolve_link`
+// `eb_toc` 返回裸数组；`eb_anchor` / `eb_resolve_link`
 // 返回带字段名的对象。校验仍然集中在这里。
 
 function parseList(input, what) {
@@ -339,14 +339,6 @@ export function decodeToc(input) {
       depth: nonNegativeInt(entry.depth, "toc", "depth"),
     };
   });
-}
-
-export function decodeImages(input) {
-  return parseList(input, "images").map((entry) => ({
-    id: nonNegativeInt(entry.id, "images", "id"),
-    href: optionalString(entry.href, "images", "href"),
-    mime: optionalString(entry.mime, "images", "mime"),
-  }));
 }
 
 export function decodeAnchor(input) {

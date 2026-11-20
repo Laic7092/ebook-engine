@@ -5,18 +5,14 @@
 
 import {
   eb_anchor,
-  eb_asset,
   eb_base_font_size,
-  eb_chapter_images,
   eb_font,
   eb_font_count,
-  eb_font_desc,
   eb_font_error,
   eb_font_face,
-  eb_font_face_bytes,
   eb_font_face_count,
   eb_font_reset,
-  eb_glyph_bitmap,
+  eb_page_bitmap,
   eb_hit,
   eb_last_error,
   eb_layout_style,
@@ -32,7 +28,6 @@ import {
 import {
   decodeAnchor,
   decodeHit,
-  decodeImages,
   decodeLayout,
   decodeLink,
   decodeProgress,
@@ -46,23 +41,11 @@ import { decodeText } from "./text.js";
 const PAGE_W = 720;
 const PAGE_H = 960;
 const FONT_URLS = ["./latin.ttf", "../fixtures/font/test.ttf", "fixtures/font/test.ttf"];
-const FONT_FAMILY = "ebook-demo";
 const CJK_FONT_URLS = [
   // 随仓库提供（PingFang SC Regular，WOFF2 单文件），本地服务器直接读，不再等 CDN。
   // woff2 自身已是 Brotli 压缩，不需要再叠加 gzip。
   "./cjk.woff2?v=5",
 ];
-const FONT_FALLBACK =
-  '"ebook-demo", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", Georgia, serif';
-const FIT_NAMES = ["contain", "cover", "fill"];
-// 测试环境没有真正的 canvas，用 `?atlas=0` 回到 fillText，仍能检查排版/交互。
-const ATLAS_DISABLED = /(?:^|[?&])atlas=0(?:&|$)/.test(window.location.search || "");
-// 字形不再一 gid 一张 canvas：写进固定大小的 atlas，按颜色分组。
-const GLYPH_ATLAS_SIZE = 2048;
-const GLYPH_ATLAS_MAX = 3;
-const GLYPH_ATLAS_PAD = 1;
-const GLYPH_SCRATCH = 256;
-const GLYPH_CACHE_MAX = 16384;
 const FONT_CACHE = "ebook-fonts-v1";
 // 字体没就绪时先画系统字体，超过这个时间就不再等；通常缓存命中会低于它。
 const FONT_WAIT_MS = 60;
@@ -114,14 +97,6 @@ function toBytes(value) {
   return new Uint8Array(value);
 }
 
-function colorOf(color) {
-  return `rgba(${color.r},${color.g},${color.b},${color.a / 255})`;
-}
-
-function shifted(rect, ox, oy) {
-  return { x: rect.x - ox, y: rect.y - oy, w: rect.w, h: rect.h };
-}
-
 function samePath(a, b) {
   return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => v === b[i]);
 }
@@ -142,8 +117,8 @@ export function createReader(options) {
   const onLoaded = options.onLoaded || (() => {});
 
   const canvas = element("page");
-  // 绘图函数都读这个变量；预渲染到离屏 canvas 时临时替换，避免复制整套 drawOp。
-  let ctx = canvas.getContext("2d");
+  // 页面只有一个绘制者（引擎位图），这里只负责把位图放进 #page。
+  const ctx = canvas.getContext("2d");
   const canCopy = Boolean(ctx && typeof ctx.drawImage === "function");
   const selectionCanvas = element("selection-layer");
   const selectionCtx = selectionCanvas ? selectionCanvas.getContext("2d") : null;
@@ -187,10 +162,7 @@ export function createReader(options) {
   let layout = null;
   let chapter = 0;
   let page = 0;
-  let chapterImages = [];
   let tocItems = [];
-  const imageCache = new Map();
-  const fontDescs = new Map();
   let layoutToken = 0;
   let layoutDimsUsed = null;
   let baseFontSize = 18;
@@ -198,13 +170,8 @@ export function createReader(options) {
   let progressTimer = 0;
   let chromeTimer = 0;
   let hintTimer = 0;
-  // 自己按 gid 画字：字形、粗体、斜体全部来自 FontBook，不再让浏览器合成。
-  let atlasReady = false;
+  // 绘制完全在引擎里：这里只记当前 DPR，用来判定缓存是否还有效。
   let renderDpr = 1;
-  const glyphSprites = new Map();
-  const glyphAtlases = [];
-  const retiredGlyphAtlases = [];
-  let atlasClock = 0;
   // 字体状态按“这本书需要哪套字体”复用：同一套字体换书不再重置 FontBook，
   // atlas 与 font id 都保持有效，热开书省掉首帧的整页光栅化。
   let fontState = null;
@@ -234,544 +201,6 @@ export function createReader(options) {
   function setStatus(text) {
     statusEl.textContent = text;
     onStatus(text);
-  }
-
-  function fontDesc(id) {
-    if (!fontDescs.has(id)) {
-      let parsed = { bold: false, italic: false, family: null };
-      try {
-        parsed = JSON.parse(eb_font_desc(id));
-      } catch (error) {
-        parsed = { bold: false, italic: false, family: null };
-      }
-      fontDescs.set(id, parsed);
-    }
-    return fontDescs.get(id);
-  }
-
-  function fontOf(size, id, weight, style) {
-    const desc = id === undefined ? { bold: false, italic: false, family: null } : fontDesc(id);
-    const parts = [];
-    if (style === 1 || style === 2 || desc.italic) {
-      parts.push("italic");
-    }
-    // 粗细不交给 canvas 的 `bold`：iOS 对自定义/回退字体经常不合成。
-    // 真正的粗体由 drawRun 用 strokeText 描边，保证每台设备都看得出区别。
-    const family = desc.family ? `"${desc.family}", ` : "";
-    parts.push(`${size}px ${family}${FONT_FALLBACK}`);
-    return parts.join(" ");
-  }
-
-  function needsBoldStroke(id, weight) {
-    const desc = id === undefined ? {} : fontDesc(id);
-    const wanted = settings.bold ? 700 : Number(weight) || desc.weight || 400;
-    const actual = Number(desc.weight) || 400;
-    return wanted >= 600 && actual < 600;
-  }
-
-  // 全局粗体：run 已经要求粗体就保持；否则把 base face 换成 FontBook 的
-  // synthetic bold，保留原有 synthetic italic 位。
-  function boldFontOf(id, weight) {
-    if (!settings.bold || (Number(weight) || 400) >= 600) {
-      return id;
-    }
-    const desc = id === undefined ? {} : fontDesc(id);
-    if ((Number(desc.weight) || 400) >= 600) {
-      return id;
-    }
-    return 0x9000 | ((id || 0) & 0x2000) | ((id || 0) & 0x0fff);
-  }
-
-  function createGlyphAtlas() {
-    const canvas =
-      typeof OffscreenCanvas === "function"
-        ? new OffscreenCanvas(GLYPH_ATLAS_SIZE, GLYPH_ATLAS_SIZE)
-        : document.createElement("canvas");
-    canvas.width = GLYPH_ATLAS_SIZE;
-    canvas.height = GLYPH_ATLAS_SIZE;
-    return {
-      canvas,
-      ctx: canvas.getContext("2d"),
-      x: 0,
-      y: 0,
-      rowH: 0,
-      lastUsed: ++atlasClock,
-      scratch: null,
-    };
-  }
-
-  function clearGlyphSprites() {
-    glyphSprites.clear();
-    glyphAtlases.length = 0;
-    retiredGlyphAtlases.length = 0;
-  }
-
-  function enableGlyphAtlas() {
-    atlasReady = !ATLAS_DISABLED;
-    clearGlyphSprites();
-  }
-
-  // 简单的 shelf 装箱：每个字形按原尺寸写进 atlas，行满了换行。
-  function atlasAlloc(atlas, w, h) {
-    if (w + GLYPH_ATLAS_PAD > GLYPH_ATLAS_SIZE || h + GLYPH_ATLAS_PAD > GLYPH_ATLAS_SIZE) {
-      return null;
-    }
-    if (atlas.x + w + GLYPH_ATLAS_PAD > GLYPH_ATLAS_SIZE) {
-      atlas.x = 0;
-      atlas.y += atlas.rowH + GLYPH_ATLAS_PAD;
-      atlas.rowH = 0;
-    }
-    if (atlas.y + h + GLYPH_ATLAS_PAD > GLYPH_ATLAS_SIZE) {
-      return null;
-    }
-    const sx = atlas.x;
-    const sy = atlas.y;
-    atlas.x += w + GLYPH_ATLAS_PAD;
-    if (h > atlas.rowH) {
-      atlas.rowH = h;
-    }
-    atlas.lastUsed = ++atlasClock;
-    return [sx, sy];
-  }
-
-  function discardGlyphAtlas(atlas) {
-    if (atlas.ctx && typeof atlas.ctx.clearRect === "function") {
-      atlas.ctx.clearRect(0, 0, GLYPH_ATLAS_SIZE, GLYPH_ATLAS_SIZE);
-    }
-    atlas.x = 0;
-    atlas.y = 0;
-    atlas.rowH = 0;
-    atlas.scratch = null;
-    if (atlas.canvas.__sprites) {
-      atlas.canvas.__sprites.clear();
-    }
-  }
-
-  // 淘汰的 atlas 不能立刻擦：同一帧里可能已经有它的 sprite 排进 placed。
-  // 先退休，等 render 把这一页画完再统一清。
-  function flushRetiredGlyphAtlases() {
-    if (!retiredGlyphAtlases.length) {
-      return;
-    }
-    for (const atlas of retiredGlyphAtlases) {
-      discardGlyphAtlas(atlas);
-    }
-    retiredGlyphAtlases.length = 0;
-  }
-
-  // 所有颜色共用同一个 atlas 池：canvas 里存的就是已经染好色的蒙版，
-  // 换颜色不需要换图。满了按 LRU 淘汰单张，不整池清空。
-  function pickGlyphAtlas(w, h) {
-    if (w + GLYPH_ATLAS_PAD > GLYPH_ATLAS_SIZE || h + GLYPH_ATLAS_PAD > GLYPH_ATLAS_SIZE) {
-      return null;
-    }
-    for (const atlas of glyphAtlases) {
-      const pos = atlasAlloc(atlas, w, h);
-      if (pos) {
-        return { atlas, pos };
-      }
-    }
-    if (glyphAtlases.length < GLYPH_ATLAS_MAX) {
-      const atlas = createGlyphAtlas();
-      glyphAtlases.push(atlas);
-      const pos = atlasAlloc(atlas, w, h);
-      return pos ? { atlas, pos } : null;
-    }
-    let victimIndex = 0;
-    for (let i = 1; i < glyphAtlases.length; i += 1) {
-      if (glyphAtlases[i].lastUsed < glyphAtlases[victimIndex].lastUsed) {
-        victimIndex = i;
-      }
-    }
-    const victim = glyphAtlases.splice(victimIndex, 1)[0];
-    // 从索引里摘掉，但像素留到 render 末尾再擦。
-    for (const [key, sprite] of glyphSprites) {
-      if (sprite && sprite.atlas === victim) {
-        glyphSprites.delete(key);
-      }
-    }
-    retiredGlyphAtlases.push(victim);
-    const atlas = createGlyphAtlas();
-    glyphAtlases.push(atlas);
-    const pos = atlasAlloc(atlas, w, h);
-    return pos ? { atlas, pos } : null;
-  }
-
-  function writeGlyph(atlas, sx, sy, w, h, packed, color) {
-    let image = atlas.scratch;
-    if (!image || image.width < w || image.height < h) {
-      const side = Math.max(GLYPH_SCRATCH, w, h);
-      image = atlas.ctx.createImageData(side, side);
-      atlas.scratch = image;
-    }
-    const out = image.data;
-    const stride = image.width;
-    const alphaScale = color.a / 255;
-    for (let y = 0; y < h; y += 1) {
-      const src = y * w;
-      const dst = y * stride;
-      for (let x = 0; x < w; x += 1) {
-        const at = (dst + x) * 4;
-        const alpha = packed[8 + src + x];
-        out[at] = color.r;
-        out[at + 1] = color.g;
-        out[at + 2] = color.b;
-        out[at + 3] = alpha ? Math.round(alpha * alphaScale) : 0;
-      }
-    }
-    atlas.ctx.putImageData(image, sx, sy, 0, 0, w, h);
-  }
-
-  function evictSpriteEntries() {
-    if (glyphSprites.size < GLYPH_CACHE_MAX) {
-      return;
-    }
-    // Map 保持插入顺序：一次丢最旧的一小段，别整表清空。
-    let drop = Math.max(1, GLYPH_CACHE_MAX >> 3);
-    for (const key of glyphSprites.keys()) {
-      glyphSprites.delete(key);
-      drop -= 1;
-      if (drop <= 0) {
-        break;
-      }
-    }
-  }
-
-  // 缓存的是已经染好色的字形 alpha 蒙版，按 atlas 的 (font,gid,size,color) 复用。
-  // 相位在 drawGlyphRun 里吸附到整数设备像素，所以同一字形只光栅化一次。
-  function glyphSprite(font, gid, size, color) {
-    if (color.a === 0) {
-      return null;
-    }
-    const colorKey = `${color.r},${color.g},${color.b},${color.a}`;
-    const key = `${font}|${gid}|${size}|${colorKey}`;
-    if (glyphSprites.has(key)) {
-      const cached = glyphSprites.get(key);
-      if (cached && cached.atlas) {
-        cached.atlas.lastUsed = ++atlasClock;
-      }
-      return cached;
-    }
-    let sprite = null;
-    try {
-      const packed = eb_glyph_bitmap(font, gid, size, 0, 0);
-      if (packed && packed.length >= 8) {
-        const view = new DataView(packed.buffer, packed.byteOffset, packed.byteLength);
-        const w = view.getUint16(0, true);
-        const h = view.getUint16(2, true);
-        if (w > 0 && h > 0 && packed.length >= 8 + w * h) {
-          const left = view.getInt16(4, true);
-          const top = view.getInt16(6, true);
-          const placed = pickGlyphAtlas(w, h);
-          if (placed) {
-            const [sx, sy] = placed.pos;
-            writeGlyph(placed.atlas, sx, sy, w, h, packed, color);
-            sprite = {
-              atlas: placed.atlas,
-              sx,
-              sy,
-              w,
-              h,
-              left,
-              top,
-              font,
-              gid,
-              size,
-              color,
-            };
-            // 只给测试/调试看：确认指定位置画的是哪个 gid、哪种颜色。
-            if (!placed.atlas.canvas.__sprites) {
-              placed.atlas.canvas.__sprites = new Map();
-            }
-            placed.atlas.canvas.__sprites.set(`${sx},${sy}`, sprite);
-          }
-        }
-      }
-    } catch (error) {
-      sprite = null;
-    }
-    evictSpriteEntries();
-    glyphSprites.set(key, sprite);
-    return sprite;
-  }
-
-  // 完全按 IR 的字形 id/advance/相位画；空格没有轮廓，只前进不落墨。
-  function drawGlyphRun(run, glyphs, startX, startY, font) {
-    const placed = [];
-    const dpr = renderDpr || 1;
-    const px = run.size * dpr;
-    let penX = startX;
-    let penY = startY;
-    let missing = false;
-    for (const glyph of glyphs) {
-      // 字形吸附到整数设备像素。亚像素相位会把同一 gid 复制成几十个
-      // sprite，换来的视觉收益远小于每页几百次额外的光栅化。
-      const x = Math.floor(penX * dpr);
-      const y = Math.floor((penY + glyph.dy) * dpr);
-      const sprite = glyph.gid ? glyphSprite(font, glyph.gid, px, run.color) : null;
-      // 子集字体缺字：整段退回浏览器系统字体，别让某个字静默消失。
-      if (!glyph.gid) {
-        missing = true;
-      }
-      if (sprite) {
-        placed.push({
-          sprite,
-          x: x / dpr + sprite.left / dpr,
-          y: y / dpr + sprite.top / dpr,
-          w: sprite.w / dpr,
-          h: sprite.h / dpr,
-        });
-      }
-      penX += glyph.dx;
-    }
-    if (missing || !placed.length) {
-      return false;
-    }
-    for (const item of placed) {
-      const sprite = item.sprite;
-      ctx.drawImage(
-        sprite.atlas.canvas,
-        sprite.sx,
-        sprite.sy,
-        sprite.w,
-        sprite.h,
-        item.x,
-        item.y,
-        item.w,
-        item.h,
-      );
-    }
-    return true;
-  }
-
-  function drawUnderline(x, y, width, size, color) {
-    if (width <= 0) {
-      return;
-    }
-    ctx.fillStyle = colorOf(color);
-    ctx.fillRect(
-      x,
-      y + Math.max(1, size * 0.08),
-      width,
-      Math.max(1, size * 0.055),
-    );
-  }
-
-  function drawRect(rect, color) {
-    ctx.fillStyle = colorOf(color);
-    ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
-  }
-
-  function drawBorder(border, ox, oy) {
-    const r = shifted(border.rect, ox, oy);
-    const w = border.width;
-    ctx.fillStyle = colorOf(border.color);
-    const parts = [
-      { x: r.x, y: r.y, w: r.w, h: w.top },
-      { x: r.x, y: r.y + r.h - w.bottom, w: r.w, h: w.bottom },
-      { x: r.x, y: r.y, w: w.left, h: r.h },
-      { x: r.x + r.w - w.right, y: r.y, w: w.right, h: r.h },
-    ];
-    for (const part of parts) {
-      if (part.w > 0 && part.h > 0) {
-        ctx.fillRect(part.x, part.y, part.w, part.h);
-      }
-    }
-  }
-
-  function drawUnresolved(item, ox, oy) {
-    const r = shifted(item.rect, ox, oy);
-    ctx.save();
-    ctx.fillStyle = "rgba(255,245,245,0.65)";
-    ctx.fillRect(r.x, r.y, r.w, r.h);
-    ctx.setLineDash([5, 4]);
-    ctx.strokeStyle = "#c23d3d";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(r.x + 0.5, r.y + 0.5, Math.max(0, r.w - 1), Math.max(0, r.h - 1));
-    ctx.setLineDash([]);
-    const names = ["image pending", "font missing", "size from content"];
-    const text = names[item.reason] || "unresolved";
-    ctx.fillStyle = "#9d3333";
-    ctx.font = fontOf(11);
-    ctx.textAlign = "left";
-    ctx.fillText(text, r.x + 6, r.y + 16);
-    ctx.restore();
-  }
-
-  function drawImagePlaceholder(r) {
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(r.x, r.y, r.w, r.h);
-    ctx.clip();
-    ctx.strokeStyle = "#d0d0d0";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    const first = Math.floor((r.x + r.y) / 8) * 8;
-    const last = r.x + r.y + r.w + r.h;
-    for (let line = first; line <= last; line += 8) {
-      ctx.moveTo(line - r.y, r.y);
-      ctx.lineTo(line - (r.y + r.h), r.y + r.h);
-    }
-    ctx.stroke();
-    ctx.strokeStyle = "#999999";
-    ctx.setLineDash([4, 4]);
-    ctx.strokeRect(r.x + 0.5, r.y + 0.5, Math.max(0, r.w - 1), Math.max(0, r.h - 1));
-    ctx.setLineDash([]);
-    ctx.restore();
-  }
-
-  function drawImage(item, ox, oy) {
-    const r = shifted(item.rect, ox, oy);
-    if (r.w <= 0 || r.h <= 0) {
-      return;
-    }
-    const entry = chapterImages.find((image) => image.id === item.id);
-    const bitmap = entry && entry.href ? imageCache.get(entry.href) : null;
-    if (!bitmap || !bitmap.width || !bitmap.height) {
-      drawImagePlaceholder(r);
-      return;
-    }
-    const fit = FIT_NAMES[item.fit] || "contain";
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(r.x, r.y, r.w, r.h);
-    ctx.clip();
-    if (fit === "fill") {
-      ctx.drawImage(bitmap, r.x, r.y, r.w, r.h);
-    } else {
-      const scale = fit === "cover"
-        ? Math.max(r.w / bitmap.width, r.h / bitmap.height)
-        : Math.min(r.w / bitmap.width, r.h / bitmap.height);
-      const w = bitmap.width * scale;
-      const h = bitmap.height * scale;
-      ctx.drawImage(bitmap, r.x + (r.w - w) / 2, r.y + (r.h - h) / 2, w, h);
-    }
-    ctx.restore();
-  }
-
-  function drawRun(run, ox, oy) {
-    if (!run.text) {
-      return;
-    }
-    const x = run.origin.x - ox;
-    const y = run.origin.y - oy;
-    const chars = Array.from(run.text);
-    const glyphs = layout.display.glyphs.slice(run.glyphs.start, run.glyphs.start + run.glyphs.len);
-    const underlineWidth = glyphs.reduce((sum, glyph) => sum + glyph.dx, 0);
-    const paint = (fn) => {
-      if (run.rotate === 1) {
-        ctx.save();
-        ctx.translate(x, y);
-        ctx.rotate(Math.PI / 2);
-        const result = fn(0, 0);
-        ctx.restore();
-        return result;
-      }
-      return fn(x, y);
-    };
-
-    ctx.save();
-    if (atlasReady) {
-      const drew = paint((startX, startY) => {
-        if (!drawGlyphRun(run, glyphs, startX, startY, boldFontOf(run.font, run.weight))) {
-          return false;
-        }
-        if (run.underline) {
-          drawUnderline(startX, startY, underlineWidth, run.size, run.color);
-        }
-        return true;
-      });
-      if (drew) {
-        ctx.restore();
-        return;
-      }
-    }
-
-    ctx.font = fontOf(run.size, run.font, run.weight, run.style);
-    ctx.fillStyle = colorOf(run.color);
-    ctx.textAlign = "left";
-    ctx.textBaseline = "alphabetic";
-    ctx.direction = run.dir === 1 ? "rtl" : "ltr";
-    ctx.fontKerning = "auto";
-    const boldStroke = needsBoldStroke(run.font, run.weight);
-    if (boldStroke) {
-      ctx.strokeStyle = ctx.fillStyle;
-      ctx.lineWidth = Math.max(0.5, run.size * 0.045);
-      ctx.lineJoin = "round";
-    }
-    const emit = (text, atX, atY) => {
-      ctx.fillText(text, atX, atY);
-      if (boldStroke) {
-        ctx.strokeText(text, atX, atY);
-      }
-    };
-    // 排版已经把 advance 结算进每个字形（两端对齐加在空格上），整串
-    // `fillText` 会把空格打回字体原宽、行尾缩回去。按非空白连续块画：
-    // 块内交给浏览器整形，块之间按字形 dx 前进。
-    const split = run.dir !== 1 && glyphs.length === chars.length;
-    paint((startX, startY) => {
-      if (!split) {
-        emit(run.text, startX, startY);
-      } else {
-        let cursor = startX;
-        let wordStart = 0;
-        for (let i = 0; i <= chars.length; i += 1) {
-          if (i < chars.length && !/\s/u.test(chars[i])) {
-            continue;
-          }
-          if (i > wordStart) {
-            const word = chars.slice(wordStart, i).join("");
-            let shaped = 0;
-            for (let k = wordStart; k < i; k += 1) {
-              shaped += glyphs[k].dx;
-            }
-            const measured = ctx.measureText(word).width;
-            if (Math.abs(measured - shaped) <= Math.max(0.75, shaped * 0.02)) {
-              emit(word, cursor, startY);
-            } else {
-              let charCursor = cursor;
-              for (let k = wordStart; k < i; k += 1) {
-                emit(chars[k], charCursor, startY);
-                charCursor += glyphs[k].dx;
-              }
-            }
-            cursor += shaped;
-          }
-          if (i < chars.length) {
-            cursor += glyphs[i].dx;
-          }
-          wordStart = i + 1;
-        }
-      }
-      if (run.underline) {
-        drawUnderline(startX, startY, underlineWidth, run.size, run.color);
-      }
-    });
-    ctx.restore();
-  }
-
-  function drawOp(op, ox, oy) {
-    if (op.type === "glyphRun") {
-      drawRun(op.run, ox, oy);
-    } else if (op.type === "rect") {
-      drawRect(shifted(op.rect, ox, oy), op.color);
-    } else if (op.type === "border") {
-      drawBorder(op.border, ox, oy);
-    } else if (op.type === "image") {
-      drawImage(op, ox, oy);
-    } else if (op.type === "unresolved") {
-      drawUnresolved(op.unresolved, ox, oy);
-    } else if (op.type === "clip") {
-      const r = shifted(op.rect, ox, oy);
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(r.x, r.y, r.w, r.h);
-      ctx.clip();
-      for (const child of op.ops) {
-        drawOp(child, ox, oy);
-      }
-      ctx.restore();
-    }
   }
 
   // 阅读区始终铺满整个 reader-view。顶栏/底栏只是覆盖层，显隐不改变
@@ -830,6 +259,48 @@ export function createReader(options) {
     );
   }
 
+  // 设备像素比：3 是分页位图的上限，再高只会吃内存。
+  function pageDpr() {
+    return Math.min(window.devicePixelRatio || 1, 3);
+  }
+
+  // 引擎整页位图：8 字节小端头（w, h）+ RGBA。绘制全在 Rust 里，
+  // 宿主不做字形缓存、不做图片解码、不做主题调色。
+  function enginePageImage(index, dpr) {
+    let bytes;
+    try {
+      bytes = eb_page_bitmap(index, dpr, 0, 0, Boolean(settings.bold));
+    } catch (error) {
+      return null;
+    }
+    if (!bytes || bytes.length < 8) {
+      return null;
+    }
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const width = view.getUint32(0, true);
+    const height = view.getUint32(4, true);
+    const need = 8 + width * height * 4;
+    if (!width || !height || bytes.length < need) {
+      return null;
+    }
+    const data = new Uint8ClampedArray(bytes.buffer, bytes.byteOffset + 8, width * height * 4);
+    if (typeof ImageData === "function") {
+      return new ImageData(data, width, height);
+    }
+    return { width, height, data };
+  }
+
+  // 主题滤镜写在 `#page` 上（sepia/dark），引擎只认纸色与墨色。
+  // 动画快照是独立 canvas，必须自己带上同一个滤镜，否则滑动时会闪色。
+  function pageFilter() {
+    try {
+      const style = window.getComputedStyle ? window.getComputedStyle(canvas) : null;
+      return (style && style.filter) || "";
+    } catch (error) {
+      return "";
+    }
+  }
+
   function render() {
     if (!layout || !layout.pages.length) {
       return;
@@ -837,7 +308,7 @@ export function createReader(options) {
     const shown = clamp(page, 0, layout.pages.length - 1);
     page = shown;
     const info = layout.pages[shown];
-    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    const dpr = pageDpr();
     const w = (info.size.w || PAGE_W) + info.inset.left + info.inset.right;
     const h = (info.size.h || PAGE_H) + info.inset.top + info.inset.bottom;
     const pixelW = Math.round(w * dpr);
@@ -857,22 +328,13 @@ export function createReader(options) {
     if (cached && cached.width === pixelW && cached.height === pixelH) {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.drawImage(cached, 0, 0);
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     } else {
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, w, h);
-      ctx.fontKerning = "none";
-      ctx.textBaseline = "alphabetic";
-      const ox = info.origin.x - info.inset.left;
-      const oy = info.origin.y - info.inset.top;
-      const start = info.ops.start;
-      const end = start + info.ops.len;
-      for (let i = start; i < end; i += 1) {
-        drawOp(layout.display.ops[i], ox, oy);
+      const image = enginePageImage(shown, dpr);
+      if (image) {
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.putImageData(image, 0, 0);
       }
     }
-    flushRetiredGlyphAtlases();
     syncSelectionLayer(w, h, dpr);
     paintSelection();
     if (labelEl) {
@@ -920,42 +382,24 @@ export function createReader(options) {
     }
   }
 
-  // 把任意一页画到离屏 canvas。绘图函数读闭包里的 ctx，这里临时换掉再还原，
-  // 比给每个 drawOp 复制一份 context 参数改动小得多。
+  // 任意一页的离屏快照：一次引擎调用出一张位图，预取与滑动共用同一个出口。
   function renderPageCanvas(index) {
     if (!canCopy || !layout || !layout.pages[index]) {
       return null;
     }
-    const dpr = renderDpr || Math.min(window.devicePixelRatio || 1, 3);
-    const info = layout.pages[index];
-    const w = (info.size.w || PAGE_W) + info.inset.left + info.inset.right;
-    const h = (info.size.h || PAGE_H) + info.inset.top + info.inset.bottom;
-    const snap = document.createElement("canvas");
-    snap.width = Math.round(w * dpr);
-    snap.height = Math.round(h * dpr);
-    const snapCtx = snap.getContext("2d");
-    if (!snapCtx) {
+    const dpr = renderDpr || pageDpr();
+    const image = enginePageImage(index, dpr);
+    if (!image) {
       return null;
     }
-    const saved = ctx;
-    ctx = snapCtx;
-    try {
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, w, h);
-      ctx.fontKerning = "none";
-      ctx.textBaseline = "alphabetic";
-      const ox = info.origin.x - info.inset.left;
-      const oy = info.origin.y - info.inset.top;
-      const start = info.ops.start;
-      const end = start + info.ops.len;
-      for (let i = start; i < end; i += 1) {
-        drawOp(layout.display.ops[i], ox, oy);
-      }
-    } finally {
-      ctx = saved;
+    const snap = document.createElement("canvas");
+    snap.width = image.width;
+    snap.height = image.height;
+    const snapCtx = snap.getContext("2d");
+    if (!snapCtx || typeof snapCtx.putImageData !== "function") {
+      return null;
     }
-    flushRetiredGlyphAtlases();
+    snapCtx.putImageData(image, 0, 0);
     return snap;
   }
 
@@ -1302,14 +746,9 @@ export function createReader(options) {
     }
     layout = decodeLayout(bytes);
     page = resolveTarget(target);
-    // 图片表必须在第一次 render 之前就位：第二次进入同一章时图片已经解码过，
-    // loadChapterImages 不会再触发重绘，晚赋值会让首帧沿用上一章的 id→href
-    // 映射，画出错误的图或占位。
-    chapterImages = decodeChapterImages();
     highlightToc();
     render();
     saveProgressSoon();
-    loadChapterImages(token, chapterImages).catch(() => {});
   }
 
   async function relayout(position) {
@@ -1513,6 +952,10 @@ export function createReader(options) {
     snap.style.width = `${width}px`;
     snap.style.height = `${height}px`;
     snap.style.background = "#fff";
+    const filter = pageFilter();
+    if (filter && filter !== "none") {
+      snap.style.filter = filter;
+    }
     snap.style.pointerEvents = "none";
     snap.style.zIndex = "2";
     snap.style.willChange = "transform, opacity";
@@ -1992,43 +1435,6 @@ export function createReader(options) {
     },
   });
 
-  // ---- 图片 ---------------------------------------------------------------
-
-  function decodeChapterImages() {
-    try {
-      return decodeImages(eb_chapter_images());
-    } catch (error) {
-      return [];
-    }
-  }
-
-  async function loadChapterImages(token, entries) {
-    if (typeof createImageBitmap !== "function" || typeof Blob !== "function") {
-      return;
-    }
-    let changed = false;
-    for (const entry of entries) {
-      if (!entry.href || imageCache.has(entry.href)) {
-        continue;
-      }
-      try {
-        const bytes = eb_asset(entry.href);
-        if (!bytes || !bytes.length) {
-          continue;
-        }
-        const blob = new Blob([bytes], { type: entry.mime || "application/octet-stream" });
-        imageCache.set(entry.href, await createImageBitmap(blob));
-        changed = true;
-      } catch (error) {
-        imageCache.set(entry.href, null);
-      }
-    }
-    if (changed && token === layoutToken) {
-      clearPageCache();
-      render();
-    }
-  }
-
   // ---- 字体 ---------------------------------------------------------------
 
   async function loadEmbeddedFonts(info, token) {
@@ -2048,20 +1454,6 @@ export function createReader(options) {
         continue;
       }
       loaded += 1;
-      const family = faces[index] && faces[index].family;
-      if (!family || typeof FontFace !== "function" || !document.fonts) {
-        continue;
-      }
-      try {
-        const bytes = eb_font_face_bytes(index);
-        if (token !== openToken) {
-          return false;
-        }
-        const face = new FontFace(family, bytes.slice().buffer);
-        document.fonts.add(await face.load());
-      } catch (error) {
-        // 浏览器解析不了：布局仍用 FontBook 的量度。
-      }
     }
     if (token !== openToken) {
       return false;
@@ -2074,33 +1466,14 @@ export function createReader(options) {
         setStatus(lastError);
       }
     }
-    fontDescs.clear();
-    if (loaded) {
-      enableGlyphAtlas();
-    }
     return loaded > 0;
   }
 
-  async function loadFont(bytes, family = FONT_FAMILY) {
+  async function loadFont(bytes) {
     if (eb_font(bytes) === 0xffffffff) {
       throw new Error(eb_font_error() || "字体无法解析");
     }
     workerFont(bytes);
-    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-    try {
-      if (typeof FontFace === "function" && document.fonts) {
-        const face = new FontFace(family, buffer);
-        await face.load();
-        document.fonts.add(face);
-        if (document.fonts.ready) {
-          await document.fonts.ready;
-        }
-      }
-    } catch (error) {
-      setStatus("字体只用于排版");
-    }
-    fontDescs.clear();
-    enableGlyphAtlas();
   }
 
   async function fetchFirst(urls) {
@@ -2202,7 +1575,7 @@ export function createReader(options) {
     return isCjkInfo(info) ? "default:cjk" : "default:latin";
   }
 
-  // 同步决定这本书需要哪套字体。字体变了才重置 FontBook 与 atlas；
+  // 同步决定这本书需要哪套字体。字体变了才重置 FontBook；
   // 同一套字体换书则全部复用，热开书不再重付首帧光栅化。
   function planFonts(info, record) {
     const key = fontKeyFor(info, record);
@@ -2216,9 +1589,6 @@ export function createReader(options) {
         : "latin";
     eb_font_reset();
     workerFontReset();
-    fontDescs.clear();
-    clearGlyphSprites();
-    atlasReady = false;
     builtinEl.checked = false;
     fontProgressVisible = true;
     fontState = { key, kind, ok: false };
@@ -2564,9 +1934,6 @@ export function createReader(options) {
         } else {
           eb_font_reset();
           workerFontReset();
-          fontDescs.clear();
-          clearGlyphSprites();
-          atlasReady = false;
           fontState = null;
           setStatus("使用系统字体");
         }
@@ -2636,8 +2003,6 @@ export function createReader(options) {
       layout = null;
       layoutDimsUsed = null;
       setChromeHidden(isNarrowView());
-      chapterImages = [];
-      imageCache.clear();
       const plan = planFonts(info, record);
       if (record.format === "txt") {
         workerBook({
@@ -2726,8 +2091,6 @@ export function createReader(options) {
     layout = null;
     clearPageCache();
     layoutDimsUsed = null;
-    chapterImages = [];
-    imageCache.clear();
   }
 
   function refresh() {

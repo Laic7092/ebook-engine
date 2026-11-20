@@ -63,17 +63,12 @@ pub fn eb_font_count() -> u32 {
     crate::font_count()
 }
 
+/// 当前章整页 RGBA（8 字节头 + `w*h*4`），由引擎自己光栅化。
+/// 头部与参数含义见 `crate::page_bitmap`；页号越界/未排版返回空数组。
 #[cfg(feature = "epub")]
 #[wasm_bindgen]
-pub fn eb_font_desc(id: u32) -> String {
-    crate::font_desc(id)
-}
-
-/// 按字形 id 取 alpha 位图，供宿主用 `drawImage`/WebGL 自己画字。
-/// 头部见 `crate::glyph_bitmap`；没有位图时返回空数组。
-#[wasm_bindgen]
-pub fn eb_glyph_bitmap(font: u32, gid: u32, px: f32, dx: f32, dy: f32) -> Vec<u8> {
-    crate::glyph_bitmap(font, gid, px, dx, dy)
+pub fn eb_page_bitmap(page: u32, scale: f32, ink: u32, paper: u32, bold: bool) -> Vec<u8> {
+    crate::page_bitmap(page, scale, ink, paper, bold)
 }
 
 #[cfg(feature = "epub")]
@@ -190,18 +185,6 @@ pub fn eb_progress(page: u32, line: u32, byte: u32) -> String {
 // ---- 资源、目录与跳转 ------------------------------------------------------
 // 与交互查询一样走 JSON（列表/结构体），只有图片字节走 Uint8Array。
 
-/// 归档内资产字节；找不到返回空数组。
-#[wasm_bindgen]
-pub fn eb_asset(href: &str) -> Vec<u8> {
-    crate::asset_bytes(href)
-}
-
-/// 最近一次排版那一章的图片表：`[{id,href,mime}]`。
-#[wasm_bindgen]
-pub fn eb_chapter_images() -> String {
-    crate::chapter_images_json()
-}
-
 /// 目录：`[{label,spine,fragment,depth}]`。
 #[wasm_bindgen]
 pub fn eb_toc() -> String {
@@ -228,9 +211,4 @@ pub fn eb_font_face(index: u32) -> u32 {
 #[wasm_bindgen]
 pub fn eb_font_face_count() -> u32 {
     crate::font_face_count()
-}
-
-#[wasm_bindgen]
-pub fn eb_font_face_bytes(index: u32) -> Vec<u8> {
-    crate::load_font_face_bytes(index as usize)
 }

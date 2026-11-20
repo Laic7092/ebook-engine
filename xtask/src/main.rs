@@ -46,6 +46,9 @@ fn feature_key(features: &[&str]) -> String {
 }
 
 /// wasm 只在 Rust 源码/清单变化后才需要重编；用最新 mtime 做廉价判断。
+///
+/// `tests/` / `examples/` / `benches/` 不进 wasm 产物：改一个测试不该触发
+/// 一整遍 wasm release 重编（那是分钟级的，和测试本身无关）。
 fn newest_source_time() -> SystemTime {
     fn visit(dir: &Path, newest: &mut Option<SystemTime>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -57,6 +60,14 @@ fn newest_source_time() -> SystemTime {
             };
             let path = entry.path();
             if kind.is_dir() {
+                let skipped = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| matches!(name, "tests" | "examples" | "benches"))
+                    .unwrap_or(false);
+                if skipped {
+                    continue;
+                }
                 visit(&path, newest);
             } else if kind.is_file() {
                 if let Ok(time) = entry.metadata().and_then(|meta| meta.modified()) {
@@ -307,8 +318,6 @@ fn contract() -> ExitCode {
 fn app() -> ExitCode {
     match build_web_pkg()
         .and_then(|()| run_script("tests/app.mjs"))
-        .and_then(|()| run_script("web/tests/images.mjs"))
-        .and_then(|()| run_script("web/tests/atlas.mjs"))
     {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {

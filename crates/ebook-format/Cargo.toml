@@ -7,6 +7,8 @@ publish.workspace = true
 [dependencies]
 ebook-ir.workspace = true
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+# JPEG 解码：EPUB 里封面和插图绝大多数是 JPEG。`no_std` 可用，native/wasm 同一条路径。
+zune-jpeg = { version = "0.5", default-features = false }
 roxmltree = { version = "0.20", default-features = false }
 
 # 完整的 WHATWG 编码表（GBK/Big5/Shift_JIS/…）只在 native 构建里打包。

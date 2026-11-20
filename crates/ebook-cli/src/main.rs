@@ -434,7 +434,7 @@ impl Resources for CliResources<'_, '_> {
 
     fn image(&mut self, id: ImageId) -> Option<ImageData> {
         let (bytes, _) = self.media.source(id)?;
-        ebook_format::image::decode_png(bytes)
+        ebook_format::image::decode_image(bytes)
     }
 }
 

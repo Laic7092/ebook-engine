@@ -1,12 +1,13 @@
-//! 图片头解析与最小 PNG 解码。
+//! 图片头解析与像素解码。
 //!
 //! 排版只需要**固有尺寸**，渲染只需要**像素**。格式层因此只做两件事：
-//! [`image_size`] 从文件头读出宽高，[`decode_png`] 把 PNG 解成 RGBA。
-//! 两者都不引第三方图像库：头解析是纯字节读取，PNG 走已有的 `miniz_oxide`。
+//! [`image_size`] 从文件头读出宽高，[`decode_image`] 把 PNG / JPEG 解成 RGBA。
+//! PNG 走包装的 `miniz_oxide`，JPEG 交给 `zune-jpeg`；两者都是纯 Rust、
+//! `no_std` 可用，native 与 wasm 走同一条路径，像素逐字节一致。
 //!
 //! 已知范围：PNG 只支持 8 位、非隔行、颜色类型 0/2/3/4/6（灰度、RGB、调色板、
-//! 灰度+alpha、RGBA）。其它格式只给尺寸，不给像素——渲染后端会画占位。
-//! SVG 也只在文件前部读根标签的 `width`/`height`/`viewBox`，不做光栅化。
+//! 灰度+alpha、RGBA）；JPEG 支持基线/渐进、灰度/RGB/CMYK。GIF / WebP 只给尺寸
+//! 不给像素，SVG 只在文件前部读根标签的 `width`/`height`/`viewBox`，不做光栅化。
 
 use alloc::vec::Vec;
 
@@ -460,6 +461,68 @@ struct Header {
     depth: u8,
     color: u8,
     interlace: u8,
+}
+
+/// 把支持的格式解成 RGBA8；不认识的格式返回 `None`（宿主画占位）。
+///
+/// 分发只按魔数，不看扩展名或 MIME：书里声明的类型经常错，字节不会。
+pub fn decode_image(bytes: &[u8]) -> Option<ImageData> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return decode_png(bytes);
+    }
+    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        return decode_jpeg(bytes);
+    }
+    None
+}
+
+/// 单边像素上限。JPEG 的 `ImageInfo` 是 `u16`，这里再兜一层，
+/// 避免超大图把 wasm 线性内存一次吃完。
+const MAX_DECODE_SIDE: usize = 16_384;
+
+fn decode_jpeg(bytes: &[u8]) -> Option<ImageData> {
+    use zune_jpeg::zune_core::bytestream::ZCursor;
+    use zune_jpeg::zune_core::colorspace::ColorSpace;
+    use zune_jpeg::zune_core::options::DecoderOptions;
+
+    let options = DecoderOptions::new_fast()
+        .set_max_width(MAX_DECODE_SIDE)
+        .set_max_height(MAX_DECODE_SIDE)
+        .jpeg_set_out_colorspace(ColorSpace::RGBA);
+    let mut decoder = zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(bytes), options);
+    let pixels = decoder.decode().ok()?;
+    let info = decoder.info()?;
+    let (w, h) = (info.width as u32, info.height as u32);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    // 输出色空是我们自己要的 RGBA；只有灰度源（单通道）和 RGB 需要补齐。
+    let space = decoder.output_colorspace()?;
+    let rgba = match space {
+        ColorSpace::RGBA => pixels,
+        ColorSpace::RGB => expand(&pixels, 3, |px| [px[0], px[1], px[2], 255])?,
+        ColorSpace::Luma => expand(&pixels, 1, |px| [px[0], px[0], px[0], 255])?,
+        ColorSpace::LumaA => expand(&pixels, 2, |px| [px[0], px[0], px[0], px[1]])?,
+        _ => return None,
+    };
+    let need = w as usize * h as usize * 4;
+    if rgba.len() < need {
+        return None;
+    }
+    let mut rgba = rgba;
+    rgba.truncate(need);
+    Some(ImageData { w, h, rgba })
+}
+
+fn expand(bytes: &[u8], channels: usize, map: impl Fn(&[u8]) -> [u8; 4]) -> Option<Vec<u8>> {
+    if !bytes.len().is_multiple_of(channels) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / channels * 4);
+    for px in bytes.chunks_exact(channels) {
+        out.extend_from_slice(&map(px));
+    }
+    Some(out)
 }
 
 /// 把 8 位、非隔行 PNG 解成 RGBA8。范围外的 PNG 返回 `None`。

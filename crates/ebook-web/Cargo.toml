@@ -18,6 +18,8 @@ ebook-ir.workspace = true
 ebook-layout.workspace = true
 ebook-format.workspace = true
 ebook-font.workspace = true
+ebook-raster.workspace = true
+ebook-render.workspace = true
 serde.workspace = true
 postcard.workspace = true
 

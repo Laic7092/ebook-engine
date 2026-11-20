@@ -583,8 +583,14 @@ trait Renderer {
 | 光栅 | `RgbaSurface` | RGBA8，整数混合，跨平台逐字节一致 |
 | Canvas2D | `web/reader.js` | 浏览器阅读器，文本可选中 |
 
-`RgbaSurface::to_ppm()` 输出 P6 PPM；`render_page()` 会先清成白色再画。
-`RgbaSurface::from_page(page)` 用 `page.box_size()` 决定画布大小。
+`RgbaSurface::to_ppm()` 输出 P6 PPM，`to_rgba()` 输出裸 RGBA8；
+`render_page()` 会先清成白色再画。`RgbaSurface::from_page(page)` 用
+`page.box_size()` 决定画布大小。
+
+DPR 不进入 IR：`ScaledSurface` 装饰任何 `Surface`，把坐标、边框宽度、字形
+advance 与**字号**一起乘 `scale`，因此字形按设备像素光栅化，而不是画完再放大。
+`scale = 1` 与直接绘制逐字节相同（`crates/ebook-raster/tests/scale.rs`）。
+`eb_page_bitmap` 就是“`ScaledSurface` + `RgbaSurface` + `paint`”这三件套。
 
 ---
 
@@ -606,8 +612,7 @@ trait Renderer {
 | `eb_base_font_size()` | `epub` | 当前书首章根节点字号；宿主用它把 px 字号换算成缩放比例 |
 | `eb_font(bytes)` | `epub` | 注册字体，返回 id；失败 `u32::MAX` |
 | `eb_font_reset()` / `eb_font_count()` | `epub` | 字体槽管理 |
-| `eb_font_desc(id)` | `epub` | 返回给 canvas 的字体描述 JSON |
-| `eb_glyph_bitmap(font, gid, px, dx, dy)` | `epub` | 按字形 id 取 alpha 位图（8 字节头 + `w*h`），粗/斜体已在 FontBook 内合成 |
+| `eb_page_bitmap(page, scale, ink, paper, bold)` | `epub` | 引擎整页光栅：8 字节头（`w:u32, h:u32`）+ `w*h*4` RGBA；`scale` 是 DPR，`ink`/`paper` 是 `0xRRGGBBAA`（`0` = 不修正/白纸），`bold` 是全局加粗 |
 | `eb_hit(page, x, y)` | 任意 | 页内坐标命中：`{"location":{...}|null}` |
 | `eb_link_at(page, x, y)` | 任意 | 页内坐标上的链接：`{"href":"..."|"null"}` |
 | `eb_selection(a_page,a_line,a_byte,b_page,b_line,b_byte)` | 任意 | 选区：`{start,end,rects:[{page,rect}],text}` |
