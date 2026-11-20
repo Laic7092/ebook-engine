@@ -70,7 +70,7 @@ format  ──>  StyledDoc  ──>  layout  ──>  LayoutResult  ──>  ren
 
 字体是排版入参，不是排版过程中去「找」的东西。不同平台 fallback 链不同，会导致同一本书分页不同，书签与跨端同步全部失效。这是正确性问题，不是性能问题。
 
-度量只认字体入参：`TextMeasurer` 由外部注入，`FontBook` 用 `ttf-parser` 给出真实的 advance / ascent / descent / cmap，同一份字体字节同时也是 `Resources` 的光栅化来源。`TextMeasurer::shape` 默认逐字 advance，`FontBook` 用 rustybuzz 做真正的整形（kerning / ligature、按簇回写字形与字节偏移）；双向文本由 `unicode-bidi` 按 UAX #9 求段内级，排版层按簇做视觉重排。`ebook-layout` 只依赖 `ebook-ir` 与 `unicode-bidi`，仍然不碰 I/O。
+度量只认字体入参：`TextMeasurer` 由外部注入，`FontBook` 用 `ttf-parser` 给出真实的 advance / ascent / descent / cmap，同一份字体字节同时也是 `Resources` 的光栅化来源。`TextMeasurer::shape` 默认逐字 advance，`FontBook` 用 harfrust（HarfBuzz 的 Rust 移植）做真正的整形（kerning / ligature、按簇回写字形与字节偏移）；双向文本由 `unicode-bidi` 按 UAX #9 求段内级，排版层按簇做视觉重排。`ebook-layout` 只依赖 `ebook-ir` 与 `unicode-bidi`，仍然不碰 I/O。
 
 断行按 UAX #14，属性表由 `data/unicode/LineBreak.txt` 生成（`data/gen_linebreak.py`），不引第三方 crate。只实现成对可判定的规则，需要上下文的规则明确不装。断字（hyphenation）是可插接口：宿主通过 `TextMeasurer::hyphenator()` 注入词典，内置英文 ushyphmax 模式的 Liang 算法（`hyphen-en` feature，默认关闭，不把 `en.pat` 链进 wasm）；没有词典时 `hyphens: auto` 与 `none` 同行为。
 
@@ -92,7 +92,7 @@ op 坐标是**排版流坐标**，不是页面内坐标。`Page.origin` 表示�
 |---|---|
 | 格式 | TXT / EPUB（ZIP stored+deflate、container/OPF/spine、XHTML、CSS 级联、命名实体、锚点）；TOC（EPUB3 nav / EPUB2 NCX）、链接、资源清单、字体声明、书目元数据、格式层诊断（`EpubIssueCode`） |
 | 排版 | 盒树、margin collapsing、UAX #14 断行、两端对齐、孤行寡行、强制分页、增量重排入口；`layout` 是全函数 |
-| 文本 | `TextMeasurer::shape`（默认逐字，`FontBook` 用 rustybuzz）、按簇双向重排（UAX #9）、字距/词距、可选断字词典、`TextRules` 三个中文政策开关 |
+| 文本 | `TextMeasurer::shape`（默认逐字，`FontBook` 用 harfrust）、按簇双向重排（UAX #9）、字距/词距、可选断字词典、`TextRules` 三个中文政策开关 |
 | 替换元素 | 块级/行内图片（固有尺寸未知时占位）、ruby 注音 |
 | 契约 | IR 1.4：`Glyph.ch`、`Op::Link`、`GlyphRun.weight/style/underline`、`Issue`/`IssueCode`、`LayoutResult.truncated`、`LayoutStats` |
 | 限额 | `Limits` 六个字段（节点/深度/文本字节/页数/行数/图片像素），超限返回合法截断 IR |

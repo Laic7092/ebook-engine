@@ -287,7 +287,7 @@ impl Layout {
   统一做（按簇，不拆合字）。
 - 返回的总宽必须等于 `out` 里字形前进宽度之和，否则量到的和画出来的会漂移。
 
-`FontBook` 实现了真实版本（rustybuzz：kerning / ligature，`ch` 是簇首字节偏移）；
+`FontBook` 实现了真实版本（harfrust：kerning / ligature，`ch` 是簇首字节偏移）；
 `StubMeasurer` 只用于测试与确定性 golden，走默认逐字实现，因此升级前后的
 `StubMeasurer` 路径逐字节一致。
 

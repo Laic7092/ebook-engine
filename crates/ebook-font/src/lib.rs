@@ -1,5 +1,6 @@
 use core::cell::RefCell;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use ab_glyph_rasterizer::{point, Point, Rasterizer};
 use ebook_ir::{FontDesc, FontId, FontSpec, FontStyle, GlyphBitmap, ImageData, ImageId, Resources};
@@ -67,10 +68,16 @@ impl ShapeKey {
     }
 }
 
-#[derive(Debug, Default)]
 struct Metrics {
     desc: FontDesc,
-    bytes: Vec<u8>,
+    /// 同一份字节既给 ttf-parser（度量）又给 harfrust（整形）。
+    /// 用 `Arc<Vec<u8>>` 而不是 `Vec<u8>`：harfrust 的 `Font` 需要持有数据，
+    /// 共享同一份 Arc 就不会为整形再复制一遍几十 MB 的 CJK 字体。
+    bytes: Arc<Vec<u8>>,
+    /// read-fonts 的 owning `Font`。它自带 shaping/layout 缓存，
+    /// 必须在 `FontBook` 生命周期内复用；每次 `shape` 重建会丢掉这份缓存。
+    /// `None` 表示 read-fonts 读不了这份数据（ttf-parser 能读），此时退回逐字。
+    hb_font: Option<harfrust::Font>,
     units_per_em: f32,
     ascender: f32,
     descender: f32,
@@ -78,13 +85,30 @@ struct Metrics {
     cmap: Vec<(u32, u16)>,
 }
 
+impl core::fmt::Debug for Metrics {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Metrics")
+            .field("desc", &self.desc)
+            .field("units_per_em", &self.units_per_em)
+            .field("ascender", &self.ascender)
+            .field("descender", &self.descender)
+            .field("advances", &self.advances.len())
+            .field("cmap", &self.cmap.len())
+            .finish()
+    }
+}
+
 impl Metrics {
     fn parse(desc: FontDesc, bytes: Vec<u8>) -> Option<Self> {
+        let bytes = Arc::new(bytes);
         let face = Face::parse(&bytes, 0).ok()?;
         let units_per_em = face.units_per_em() as f32;
         if units_per_em <= 0.0 {
             return None;
         }
+        // 与 ttf-parser 共用同一份字节；`Font::new` 只包一层 Arc，不拷贝。
+        let source: Arc<dyn AsRef<[u8]> + Send + Sync> = bytes.clone();
+        let hb_font = harfrust::Font::new(source, 0);
         let ascender = face.ascender() as f32;
         let descender = face.descender() as f32;
         let advances = (0..face.number_of_glyphs())
@@ -111,6 +135,7 @@ impl Metrics {
         Some(Self {
             desc,
             bytes,
+            hb_font,
             units_per_em,
             ascender,
             descender,
@@ -145,7 +170,7 @@ pub struct FontBook {
     ///
     /// 排版层的 `TextMeasurer::shape` 拿不到 `DocMeta`，所以语言由宿主在排版前
     /// 注入；没设置时按字形猜（见 [`guess_language`]），猜不到就不设，
-    /// rustybuzz 会把脚本留成 `Zyyy`。
+    /// harfrust 会把脚本留成 `Zyyy`。
     lang: Option<String>,
     /// 内置英文断字词典（`hyphen-en` feature）。零大小类型，`hyphenator()` 借出去；
     /// 没有这个 feature 时字段不存在，`hyphenator()` 返回 `None`。
@@ -713,7 +738,8 @@ fn guess_language(text: &str) -> Option<&'static str> {
 }
 
 impl TextMeasurer for FontBook {
-    /// 用 rustybuzz 整形：kerning、ligature 默认开，script/language 从入参或文本猜。
+    /// 用 harfrust（HarfBuzz 的 Rust 移植）整形：kerning、ligature 默认开，
+    /// script/language 从入参或文本猜。
     ///
     /// 返回的字形按**逻辑顺序**（RTL run 内部会翻回去），`ch` 是簇首字符在
     /// `text` 里的字节偏移，和逐字实现保持同一套语义。
@@ -734,27 +760,34 @@ impl TextMeasurer for FontBook {
             out.extend_from_slice(glyphs);
             return *total;
         }
-        let Some(face) = rustybuzz::Face::from_slice(&metrics.bytes, 0) else {
+        // harfrust 的 `Font` 是 read-fonts 的 owning font，不按 px 建面，
+        // 整形永远以 units-per-em 输出，下面统一乘 `size / upem`。
+        let Some(hb_font) = metrics.hb_font.as_ref() else {
             return shape_per_char(self, text, font, size, out);
         };
-        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        let shaper = harfrust::ShaperFont::new(hb_font);
+        let mut buffer = harfrust::Buffer::new();
         buffer.push_str(text);
         // 语言优先级：宿主注入 > 文本猜。脚本交给 guess，猜不到就是 Zyyy。
         if let Some(lang) = self.lang.as_deref().or_else(|| guess_language(text)) {
-            if let Ok(lang) = lang.parse::<rustybuzz::Language>() {
-                buffer.set_language(lang);
+            if let Ok(lang) = lang.parse::<harfrust::Language>() {
+                buffer.set_language(Some(lang));
             }
         }
         buffer.guess_segment_properties();
-        let rtl = buffer.direction() == rustybuzz::Direction::RightToLeft;
-        let shaped = rustybuzz::shape(&face, &[], buffer);
+        let rtl = buffer.direction() == harfrust::Direction::RightToLeft;
+        // 字体损坏等情况下 harfrust 直接报错（HarfBuzz 会退回 dummy shaper），
+        // 这里退回逐字 advance，排版不至于整段失败。
+        if harfrust::shape(&shaper, &mut buffer, harfrust::ShapeOptions::new()).is_err() {
+            return shape_per_char(self, text, font, size, out);
+        }
         let scale = size / metrics.units_per_em;
         let mut total = 0.0f32;
-        let mut glyphs: Vec<ShapeGlyph> = Vec::with_capacity(shaped.len());
-        for (info, position) in shaped
+        let mut glyphs: Vec<ShapeGlyph> = Vec::with_capacity(buffer.len());
+        for (info, position) in buffer
             .glyph_infos()
             .iter()
-            .zip(shaped.glyph_positions().iter())
+            .zip(buffer.glyph_positions().iter())
         {
             let dx = position.x_advance as f32 * scale;
             let dy = position.y_offset as f32 * scale;

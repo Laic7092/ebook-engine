@@ -285,10 +285,10 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
   光栅结果（含 `None`），按 `(FontId, size, text, lang)` 缓存整形结果；
   绑定 `FontBook` 生命周期，`add*` / `set_language` 时失效。测试在
   `crates/ebook-font/tests/cache.rs`。
-- **仍未修复**：`face()` 在缓存未命中时仍逐次 `ttf_parser::Face::parse` /
-  `rustybuzz::Face::from_slice`（缓存 parsed face 需要自引用或新依赖，单独评估）。
-- **现象**：`FontBook::shape` 每次 `rustybuzz::Face::from_slice`；
-  `rasterize` / `advance` 每次都 `ttf_parser::Face::parse`；native 光栅
+- **仍未修复**：`face()` 在缓存未命中时仍逐次 `ttf_parser::Face::parse`
+  （光栅仍走 ttf-parser；整形用的 harfrust `Font` 已在 `Metrics::parse` 建好并随
+  `FontBook` 复用，同时共享同一份 `Arc<Vec<u8>>` 字体字节）。
+- **现象**：`rasterize` / `advance` 每次都 `ttf_parser::Face::parse`；native 光栅
   每次绘制都重新栅格化字形。
 - **影响**：翻页、缩放、重复排版时 CPU 开销高；大字体尤其明显。
 - **证据**：`crates/ebook-font/src/lib.rs` 的 `face()`、`shape()`、
@@ -314,7 +314,7 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 
 - **状态**：部分
 - **现象**：Web Canvas 在 `glyphs.length !== chars.length` 时退回整串
-  `fillText`，实际字形由浏览器重新 shaping；native 则按 rustybuzz 的
+  `fillText`，实际字形由浏览器重新 shaping；native 则按 harfrust 的
   `Glyph.dx` 摆放。
 - **影响**：复杂脚本（阿拉伯、印度语系）或字体回退时，浏览器显示和 IR
   几何可能漂移；`xtask parity` 只比 IR，不比浏览器像素。

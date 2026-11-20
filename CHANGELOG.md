@@ -101,6 +101,11 @@
 
 ### Changed
 
+- 整形后端从 `rustybuzz` 换成 `harfrust`（HarfBuzz 15.2 算法移植，基于
+  `read-fonts`）：`FontBook` 在 `Metrics::parse` 时建好 `harfrust::Font` 并随
+  `FontBook` 复用，shaping plan/layout 缓存不再每次 `shape` 重建；字体字节用
+  `Arc<Vec<u8>>` 与 ttf-parser 共享，不额外复制。公共 `TextMeasurer::shape`
+  契约（逻辑序、簇首字节偏移、返回宽等于字形宽之和）不变。
 - Web 阅读器交互优化：canvas 尺寸不变时不再重设 `width/height`；当前页 ±1
   预渲染到位图缓存，翻页/跟手滑动优先搬图；选区改画在独立 overlay canvas 上，
   拖动选区不再重绘正文页。
