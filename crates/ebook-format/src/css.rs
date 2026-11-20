@@ -484,10 +484,8 @@ fn unquote(value: &str) -> String {
 
 fn media_is_screen(prelude: &str) -> bool {
     let lower = prelude.to_ascii_lowercase();
-    if lower.contains("print") && !lower.contains("screen") {
-        return false;
-    }
-    true
+    // 只有 print 且不带 screen 的媒体查询才跳过；其余（含 all/空）都算屏幕。
+    !lower.contains("print") || lower.contains("screen")
 }
 
 /// 从 `open`（必须指向 `{`）找到配对的 `}`，返回它的下标；没有闭合就返回长度。
