@@ -22,10 +22,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: install Rust (stable + wasm32)
-        uses: dtolnay/rust-toolchain@stable
+      # 版本与 rust-toolchain.toml 一致：clippy/rustfmt 随 minor 变化，
+      # 浮动 stable 会让本地过、CI 红。下面有一道漂移检查兜底。
+      - name: install Rust (pinned + wasm32)
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.100.0"
           targets: wasm32-unknown-unknown
+
+      - name: verify toolchain pin
+        run: |
+          pinned="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
+          rustc --version
+          case "$(rustc --version)" in
+            "rustc ${pinned} "*) ;;
+            *) echo "rust-toolchain.toml 是 ${pinned}，CI 装的不是它" >&2; exit 1 ;;
+          esac
 
       - name: cache cargo and target
         uses: actions/cache@v4

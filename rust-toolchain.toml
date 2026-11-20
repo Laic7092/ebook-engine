@@ -1,3 +1,6 @@
 [toolchain]
-channel = "stable"
+# 精确钉版本：clippy 新 lint 与 rustfmt 排版会在 minor 之间变化，
+# 浮动 "stable" 会让本地过、CI 红（或反之）。
+# 升级时改这里 + 两个 workflow 的 toolchain 输入，一起走一次 PR。
+channel = "1.100.0"
 targets = ["wasm32-unknown-unknown"]
