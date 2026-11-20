@@ -13,6 +13,11 @@
 #   ./web/minify.sh --wasm-opt        # 需要 binaryen 的 wasm-opt
 #   ./web/minify.sh --precompress     # 额外生成 .gz（有 brotli 时也生成 .br）
 #   ./web/minify.sh --serve 8000      # 构建后起本地静态服务
+# 被 sh/dash 调用时（shebang 不生效），自动用 bash 重跑自身。
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec bash "$0" "$@"
+fi
+
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

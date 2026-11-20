@@ -24,6 +24,19 @@ const dragHintEl = document.getElementById("drag-hint");
 let currentView = "library";
 let settings = { ...DEFAULT_SETTINGS };
 let statusTimer = 0;
+let wasmReady = null;
+let resolveSettingsApplied;
+const settingsApplied = new Promise((resolve) => {
+  resolveSettingsApplied = resolve;
+});
+
+// 书架和 wasm 并行加载；真正打开书/排版前才等 wasm 与设置就绪。
+function ensureWasm() {
+  if (!wasmReady) {
+    wasmReady = init();
+  }
+  return wasmReady;
+}
 
 function registerServiceWorker() {
   if (typeof navigator === "undefined" || !navigator.serviceWorker) {
@@ -32,9 +45,15 @@ function registerServiceWorker() {
   if (!/^https?:$/.test(window.location.protocol)) {
     return;
   }
-  navigator.serviceWorker.register("./sw.js").catch(() => {
-    // 预览环境可能没有 SW；阅读功能不依赖它。
-  });
+  navigator.serviceWorker
+    .register("./sw.js", { updateViaCache: "none" })
+    .catch(() => {
+      // 预览环境可能没有 SW；阅读功能不依赖它。
+    });
+  // iOS 会回收长期未使用站点的存储；能申请持久化就申请，失败不影响使用。
+  if (navigator.storage && navigator.storage.persist) {
+    navigator.storage.persist().catch(() => {});
+  }
 }
 
 function setStatus(text) {
@@ -140,6 +159,8 @@ async function openRecord(record, bytes, { persist = true } = {}) {
   setBanner("");
   showView("reader");
   try {
+    await ensureWasm();
+    await settingsApplied;
     const info = await reader.open(record, bytes);
     if (info.title) {
       record.title = info.title;
@@ -336,16 +357,25 @@ async function boot() {
     );
     return;
   }
+
+  const query = new URLSearchParams(window.location.search || "");
+  // 书架只读 IndexedDB，不依赖 wasm：和 wasm 加载并行，先出内容。
+  const shelfLoaded = library.refresh().catch(() => {});
+  const savedSettings = store.getSetting(SETTINGS_KEY).catch(() => null);
+
   try {
     setStatus("正在加载 wasm");
-    await init();
+    await ensureWasm();
   } catch (error) {
     setBanner(`wasm 加载失败：${error.message || error}。请确认 web/pkg/ 已构建（./web/build.sh），并且通过 http 访问。`);
     return;
   }
+  // wasm 就绪后再注册：首次访问时 install 能复用 wasm 的 HTTP 缓存，
+  // 不会和首屏同时再下载一份 1.5 MB。
+  registerServiceWorker();
 
   try {
-    const saved = await store.getSetting(SETTINGS_KEY);
+    const saved = await savedSettings;
     if (saved && typeof saved === "object") {
       // 旧版存的是 fontScale 百分比，迁移到真实字号；fit 选项已经删除。
       const legacySize = Number(saved.fontScale)
@@ -366,18 +396,17 @@ async function boot() {
     settings = { ...DEFAULT_SETTINGS };
   }
   reader.setSettings(settings);
+  resolveSettingsApplied();
 
   bindFileInput();
   bindDragAndDrop();
   bindKeyboard();
-  registerServiceWorker();
 
-  const query = new URLSearchParams(window.location.search || "");
+  await shelfLoaded;
   try {
     const direct = await openFromQuery(query);
     if (!direct) {
       showView("library");
-      await library.refresh();
       setStatus("就绪");
     }
   } catch (error) {

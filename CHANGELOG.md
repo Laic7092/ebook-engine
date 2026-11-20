@@ -37,6 +37,17 @@
 - 阅读设置：字号、粗体、行距、字距、页边距、对齐方式；目录顶部的章节下拉框移除。
 - `eb_layout_style`：行距/字距/对齐作为独立排版入参，不再只能跟着字号等比缩放。
 
+### Fixed
+
+- PWA 冷启动：导航请求改为 cache-first + 后台回源，iOS 从主屏启动不再等
+  一次网络往返（1s 白屏的主要来源）。预缓存逐项容错，单个图标失败不会让
+  install 整体失败；`latin.ttf` 移出安装清单，首次用到时再缓存。
+- iOS 启动图：按机型生成 `web/splash/*.png` 的 `apple-touch-startup-image`，
+  并补 180px 主屏图标，避免页面首帧前的纯白闪屏。
+- SW 在 wasm 就绪后立即注册；书架读取与 wasm 加载并行，开屏先出书。
+- 未带哈希的 JS 改为 `Cache-Control: no-cache`，避免 Service Worker
+  预缓存时被浏览器 HTTP 缓存挡住。发布时若改了 JS，仍需同步升 `CACHE_NAME`。
+
 **排版**
 
 - `Layout::layout_with`（带 `LayoutOptions`）与 `Layout::layout_parallel`：
