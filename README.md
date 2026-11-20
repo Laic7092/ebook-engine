@@ -1,6 +1,6 @@
 # ebook-engine
 
-[![CI](https://github.com/OWNER/ebook-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/ebook-engine/actions/workflows/ci.yml)
+[![CI](https://github.com/Laic7092/ebook-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/Laic7092/ebook-engine/actions/workflows/ci.yml)
 <!-- 发布到 GitHub 时把 OWNER 换成实际组织/用户名。 -->
 
 电子书渲染引擎。Web 优先，跨平台，可 Worker 并行。
