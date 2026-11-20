@@ -79,6 +79,8 @@ jobs:
       - name: touch .nojekyll
         run: touch web/dist/.nojekyll
 
+      # 需要仓库已启用 Pages（Source = GitHub Actions），否则这一步会
+      # 报 "Get Pages site failed"。启用入口：Settings → Pages → Source。
       - uses: actions/configure-pages@v5
 
       - uses: actions/upload-pages-artifact@v3
