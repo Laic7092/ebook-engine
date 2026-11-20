@@ -37,6 +37,17 @@
 - 阅读设置：字号、粗体、行距、字距、页边距、对齐方式；目录顶部的章节下拉框移除。
 - `eb_layout_style`：行距/字距/对齐作为独立排版入参，不再只能跟着字号等比缩放。
 
+### Changed
+
+- 仓库只保留源码：字体、EPUB 夹具、PWA 图标、iOS 启动图移出 git，由
+  `scripts/setup.sh` / `scripts/generate.sh` 重建。新增 `fixtures/make_misc_epubs.py`
+  与 `scripts/gen-icons.py`，所有生成物写进 `.gitignore`；CI 在测试前跑
+  `scripts/generate.sh --skip-web`。
+- Web 端 CJK 回退字体从 GB2312 子集 TTF（`cjk.ttf` + gzip）换成完整
+  PingFang SC Regular WOFF2（`web/cjk.woff2`，约 5 MB）。woff2 自身已压缩，
+  去掉 `DecompressionStream` 解压与 `.gz` 兜底分支，Cache Storage 直接存原始字节；
+  `_headers` 与 Service Worker 缓存名同步更新。
+
 ### Fixed
 
 - PWA 冷启动：导航请求改为 cache-first + 后台回源，iOS 从主屏启动不再等

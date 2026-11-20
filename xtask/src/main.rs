@@ -1,7 +1,7 @@
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use ebook_font::FontBook;
 use ebook_ir::{codec, EdgesF, LayoutResult};
@@ -20,11 +20,66 @@ fn target_dir() -> PathBuf {
 }
 
 fn wasm_path() -> PathBuf {
-    target_dir().join("wasm32-unknown-unknown/release/ebook_web.wasm")
+    wasm_path_in(&target_dir())
+}
+
+fn wasm_path_in(dir: &Path) -> PathBuf {
+    dir.join("wasm32-unknown-unknown/release/ebook_web.wasm")
+}
+
+/// 不带 feature 的 wasm 单独一个 target 目录：size/parity 在 lean 上跑，
+/// app/size full 在默认 target 上跑，避免来回切换 feature 触发重复编译。
+fn lean_dir() -> PathBuf {
+    target_dir().join("xtask-lean")
 }
 
 fn parity_dir() -> PathBuf {
     target_dir().join("parity")
+}
+
+fn feature_key(features: &[&str]) -> String {
+    if features.is_empty() {
+        String::from("lean")
+    } else {
+        features.join("+")
+    }
+}
+
+/// wasm 只在 Rust 源码/清单变化后才需要重编；用最新 mtime 做廉价判断。
+fn newest_source_time() -> SystemTime {
+    fn visit(dir: &Path, newest: &mut Option<SystemTime>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_dir() {
+                visit(&path, newest);
+            } else if kind.is_file() {
+                if let Ok(time) = entry.metadata().and_then(|meta| meta.modified()) {
+                    match *newest {
+                        Some(current) if time <= current => {}
+                        _ => *newest = Some(time),
+                    }
+                }
+            }
+        }
+    }
+
+    let mut newest = None;
+    for path in ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "build.rs"] {
+        if let Ok(time) = std::fs::metadata(path).and_then(|meta| meta.modified()) {
+            match newest {
+                Some(current) if time <= current => {}
+                _ => newest = Some(time),
+            }
+        }
+    }
+    visit(Path::new("crates"), &mut newest);
+    newest.unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
 const BENCH_WARMUP: usize = 3;
@@ -264,14 +319,25 @@ fn app() -> ExitCode {
 }
 
 fn build_web_pkg() -> Result<(), String> {
-    build_wasm(&["epub"])?;
+    build_wasm(&["epub"], &target_dir())?;
     let pkg = Path::new("web/pkg");
+    let source = wasm_path();
+    let fresh = pkg.join("ebook_web.js").exists()
+        && std::fs::metadata(pkg.join("ebook_web_bg.wasm"))
+            .and_then(|meta| meta.modified())
+            .ok()
+            .zip(std::fs::metadata(&source).and_then(|meta| meta.modified()).ok())
+            .map(|(built, wasm)| built >= wasm)
+            .unwrap_or(false);
+    if fresh {
+        return Ok(());
+    }
     let _ = std::fs::remove_dir_all(pkg);
     std::fs::create_dir_all(pkg).map_err(|e| format!("web/pkg: {e}"))?;
     let out = Command::new("wasm-bindgen")
         .args(["--target", "web", "--out-dir"])
         .arg(pkg)
-        .arg(wasm_path())
+        .arg(source)
         .output()
         .map_err(|e| format!("wasm-bindgen: {e}"))?;
     if !out.status.success() {
@@ -293,7 +359,22 @@ fn run_script(path: &str) -> Result<(), String> {
     }
 }
 
-fn build_wasm(features: &[&str]) -> Result<(), String> {
+fn build_wasm(features: &[&str], dir: &Path) -> Result<(), String> {
+    let key = feature_key(features);
+    let path = wasm_path_in(dir);
+    let stamp = dir.join("xtask/wasm.stamp");
+    let source_time = newest_source_time();
+    let fresh = std::fs::read_to_string(&stamp)
+        .map(|text| text.trim() == key)
+        .unwrap_or(false)
+        && std::fs::metadata(&path)
+            .and_then(|meta| meta.modified())
+            .map(|time| time >= source_time)
+            .unwrap_or(false);
+    if fresh {
+        return Ok(());
+    }
+
     let mut command =
         Command::new(std::env::var("CARGO").unwrap_or_else(|_| String::from("cargo")));
     command.args([
@@ -303,21 +384,29 @@ fn build_wasm(features: &[&str]) -> Result<(), String> {
         "--release",
         "--target",
         "wasm32-unknown-unknown",
+        "--target-dir",
     ]);
+    command.arg(dir);
     if !features.is_empty() {
         command.arg("--features");
         command.arg(features.join(","));
     }
     match command.status() {
-        Ok(s) if s.success() => Ok(()),
+        Ok(s) if s.success() => {
+            if let Some(parent) = stamp.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(stamp, key);
+            Ok(())
+        }
         Ok(_) => Err(String::from("wasm build failed")),
         Err(e) => Err(format!("cargo not available: {e}")),
     }
 }
 
-fn measure(features: &[&str], label: &str) -> Result<usize, String> {
-    build_wasm(features)?;
-    let path = wasm_path();
+fn measure(features: &[&str], label: &str, dir: &Path) -> Result<usize, String> {
+    build_wasm(features, dir)?;
+    let path = wasm_path_in(dir);
     let raw = std::fs::metadata(&path)
         .map_err(|e| format!("missing {}: {e}", path.display()))?
         .len() as usize;
@@ -334,8 +423,9 @@ fn measure(features: &[&str], label: &str) -> Result<usize, String> {
 }
 
 fn size() -> ExitCode {
-    let lean = measure(&[], "core");
-    let full = measure(&["epub"], "core+epub");
+    // 先 epub 再 lean：与 app 的构建顺序一致，减少 feature 切换。
+    let full = measure(&["epub"], "core+epub", &target_dir());
+    let lean = measure(&[], "core", &lean_dir());
     match (lean, full) {
         (Ok(lean), Ok(full)) => {
             println!("epub adapter delta: {} B gzip", full.saturating_sub(lean));
@@ -364,20 +454,30 @@ fn parity() -> ExitCode {
 }
 
 fn run_parity() -> Result<(), String> {
-    build_wasm(&[])?;
+    let lean = lean_dir();
+    build_wasm(&[], &lean)?;
     let dir = parity_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let pkg = dir.join("js");
-    let _ = std::fs::remove_dir_all(&pkg);
-
-    let out = Command::new("wasm-bindgen")
-        .args(["--target", "nodejs", "--out-dir"])
-        .arg(&pkg)
-        .arg(wasm_path())
-        .output()
-        .map_err(|e| format!("wasm-bindgen: {e}"))?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+    let source = wasm_path_in(&lean);
+    let fresh = pkg.join("ebook_web.js").exists()
+        && std::fs::metadata(pkg.join("ebook_web_bg.wasm"))
+            .and_then(|meta| meta.modified())
+            .ok()
+            .zip(std::fs::metadata(&source).and_then(|meta| meta.modified()).ok())
+            .map(|(built, wasm)| built >= wasm)
+            .unwrap_or(false);
+    if !fresh {
+        let _ = std::fs::remove_dir_all(&pkg);
+        let out = Command::new("wasm-bindgen")
+            .args(["--target", "nodejs", "--out-dir"])
+            .arg(&pkg)
+            .arg(&source)
+            .output()
+            .map_err(|e| format!("wasm-bindgen: {e}"))?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+        }
     }
 
     let native = dir.join("native.ir");

@@ -50,6 +50,13 @@ jobs:
         with:
           tool: wasm-bindgen-cli@0.2.129
 
+      # 字体/EPUB 夹具不再入库，测试前按需重建（跳过图标与 5 MB 中文字体）。
+      - name: install woff
+        run: cargo install woff --version 0.6.4 --features binary --locked
+
+      - name: generate fixtures
+        run: scripts/generate.sh --skip-web
+
       - name: cargo fmt --all --check
         run: cargo fmt --all --check
 

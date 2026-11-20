@@ -98,8 +98,10 @@ globalThis.document = {
   addEventListener() {},
 };
 
+// 应用测试只关心 JS 状态机；5 MB 中文字体的下载/解包会拖慢并阻塞事件循环。
+// 字体解析由 ebook-font / web/tests 单独覆盖，这里显式走系统字体回退。
 globalThis.window = {
-  location: { href: `${ORIGIN}web/`, search: "?book=../fixtures/en.epub&atlas=0", protocol: "http:" },
+  location: { href: `${ORIGIN}web/`, search: "?book=../fixtures/en.epub&atlas=0&nofont=1", protocol: "http:" },
   innerHeight: 1000,
   innerWidth: 1400,
   devicePixelRatio: 2,

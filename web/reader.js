@@ -48,9 +48,9 @@ const PAGE_H = 960;
 const FONT_URLS = ["./latin.ttf", "../fixtures/font/test.ttf", "fixtures/font/test.ttf"];
 const FONT_FAMILY = "ebook-demo";
 const CJK_FONT_URLS = [
-  // 随仓库提供，本地服务器直接读，不再等 CDN。下面的远程地址只作兜底。
-  "./cjk.ttf.gz?v=4",
-  "./cjk.ttf?v=4",
+  // 随仓库提供（PingFang SC Regular，WOFF2 单文件），本地服务器直接读，不再等 CDN。
+  // woff2 自身已是 Brotli 压缩，不需要再叠加 gzip。
+  "./cjk.woff2?v=5",
 ];
 const FONT_FALLBACK =
   '"ebook-demo", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", Georgia, serif';
@@ -2159,17 +2159,6 @@ export function createReader(options) {
     }
   }
 
-  async function gunzipFont(url, bytes) {
-    if (!/\.gz(?:$|\?)/i.test(url)) {
-      return bytes;
-    }
-    if (typeof DecompressionStream !== "function") {
-      throw new Error("浏览器不支持 gzip 解压");
-    }
-    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
-    return new Uint8Array(await new Response(stream).arrayBuffer());
-  }
-
   async function cachedFontBytes(url) {
     if (typeof caches === "undefined") {
       return null;
@@ -2190,7 +2179,7 @@ export function createReader(options) {
       const cache = await caches.open(FONT_CACHE);
       await cache.put(
         url,
-        new Response(bytes, { headers: { "content-type": "font/ttf" } }),
+        new Response(bytes, { headers: { "content-type": "font/woff2" } }),
       );
     } catch (error) {
       // 配额/隐私模式失败不影响本次阅读。
@@ -2247,13 +2236,13 @@ export function createReader(options) {
     for (const url of urls) {
       const remote = /^https?:/i.test(url);
       try {
-        // 字体 19 MB，HTTP 缓存不可靠；Cache Storage 首读之后直接本地命中。
+        // 字体 5 MB 左右，HTTP 缓存不可靠；Cache Storage 首读之后直接本地命中。
         const cached = await cachedFontBytes(url);
         if (token !== openToken) {
           return false;
         }
         if (cached) {
-          await loadFont(await gunzipFont(url, cached));
+          await loadFont(cached);
           if (fontProgressVisible) {
             setStatus("字体来自缓存");
           }
@@ -2268,11 +2257,10 @@ export function createReader(options) {
         }
         // 先开始写 Cache Storage，再解析字体：首屏不额外等一次字体落盘。
         cacheFontBytes(url, bytes);
-        const raw = await gunzipFont(url, bytes);
         if (token !== openToken) {
           return false;
         }
-        await loadFont(raw);
+        await loadFont(bytes);
         return token === openToken;
       } catch (error) {
         lastError = error;

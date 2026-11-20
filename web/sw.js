@@ -10,7 +10,7 @@
 
 // 发布时如果改了 app.js / reader.js 等未带哈希的文件，记得同时改 CACHE_NAME：
 // 这些资源是 cache-first，浏览器不会主动发现它们变了。
-const CACHE_NAME = "ebook-v10";
+const CACHE_NAME = "ebook-v11";
 const FONT_CACHE = "ebook-fonts-v1";
 const INDEX_URL = new URL("./index.html", self.location.href).href;
 const CORE = [
@@ -32,7 +32,7 @@ const CORE = [
 ];
 // latin.ttf 有 760 KB，只有打开无内嵌字体的英文书才用得到；
 // 首次使用时由 fetch 的 cache-first 分支写入，不拖慢安装。
-// cjk 字体同理（首次约 1.5 MB gzip），由 reader.js / fetch 缓存。
+// cjk 字体同理（首次约 5 MB woff2），由 reader.js / fetch 缓存。
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

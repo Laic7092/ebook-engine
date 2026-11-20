@@ -13,12 +13,8 @@
 /latin.ttf
   Cache-Control: public, max-age=31536000, immutable
 
-/cjk.ttf
-  Cache-Control: public, max-age=31536000, immutable
-
-/cjk.ttf.gz
-  Content-Type: application/gzip
-  Content-Encoding: identity
+/cjk.woff2
+  Content-Type: font/woff2
   Cache-Control: public, max-age=31536000, immutable
 
 /splash/*

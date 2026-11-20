@@ -6,3 +6,17 @@ Cargo.lock.bak
 /web/dist
 !tests/golden/*.ir
 /clippy.log
+
+# 生成资源：scripts/generate.sh 按需重建，不进入 git。
+/.cache/
+/web/latin.ttf
+/web/cjk.woff2
+/web/icon-*.png
+/web/splash/
+/fixtures/*.epub
+/fixtures/font/*.ttf
+/fixtures/font/*.woff
+/fixtures/font/*.woff2
+
+__pycache__/
+*.pyc

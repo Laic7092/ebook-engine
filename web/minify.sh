@@ -180,7 +180,7 @@ fi
 
 echo "==> 体积"
 bytes() { stat -c%s "$1"; }
-for f in index.html app.js reader.js db.js text.js pkg/ebook_web.js pkg/ebook_web_bg.wasm latin.ttf cjk.ttf.gz cjk.ttf; do
+for f in index.html app.js reader.js db.js text.js pkg/ebook_web.js pkg/ebook_web_bg.wasm latin.ttf cjk.woff2; do
   s="$SRC/$f"
   [ -f "$s" ] || continue
   o="$OUT/$f"

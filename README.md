@@ -166,7 +166,17 @@ DOM 方案尤其不能做：排版由浏览器决定，跨端一致、分页控�
 
 ## 跑
 
+干净 checkout 先跑一次 `scripts/setup.sh`：补 wasm32 / wasm-bindgen / woff，并调用
+`scripts/generate.sh` 重建不进入 git 的字体、EPUB 夹具、图标与启动图。仓库只提交
+代码和文本数据；`fixtures/*.epub`、`fixtures/font/*`、`web/latin.ttf`、
+`web/cjk.woff2`、`web/icon-*.png`、`web/splash/` 都是生成物。GitHub 下载默认走
+`GH_PROXY`（默认 `https://gh-proxy.com/`），5 MB 的中文字体也走同一个代理。
+
 ```
+scripts/setup.sh                 # 一次性初始化（DejaVu、夹具、图标、PingFang）
+scripts/setup.sh --skip-cjk      # 不下 5 MB 的中文字体
+scripts/generate.sh              # 只重建生成资源；--force / --skip-cjk / --skip-web
+scripts/generate.sh --skip-web   # CI：不生成图标/启动图和中文字体
 scripts/check.sh                 # fmt + clippy(-D warnings) + test + xtask all
 scripts/bench.sh                 # 对比 scripts/bench_baseline.txt，超 1.15× 退出 1
 scripts/bench.sh --update        # 在目标机器上重新取基线
@@ -181,6 +191,6 @@ npx wrangler pages deploy web/dist --project-name ebook-reader   # 发布到 Clo
 FEATURES=epub,hyphen-en ./web/build.sh   # 需要内置英文断字时
 ```
 
-最后一条打开 `http://localhost:8000/web/` 就是完整阅读器：书架默认从 IndexedDB 读取，支持导入 EPUB 与 TXT（UTF-8 / UTF-16 / GB18030 / Big5 / Shift_JIS），点开进入阅读页，翻页、目录、字号/粗体/行距/字距/边距/对齐/主题设置与阅读进度都会持久化。界面按移动优先设计，阅读页使用真实可视区域排版并铺满，手机用底部面板、桌面用侧边抽屉，移动端工具栏会自动隐藏，轻点屏幕中间显示或收起；左右两侧轻点或横向滑动翻页。`?book=<url>&spine=<n>` 可直接打开指定书与章节，方便截图与回归。`fixtures/en.epub` 只用于测试，不进入部署包。部署包里的拉丁回退字体是 `web/latin.ttf`（DejaVu Sans），中日韩字体当前是 `web/cjk.ttf`，同时提供 `web/cjk.ttf.gz`（约 1.5 MB）；支持 `DecompressionStream` 的浏览器优先下载 gzip，不支持时回退未压缩 TTF。`web/manifest.webmanifest` + `web/sw.js` 让应用可安装，并把 wasm、JS 和第一次读到的字体放进 Cache Storage；导航请求优先读应用壳、后台回源，iOS 从主屏冷启动不必再等网络。`web/splash/*.png` 是对应机型的 `apple-touch-startup-image`（`python3 scripts/gen-splash.py` 重新生成），避免首帧前的白屏。字体首次约 1.5 MB（gzip）或 2.2 MB（回退 TTF），之后冷启动直接命中本地缓存。子集缺字时该段退回浏览器系统字体，不会静默消失。
+最后一条打开 `http://localhost:8000/web/` 就是完整阅读器：书架默认从 IndexedDB 读取，支持导入 EPUB 与 TXT（UTF-8 / UTF-16 / GB18030 / Big5 / Shift_JIS），点开进入阅读页，翻页、目录、字号/粗体/行距/字距/边距/对齐/主题设置与阅读进度都会持久化。界面按移动优先设计，阅读页使用真实可视区域排版并铺满，手机用底部面板、桌面用侧边抽屉，移动端工具栏会自动隐藏，轻点屏幕中间显示或收起；左右两侧轻点或横向滑动翻页。`?book=<url>&spine=<n>` 可直接打开指定书与章节，方便截图与回归。`fixtures/en.epub` 只用于测试，不进入部署包。部署包里的拉丁回退字体是 `web/latin.ttf`（DejaVu Sans），中日韩字体是 `web/cjk.woff2`（PingFang SC Regular，约 5 MB 单文件）；woff2 本身已是 Brotli 压缩，不再叠加 gzip。`web/manifest.webmanifest` + `web/sw.js` 让应用可安装，并把 wasm、JS 和第一次读到的字体放进 Cache Storage；导航请求优先读应用壳、后台回源，iOS 从主屏冷启动不必再等网络。`web/splash/*.png` 是对应机型的 `apple-touch-startup-image`（`python3 scripts/gen-splash.py` 重新生成），避免首帧前的白屏。字体首次约 5 MB，之后冷启动直接命中本地缓存。缺字时该段退回浏览器系统字体，不会静默消失。
 
 `golden` 比字节；`size` 卡预算；`parity` 用同一份输入分别跑 native 与 wasm，逐字节比对 IR。`bench` 输出 `name<TAB>median_ns`，可直接 diff；基线文件里写明采集机器与 rustc 版本。CI 跑 fmt、clippy `-D warnings`、test、`xtask all` 与 `xtask size`，并在干净 checkout 上直接用入库的 golden 快照。
