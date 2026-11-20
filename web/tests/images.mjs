@@ -238,6 +238,28 @@ if (second) {
     pageLabel.textContent,
   );
   check("the second chapter draws its image", drawnImages.length === 1, `drawn ${drawnImages.length}`);
+
+  // 第二次进入已经解码过的章节：图片必须立刻用缓存画出来，不能先画占位。
+  const first = tocButtons.find((button) => /^One:/.test(button.textContent));
+  check("the first chapter has a toc entry", Boolean(first));
+  if (first) {
+    drawnImages.length = 0;
+    first.dispatchEvent({ type: "click" });
+    for (let i = 0; i < 4; i += 1) {
+      await settle();
+    }
+    check(
+      "returning to a chapter redraws its cached images",
+      drawnImages.length === 2,
+      `drawn ${drawnImages.length}`,
+    );
+    check(
+      "cached images keep their intrinsic rects",
+      drawnImages.some((image) => Math.round(image.w) === 12 && Math.round(image.h) === 6) &&
+        drawnImages.some((image) => Math.round(image.w) === 4 && Math.round(image.h) === 10),
+      JSON.stringify(drawnImages.map((image) => [image.w, image.h])),
+    );
+  }
 }
 
 if (failures.length > 0) {

@@ -1302,10 +1302,14 @@ export function createReader(options) {
     }
     layout = decodeLayout(bytes);
     page = resolveTarget(target);
+    // 图片表必须在第一次 render 之前就位：第二次进入同一章时图片已经解码过，
+    // loadChapterImages 不会再触发重绘，晚赋值会让首帧沿用上一章的 id→href
+    // 映射，画出错误的图或占位。
+    chapterImages = decodeChapterImages();
     highlightToc();
     render();
     saveProgressSoon();
-    loadChapterImages(token).catch(() => {});
+    loadChapterImages(token, chapterImages).catch(() => {});
   }
 
   async function relayout(position) {
@@ -1990,14 +1994,15 @@ export function createReader(options) {
 
   // ---- 图片 ---------------------------------------------------------------
 
-  async function loadChapterImages(token) {
-    let entries = [];
+  function decodeChapterImages() {
     try {
-      entries = decodeImages(eb_chapter_images());
+      return decodeImages(eb_chapter_images());
     } catch (error) {
-      entries = [];
+      return [];
     }
-    chapterImages = entries;
+  }
+
+  async function loadChapterImages(token, entries) {
     if (typeof createImageBitmap !== "function" || typeof Blob !== "function") {
       return;
     }

@@ -191,6 +191,47 @@ pub(crate) fn flow(doc: &ebook_ir::StyledDoc, env: &LayoutEnv<'_>, c: &PageConst
     ctx.flow
 }
 
+/// 图片尺寸 = 显式 width/height，缺一项时按固有宽高比补齐；都没有就用固有尺寸。
+/// 显式百分比以容器宽度为基准，没有被显式尺寸覆盖的那一维再按比例推出来。
+fn resolve_image_size(
+    intrinsic: Option<ebook_ir::SizeF>,
+    style: &ComputedStyle,
+    avail_w: f32,
+) -> Option<ebook_ir::SizeF> {
+    let em = style.font.size;
+    let w = style.width.resolve(avail_w, em);
+    let h = style.height.resolve(0.0, em);
+    let size = match (w, h) {
+        (Some(w), Some(h)) => ebook_ir::SizeF::new(w, h),
+        (Some(w), None) => {
+            let s = intrinsic?;
+            if s.w <= 0.0 || !w.is_finite() {
+                return None;
+            }
+            ebook_ir::SizeF::new(w, s.h * w / s.w)
+        }
+        (None, Some(h)) => {
+            let s = intrinsic?;
+            if s.h <= 0.0 || !h.is_finite() {
+                return None;
+            }
+            ebook_ir::SizeF::new(s.w * h / s.h, h)
+        }
+        (None, None) => intrinsic?,
+    };
+    (size.w.is_finite() && size.h.is_finite() && size.w >= 0.0 && size.h >= 0.0).then_some(size)
+}
+
+/// 只缩不放：宽度超过 `max_w` 时等比缩到 `max_w`。高度跟随宽高比。
+fn fit_width(size: ebook_ir::SizeF, max_w: f32) -> ebook_ir::SizeF {
+    if max_w > 0.0 && size.w.is_finite() && size.w > max_w {
+        let scale = max_w / size.w;
+        ebook_ir::SizeF::new(max_w, (size.h * scale).max(1.0))
+    } else {
+        size
+    }
+}
+
 impl<'a> FlowCtx<'a> {
     fn is_inline_node(&self, id: NodeId) -> bool {
         let node = self.doc.node(id);
@@ -394,7 +435,13 @@ impl<'a> FlowCtx<'a> {
     ) {
         let em = style.font.size;
         let margin = resolve::margins(&style.margin, avail_w, em);
-        let size = self.image_size(img, &style, avail_w);
+        // 只缩不放：图片固有宽度超过容器时等比缩到容器内，避免窄屏（手机）
+        // 上只能看到左边一小块。显式 width/height 同样受这个上限约束，
+        // 阅读器普遍按「适配页宽」处理。
+        let fit_w = (avail_w - margin.horizontal()).max(1.0);
+        let size = self
+            .image_size(img, &style, avail_w)
+            .map(|s| fit_width(s, fit_w));
         let rect = match size {
             Some(s) => RectF::new(x + margin.left, *y, s.w, s.h),
             None => RectF::new(x + margin.left, *y, avail_w.max(1.0), em * 1.5),
@@ -427,32 +474,30 @@ impl<'a> FlowCtx<'a> {
         style: &ComputedStyle,
         avail_w: f32,
     ) -> Option<ebook_ir::SizeF> {
-        let em = style.font.size;
-        let w = style.width.resolve(avail_w, em);
-        let h = style.height.resolve(0.0, em);
-        if let (Some(w), Some(h)) = (w, h) {
-            return Some(ebook_ir::SizeF::new(w, h));
-        }
-        if let Some(size) = self.doc.images.get(img as usize).and_then(|m| m.size) {
-            return Some(size);
-        }
-        self.env.resources.image_size(img)
+        let intrinsic = self
+            .doc
+            .images
+            .get(img as usize)
+            .and_then(|m| m.size)
+            .or_else(|| self.env.resources.image_size(img));
+        resolve_image_size(intrinsic, style, avail_w)
     }
 
     /// 行内图片尺寸：显式宽高 > 文档里的固有尺寸 > 资源查询，都没有就是未知。
-    fn inline_image_size(&self, img: ImageId, style: &ComputedStyle) -> Option<ebook_ir::SizeF> {
-        let em = style.font.size;
-        let w = style.width.resolve(em, em);
-        let h = style.height.resolve(em, em);
-        if let (Some(w), Some(h)) = (w, h) {
-            if w > 0.0 && h > 0.0 {
-                return Some(ebook_ir::SizeF::new(w, h));
-            }
-        }
-        if let Some(size) = self.doc.images.get(img as usize).and_then(|m| m.size) {
-            return Some(size);
-        }
-        self.env.resources.image_size(img)
+    /// 和块级图片一样，超过行宽时等比缩小。
+    fn inline_image_size(
+        &self,
+        img: ImageId,
+        style: &ComputedStyle,
+        avail_w: f32,
+    ) -> Option<ebook_ir::SizeF> {
+        let intrinsic = self
+            .doc
+            .images
+            .get(img as usize)
+            .and_then(|m| m.size)
+            .or_else(|| self.env.resources.image_size(img));
+        resolve_image_size(intrinsic, style, avail_w).map(|s| fit_width(s, avail_w))
     }
 
     fn inline_from(
@@ -465,7 +510,7 @@ impl<'a> FlowCtx<'a> {
     ) {
         let mut pieces = Vec::new();
         for &id in nodes {
-            self.collect(id, &mut pieces);
+            self.collect(id, w, &mut pieces);
         }
         if pieces.is_empty() {
             return;
@@ -473,7 +518,7 @@ impl<'a> FlowCtx<'a> {
         self.break_lines(&pieces, x, y, w, container);
     }
 
-    fn collect(&self, id: NodeId, out: &mut Vec<Piece>) {
+    fn collect(&self, id: NodeId, avail_w: f32, out: &mut Vec<Piece>) {
         let node = self.doc.node(id);
         if node.style.display == Display::None {
             return;
@@ -497,7 +542,7 @@ impl<'a> FlowCtx<'a> {
                 node: id,
                 kind: PieceKind::Image {
                     id: img,
-                    size: self.inline_image_size(img, &node.style),
+                    size: self.inline_image_size(img, &node.style, avail_w),
                 },
             }),
             NodeKind::Ruby { base, rt } => out.push(Piece {
@@ -511,7 +556,7 @@ impl<'a> FlowCtx<'a> {
                 let first_child = node.first_child;
                 for i in 0..child_len {
                     let kid = self.doc.children[(first_child + i) as usize];
-                    self.collect(kid, out);
+                    self.collect(kid, avail_w, out);
                 }
             }
         }

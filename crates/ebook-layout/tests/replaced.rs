@@ -3,7 +3,7 @@
 use ebook_ir::doc::FontSpec;
 use ebook_ir::{
     Anchor, ComputedStyle, Dir, FontId, ImageId, LayoutResult, LineHeight, Node, NodeId, NodeKind,
-    Op, Rgba8, SizeF, Span, StyledDoc, Tag, UnresolvedReason,
+    Op, RectF, Rgba8, SizeF, Span, StyledDoc, Tag, UnresolvedReason,
 };
 use ebook_layout::{layout, LayoutEnv, PageConstraint, ResourceView, TextMeasurer};
 
@@ -222,4 +222,50 @@ fn ruby_draws_rt_above_the_base_without_widening_the_line() {
     assert!(rt_glyphs.iter().all(|g| (g.dy + 5.0).abs() < 0.01));
     // 注音与基文起点相同。
     assert!((runs[0].origin.x - runs[1].origin.x).abs() < 0.01);
+}
+
+fn collect_image_rects(ops: &[Op], out: &mut Vec<RectF>) {
+    for op in ops {
+        match op {
+            Op::Image { rect, .. } => out.push(*rect),
+            Op::Clip { ops, .. } => collect_image_rects(ops, out),
+            _ => {}
+        }
+    }
+}
+
+/// 固有宽度超过页宽的图片必须等比缩到容器内，否则窄屏上只能看到左边一块。
+#[test]
+fn oversized_images_are_scaled_to_fit_the_content_width() {
+    let mut doc = StyledDoc::default();
+    doc.meta.spine = 0;
+    // id 0 的固有尺寸换成 1200x800，页宽只有 400。
+    doc.images.push(ebook_ir::ImageMeta {
+        size: Some(SizeF::new(1200.0, 800.0)),
+        mime: None,
+        alt: None,
+        src: None,
+    });
+    let root = push(&mut doc, NodeKind::Element(Tag::Body), block_style(), None);
+    doc.root = root;
+    let p = push(&mut doc, NodeKind::Element(Tag::P), block_style(), None);
+    let block_img = push(&mut doc, NodeKind::Image(0), block_style(), Some(p));
+    let a = text_node(&mut doc, "x", Some(p));
+    let inline_img = push(&mut doc, NodeKind::Image(0), inline_style(), Some(p));
+    set_kids(&mut doc, p, &[block_img, a, inline_img]);
+    set_kids(&mut doc, root, &[p]);
+
+    let ir = run(&doc);
+    let mut images = Vec::new();
+    collect_image_rects(&ir.display.ops, &mut images);
+    assert_eq!(images.len(), 2, "{:?}", ir.display.ops);
+    for rect in images {
+        assert!(rect.w <= 400.0 + 0.01, "image overflows page: {rect:?}");
+        // 等比：1200x800 -> 宽 400 时高 266.67。
+        assert!((rect.h - rect.w * 2.0 / 3.0).abs() < 0.01, "{rect:?}");
+    }
+    // 行内图片也参与断行，行盒宽度不应超过页宽。
+    for line in &ir.runs.lines {
+        assert!(line.rect.w <= 400.0 + 0.01, "line overflows page: {line:?}");
+    }
 }
