@@ -3,38 +3,7 @@
 // 这个模块只面向已经打开的书。书架视图、导入与持久化由 app.js / library.js
 // 负责；这里通过 options.store 读写进度和字体缓存，方便测试替换。
 
-import {
-  eb_anchor,
-  eb_base_font_size,
-  eb_font,
-  eb_font_count,
-  eb_font_error,
-  eb_font_face,
-  eb_font_face_count,
-  eb_font_reset,
-  eb_page_bitmap,
-  eb_hit,
-  eb_last_error,
-  eb_layout_style,
-  eb_link_at,
-  eb_open,
-  eb_open_text,
-  eb_progress,
-  eb_resolve_link,
-  eb_selection,
-  eb_toc,
-  eb_use_layout,
-} from "./pkg/ebook_web.js";
-import {
-  decodeAnchor,
-  decodeHit,
-  decodeLayout,
-  decodeLink,
-  decodeProgress,
-  decodeResolvedLink,
-  decodeSelection,
-  decodeToc,
-} from "./decode.js";
+import { createEngine } from "./engine-client.js";
 import { createSelection } from "./selection.js";
 import { decodeText } from "./text.js";
 
@@ -71,6 +40,8 @@ export const DEFAULT_SETTINGS = {
 };
 
 const ALIGN_CODES = { book: 0, start: 1, center: 2, end: 3, justify: 4 };
+// 引擎页元数据每页 9 个 f32：w,h,left,right,top,bottom,line_start,line_len,progress。
+const PAGE_META_STRIDE = 9;
 const ALIGNS = Object.keys(ALIGN_CODES);
 
 function element(id) {
@@ -95,10 +66,6 @@ function toBytes(value) {
     return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
   }
   return new Uint8Array(value);
-}
-
-function samePath(a, b) {
-  return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => v === b[i]);
 }
 
 function splitHref(href) {
@@ -185,13 +152,18 @@ export function createReader(options) {
   let animationToken = 0;
   let animating = false;
   let turn = null;
+  // 一次翻页从取位图到动画结束：期间不再接受新的翻页请求。
+  let turning = false;
   // 页面位图缓存：当前页 ±1 的离屏 canvas，翻页/滑动直接搬图，不再重画字形。
   const pageSnapshots = new Map();
   let prefetchTimer = 0;
-  // 排版 worker：主线程不再阻塞在 Layout::layout 上。
-  let layoutWorker = null;
-  let layoutRequestId = 0;
-  const layoutPending = new Map();
+  // 引擎在 worker 里：开书、字体、排版、光栅、查询都只发生在那边。
+  // 主线程只拿页元数据、位图和查询结果。
+  const engine = createEngine(options.engine);
+  // 每次 render 自增：晚到的位图不能盖掉新页。
+  let renderToken = 0;
+  // 位图按页缓存成 canvas，翻页动画与预取共用。
+  // （缓存在 clearPageCache 里随章节/尺寸失效。）
 
   function hasClass(name) {
     const list = document.body && document.body.classList;
@@ -264,30 +236,12 @@ export function createReader(options) {
     return Math.min(window.devicePixelRatio || 1, 3);
   }
 
-  // 引擎整页位图：8 字节小端头（w, h）+ RGBA。绘制全在 Rust 里，
-  // 宿主不做字形缓存、不做图片解码、不做主题调色。
+  // 引擎整页位图：绘制全在 Rust 里，宿主不做字形缓存、不做图片解码、
+  // 不做主题调色；这里只把 worker 送回来的 RGBA 变成 ImageData。
   function enginePageImage(index, dpr) {
-    let bytes;
-    try {
-      bytes = eb_page_bitmap(index, dpr, 0, 0, Boolean(settings.bold));
-    } catch (error) {
-      return null;
-    }
-    if (!bytes || bytes.length < 8) {
-      return null;
-    }
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const width = view.getUint32(0, true);
-    const height = view.getUint32(4, true);
-    const need = 8 + width * height * 4;
-    if (!width || !height || bytes.length < need) {
-      return null;
-    }
-    const data = new Uint8ClampedArray(bytes.buffer, bytes.byteOffset + 8, width * height * 4);
-    if (typeof ImageData === "function") {
-      return new ImageData(data, width, height);
-    }
-    return { width, height, data };
+    return engine
+      .bitmap(index, dpr, 0, 0, Boolean(settings.bold))
+      .catch(() => null);
   }
 
   // 主题滤镜写在 `#page` 上（sepia/dark），引擎只认纸色与墨色。
@@ -301,7 +255,7 @@ export function createReader(options) {
     }
   }
 
-  function render() {
+  async function render() {
     if (!layout || !layout.pages.length) {
       return;
     }
@@ -324,12 +278,17 @@ export function createReader(options) {
       clearPageCache();
     }
     renderDpr = dpr;
+    const token = ++renderToken;
     const cached = canCopy ? cachedPageCanvas(shown) : null;
     if (cached && cached.width === pixelW && cached.height === pixelH) {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.drawImage(cached, 0, 0);
     } else {
-      const image = enginePageImage(shown, dpr);
+      const image = await enginePageImage(shown, dpr);
+      // 期间又翻了页/换了章：这一张位图已经过期，交给更晚的 render。
+      if (token !== renderToken || page !== shown) {
+        return;
+      }
       if (image) {
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.putImageData(image, 0, 0);
@@ -383,12 +342,12 @@ export function createReader(options) {
   }
 
   // 任意一页的离屏快照：一次引擎调用出一张位图，预取与滑动共用同一个出口。
-  function renderPageCanvas(index) {
+  async function renderPageCanvas(index) {
     if (!canCopy || !layout || !layout.pages[index]) {
       return null;
     }
     const dpr = renderDpr || pageDpr();
-    const image = enginePageImage(index, dpr);
+    const image = await enginePageImage(index, dpr);
     if (!image) {
       return null;
     }
@@ -400,6 +359,19 @@ export function createReader(options) {
       return null;
     }
     snapCtx.putImageData(image, 0, 0);
+    return snap;
+  }
+
+  // 快照缓存缺失时现取一张（引擎一次调用，主线程不做光栅）。
+  async function ensurePageCanvas(index) {
+    const cached = cachedPageCanvas(index);
+    if (cached) {
+      return cached;
+    }
+    const snap = await renderPageCanvas(index);
+    if (snap) {
+      cachePageCanvas(index, snap);
+    }
     return snap;
   }
 
@@ -416,7 +388,7 @@ export function createReader(options) {
     }, 120);
   }
 
-  function prefetchNeighbor() {
+  async function prefetchNeighbor() {
     if (!canCopy || !layout || animating || turn) {
       return;
     }
@@ -430,11 +402,11 @@ export function createReader(options) {
     if (index === undefined) {
       return;
     }
-    const run = () => {
+    const run = async () => {
       if (token !== layoutToken || !layout || animating || turn) {
         return;
       }
-      cachePageCanvas(index, renderPageCanvas(index));
+      cachePageCanvas(index, await renderPageCanvas(index));
       // 一次只预渲染一页：首屏交互优先，另一页留给下一次空闲。
       if (
         [page + 1, page - 1].some(
@@ -494,7 +466,7 @@ export function createReader(options) {
 
   function bookProgress(shown) {
     const info = layout.pages[shown];
-    const inChapter = decodeProgress(eb_progress(shown, info.lines.start, 0));
+    const inChapter = Number(info.progress) || 0;
     const total = book && book.spine.length ? book.spine.length : 1;
     return clamp((chapter + inChapter) / total, 0, 1);
   }
@@ -532,10 +504,10 @@ export function createReader(options) {
     }
   }
 
-  function fillToc() {
+  async function fillToc() {
     let entries = [];
     try {
-      entries = decodeToc(eb_toc());
+      entries = await engine.toc();
     } catch (error) {
       entries = [];
     }
@@ -582,10 +554,10 @@ export function createReader(options) {
     highlightToc();
   }
 
-  function updateBook() {
+  async function updateBook() {
     titleEl.textContent = book.title || currentRecord?.title || "untitled";
     metaEl.textContent = currentRecord?.author || book.creator || book.language || book.lang || "";
-    fillToc();
+    await fillToc();
   }
 
   async function goToToc(entry) {
@@ -729,26 +701,55 @@ export function createReader(options) {
     const dims = layoutDims();
     layoutDimsUsed = dims;
     const token = ++layoutToken;
-    const result = await requestLayout(spine, dims, layoutFontScale());
+    let pages;
+    try {
+      pages = await engine.layout({
+        spine,
+        width: dims.width,
+        height: dims.height,
+        left: dims.left,
+        right: dims.right,
+        top: dims.top,
+        bottom: dims.bottom,
+        fontScale: layoutFontScale(),
+        lineScale: settings.lineHeight,
+        letter: settings.letterSpacing,
+        align: ALIGN_CODES[settings.align] ?? 0,
+      });
+    } catch (error) {
+      throw new Error(`第 ${spine + 1} 章排版失败：${error.message || error}`);
+    }
     if (token !== layoutToken) {
       return;
     }
-    const bytes = result.bytes;
-    if (!bytes || !bytes.length) {
-      const reason = eb_last_error();
-      throw new Error(`第 ${spine + 1} 章排版失败${reason ? `：${reason}` : ""}`);
-    }
-    if (result.worker) {
-      const error = eb_use_layout(spine, bytes);
-      if (error) {
-        throw new Error(`第 ${spine + 1} 章交互状态同步失败：${error}`);
-      }
-    }
-    layout = decodeLayout(bytes);
+    layout = { pages: pagesFromMeta(pages) };
     page = resolveTarget(target);
     highlightToc();
-    render();
+    await render();
     saveProgressSoon();
+  }
+
+  // 引擎只送页盒子/行区间/进度，整份 IR 不再过线程。
+  function pagesFromMeta(meta) {
+    const pages = [];
+    const values = (meta && meta.values) || [];
+    const count = (meta && meta.count) || 0;
+    for (let index = 0; index < count; index += 1) {
+      const at = index * PAGE_META_STRIDE;
+      pages.push({
+        index,
+        size: { w: values[at], h: values[at + 1] },
+        inset: {
+          left: values[at + 2],
+          right: values[at + 3],
+          top: values[at + 4],
+          bottom: values[at + 5],
+        },
+        lines: { start: values[at + 6] | 0, len: values[at + 7] | 0 },
+        progress: values[at + 8],
+      });
+    }
+    return pages;
   }
 
   async function relayout(position) {
@@ -760,156 +761,6 @@ export function createReader(options) {
       ratio: layout.pages.length ? page / layout.pages.length : 0,
     };
     await layoutChapter(chapter, keep);
-  }
-
-  // ---- 排版 worker ---------------------------------------------------------
-
-  function failLayoutWorker(reason = "排版 worker 不可用") {
-    const worker = layoutWorker;
-    layoutWorker = null;
-    if (worker && typeof worker.terminate === "function") {
-      worker.terminate();
-    }
-    for (const [id, pending] of layoutPending) {
-      layoutPending.delete(id);
-      pending.reject(new Error(reason));
-    }
-  }
-
-  function postWorker(message, transfer) {
-    if (!layoutWorker) {
-      return false;
-    }
-    try {
-      layoutWorker.postMessage(message, transfer || []);
-      return true;
-    } catch (error) {
-      failLayoutWorker(String((error && error.message) || error));
-      return false;
-    }
-  }
-
-  function startLayoutWorker() {
-    if (typeof Worker !== "function") {
-      return;
-    }
-    try {
-      layoutWorker = new Worker(new URL("./layout-worker.js", import.meta.url), {
-        type: "module",
-      });
-    } catch (error) {
-      layoutWorker = null;
-      return;
-    }
-    layoutWorker.addEventListener("message", (event) => {
-      const msg = event.data || {};
-      if (msg.type === "fatal") {
-        failLayoutWorker(msg.error || "排版 worker 不可用");
-        return;
-      }
-      if (msg.type !== "layout") {
-        return;
-      }
-      const pending = layoutPending.get(msg.id);
-      if (!pending) {
-        return;
-      }
-      layoutPending.delete(msg.id);
-      if (msg.error) {
-        pending.reject(new Error(msg.error));
-      } else {
-        pending.resolve(new Uint8Array(msg.bytes));
-      }
-    });
-    layoutWorker.addEventListener("error", (event) => {
-      failLayoutWorker((event && event.message) || "排版 worker 加载失败");
-    });
-  }
-
-  function workerLayout(params) {
-    return new Promise((resolve, reject) => {
-      const id = ++layoutRequestId;
-      const timer = setTimeout(() => {
-        if (!layoutPending.has(id)) {
-          return;
-        }
-        layoutPending.delete(id);
-        reject(new Error("排版 worker 超时"));
-      }, 8000);
-      layoutPending.set(id, {
-        resolve: (bytes) => {
-          clearTimeout(timer);
-          resolve(bytes);
-        },
-        reject: (error) => {
-          clearTimeout(timer);
-          reject(error);
-        },
-      });
-      if (!postWorker({ type: "layout", id, ...params })) {
-        layoutPending.delete(id);
-        clearTimeout(timer);
-        reject(new Error("排版 worker 不可用"));
-      }
-    });
-  }
-
-  function workerBook(message) {
-    if (!layoutWorker) {
-      return;
-    }
-    postWorker({ type: "open", ...message });
-  }
-
-  function workerFont(bytes) {
-    if (!layoutWorker || !bytes || !bytes.length) {
-      return;
-    }
-    const copy = new Uint8Array(bytes);
-    postWorker({ type: "font", bytes: copy }, [copy.buffer]);
-  }
-
-  function workerFontReset() {
-    postWorker({ type: "font-reset" });
-  }
-
-  // 主线程拿 worker 的 IR 装回交互状态；worker 不可用时退回主线程排版。
-  async function requestLayout(spine, dims, fontScale) {
-    const params = {
-      spine,
-      width: dims.width,
-      height: dims.height,
-      left: dims.left,
-      right: dims.right,
-      top: dims.top,
-      bottom: dims.bottom,
-      fontScale,
-      lineScale: settings.lineHeight,
-      letter: settings.letterSpacing,
-      align: ALIGN_CODES[settings.align] ?? 0,
-    };
-    if (layoutWorker) {
-      try {
-        const bytes = await workerLayout(params);
-        return { bytes, worker: true };
-      } catch (error) {
-        failLayoutWorker(String((error && error.message) || error));
-      }
-    }
-    const bytes = eb_layout_style(
-      params.spine,
-      params.width,
-      params.height,
-      params.left,
-      params.right,
-      params.top,
-      params.bottom,
-      params.fontScale,
-      params.lineScale,
-      params.letter,
-      params.align,
-    );
-    return { bytes, worker: false };
   }
 
   // ---- 翻页动画 -----------------------------------------------------------
@@ -1069,26 +920,23 @@ export function createReader(options) {
     beginAnimation(SLIDE_MS + 60);
   }
 
-  function animatePageTo(target, direction) {
+  async function animatePageTo(target, direction) {
     const mode = settings.animation;
-    if (mode === "none") {
-      selection.clear();
-      page = target;
-      render();
-      saveProgressSoon();
-      return;
-    }
     const from = page;
-    const snap = snapshotPage();
+    const snap = mode === "none" ? null : snapshotPage();
     if (snap) {
       cachePageCanvas(from, snap);
     }
-    const targetSnap = cachedPageCanvas(target);
+    // 目标位图在切换前就位：动画第一帧不会出现“空页”。
+    const targetSnap = mode === "none" ? null : await ensurePageCanvas(target);
+    if (page !== from) {
+      return;
+    }
     selection.clear();
     page = target;
-    render();
+    await render();
     saveProgressSoon();
-    if (!snap) {
+    if (!snap || mode === "none") {
       return;
     }
     if (mode === "fade") {
@@ -1112,24 +960,27 @@ export function createReader(options) {
     }
   }
 
-  function turnPage(direction) {
-    if (!layout || busy || animating) {
+  async function turnPage(direction) {
+    if (!layout || busy || animating || turning) {
       return;
     }
-    if (direction > 0) {
-      if (page + 1 < layout.pages.length) {
-        animatePageTo(page + 1, 1);
-      } else if (chapter + 1 < book.spine.length) {
-        animateChapterTo(chapter + 1, 1).catch((error) =>
-          setStatus(String(error.message || error)),
-        );
+    turning = true;
+    try {
+      if (direction > 0) {
+        if (page + 1 < layout.pages.length) {
+          await animatePageTo(page + 1, 1);
+        } else if (chapter + 1 < book.spine.length) {
+          await animateChapterTo(chapter + 1, 1);
+        }
+      } else if (page > 0) {
+        await animatePageTo(page - 1, -1);
+      } else if (chapter > 0) {
+        await animateChapterTo(chapter - 1, -1);
       }
-    } else if (page > 0) {
-      animatePageTo(page - 1, -1);
-    } else if (chapter > 0) {
-      animateChapterTo(chapter - 1, -1).catch((error) =>
-        setStatus(String(error.message || error)),
-      );
+    } catch (error) {
+      setStatus(String(error.message || error));
+    } finally {
+      turning = false;
     }
     if (!hasClass("chrome-hidden")) {
       scheduleChromeHide(1800);
@@ -1137,17 +988,17 @@ export function createReader(options) {
   }
 
   function nextPage() {
-    turnPage(1);
+    return turnPage(1);
   }
 
   function prevPage() {
-    turnPage(-1);
+    return turnPage(-1);
   }
 
   // 跟手滑动：先抓当前页，再把目标页临时画到 canvas 上抓第二张快照，
   // 随后恢复原页。两张快照跟手指移动，松手时按位移+速度决定翻页或回弹。
-  function beginSwipe(direction) {
-    if (!layout || busy || animating || settings.animation !== "slide") {
+  async function beginSwipe(direction) {
+    if (!layout || busy || animating || turning || settings.animation !== "slide") {
       return false;
     }
     const forward = direction === "next";
@@ -1155,17 +1006,18 @@ export function createReader(options) {
     if (target < 0 || target >= layout.pages.length) {
       return false;
     }
+    const from = page;
     const fromSnap = snapshotPage();
     if (!fromSnap) {
       return false;
     }
-    // 邻页已经预渲染好时，起手不再临时排版/重绘两次；缓存缺失就退回
-    // 普通滑动动画，避免在手指刚动时同步画整页。
-    const toSnap = cachedPageCanvas(target);
-    if (!toSnap) {
+    // 邻页通常已经预取好；没有就现取一张（异步，主线程只等一次 RPC），
+    // 手指已经开始动时最多晚一帧跟上。
+    const toSnap = await ensurePageCanvas(target);
+    if (!toSnap || page !== from) {
       return false;
     }
-    cachePageCanvas(page, fromSnap);
+    cachePageCanvas(from, fromSnap);
     const oldEl = placeOverlay(fromSnap);
     const newEl = placeOverlay(toSnap);
     if (!oldEl || !newEl) {
@@ -1278,12 +1130,7 @@ export function createReader(options) {
     if (!href || !book) {
       return;
     }
-    let target = null;
-    try {
-      target = decodeResolvedLink(eb_resolve_link(href));
-    } catch (error) {
-      target = null;
-    }
+    const target = await engine.resolveLink(href).catch(() => null);
     if (target) {
       if (target.external) {
         setStatus(`外链：${href}`);
@@ -1319,84 +1166,37 @@ export function createReader(options) {
   }
 
   async function jumpToFragment(fragment) {
-    let anchor = null;
-    try {
-      anchor = decodeAnchor(eb_anchor(fragment));
-    } catch (error) {
-      anchor = null;
-    }
-    if (!anchor) {
+    const line = await engine.fragmentLine(fragment).catch(() => null);
+    if (line === null || line === undefined) {
       setStatus(`找不到锚点 #${fragment}`);
       return;
     }
-    await jumpToAnchor(anchor);
+    await jumpToLine(line);
   }
 
-  async function jumpToAnchor(anchor) {
+  async function jumpToLine(line) {
     if (animating || turn) {
       cancelAnimation();
-    }
-    const index = Number(anchor.spine || 0);
-    if (index !== chapter) {
-      await layoutChapter(index, 0);
-    }
-    const line = locateAnchor(anchor);
-    if (line === null) {
-      setStatus("锚点不在本章");
-      return;
     }
     const target = layout.pages.findIndex(
       (info) => line >= info.lines.start && line < info.lines.start + info.lines.len,
     );
-    if (target >= 0) {
-      page = target;
-      selection.clear();
-      render();
-      saveProgressSoon();
+    if (target < 0) {
+      setStatus("锚点不在本章");
+      return;
     }
-  }
-
-  function locateAnchor(anchor) {
-    if (!layout) {
-      return null;
-    }
-    let last = null;
-    for (let index = 0; index < layout.runs.lines.length; index += 1) {
-      const line = layout.runs.lines[index];
-      const start = line.anchor;
-      if (!start || start.spine !== anchor.spine) {
-        continue;
-      }
-      if (!samePath(start.path, anchor.path)) {
-        continue;
-      }
-      const byte = anchor.offset - start.offset;
-      if (byte >= 0 && byte <= line.src.len) {
-        return index;
-      }
-      last = index;
-    }
-    return last;
+    page = target;
+    selection.clear();
+    await render();
+    saveProgressSoon();
   }
 
   const selection = createSelection({
     canvas,
     page: () => (layout ? { index: page, info: layout.pages[page], layout } : null),
-    hit: (index, x, y) => {
-      try {
-        return decodeHit(eb_hit(index, x, y));
-      } catch (error) {
-        return null;
-      }
-    },
-    select: (a, b) => decodeSelection(eb_selection(a.page, a.line, a.byte, b.page, b.line, b.byte)),
-    linkAt: (index, x, y) => {
-      try {
-        return decodeLink(eb_link_at(index, x, y));
-      } catch (error) {
-        return null;
-      }
-    },
+    hit: (index, x, y) => engine.hit(index, x, y).catch(() => null),
+    select: (a, b) => engine.selection(a, b),
+    linkAt: (index, x, y) => engine.linkAt(index, x, y).catch(() => null),
     onLink: (href) => {
       followLink(href).catch((error) => setStatus(String(error.message || error)));
     },
@@ -1437,43 +1237,27 @@ export function createReader(options) {
 
   // ---- 字体 ---------------------------------------------------------------
 
-  async function loadEmbeddedFonts(info, token) {
-    const faces = Array.isArray(info.fonts) ? info.fonts : [];
-    if (!faces.length) {
-      return false;
-    }
-    const count = eb_font_face_count();
-    let loaded = 0;
-    let lastError = null;
-    for (let index = 0; index < count; index += 1) {
-      if (token !== openToken) {
-        return false;
-      }
-      if (eb_font_face(index) === 0xffffffff) {
-        lastError = eb_font_error() || lastError;
-        continue;
-      }
-      loaded += 1;
-    }
+  // 内嵌字体在 worker 里注册：主线程一个字节都不用拿。
+  async function loadEmbeddedFonts(token) {
+    const faces = await engine.fontFaces().catch((error) => ({ error: String(error.message || error) }));
     if (token !== openToken) {
       return false;
     }
-    if (lastError) {
+    const loaded = Number(faces && faces.loaded) || 0;
+    const error = (faces && faces.error) || "";
+    if (error) {
       // 有字体成功时不要用状态栏盖住正常进度，但诊断仍要让人看得到。
       if (loaded) {
-        console.warn(lastError);
+        console.warn(error);
       } else {
-        setStatus(lastError);
+        setStatus(error);
       }
     }
     return loaded > 0;
   }
 
   async function loadFont(bytes) {
-    if (eb_font(bytes) === 0xffffffff) {
-      throw new Error(eb_font_error() || "字体无法解析");
-    }
-    workerFont(bytes);
+    await engine.font(bytes);
   }
 
   async function fetchFirst(urls) {
@@ -1577,7 +1361,7 @@ export function createReader(options) {
 
   // 同步决定这本书需要哪套字体。字体变了才重置 FontBook；
   // 同一套字体换书则全部复用，热开书不再重付首帧光栅化。
-  function planFonts(info, record) {
+  async function planFonts(info, record) {
     const key = fontKeyFor(info, record);
     if (fontState && fontState.key === key && fontState.ok) {
       return { key, kind: fontState.kind, reuse: true };
@@ -1587,8 +1371,7 @@ export function createReader(options) {
       : key === "default:cjk"
         ? "cjk"
         : "latin";
-    eb_font_reset();
-    workerFontReset();
+    await engine.fontReset();
     builtinEl.checked = false;
     fontProgressVisible = true;
     fontState = { key, kind, ok: false };
@@ -1645,7 +1428,7 @@ export function createReader(options) {
     }
     let ok = false;
     if (plan.kind === "embedded") {
-      ok = await loadEmbeddedFonts(info, token);
+      ok = await loadEmbeddedFonts(token);
     } else if (plan.kind === "cjk") {
       try {
         ok = await loadRemoteFont(token);
@@ -1790,7 +1573,6 @@ export function createReader(options) {
 
   // ---- 事件 ---------------------------------------------------------------
 
-  startLayoutWorker();
   // 选区/翻页期间不要把工具栏从用户脚下抽走。
   canvas.addEventListener("pointerdown", clearChromeTimer);
   prevEl.addEventListener("click", prevPage);
@@ -1932,8 +1714,7 @@ export function createReader(options) {
           // 手动换过字体：下次开书重建 FontBook，不能沿用旧的字体身份。
           fontState = null;
         } else {
-          eb_font_reset();
-          workerFontReset();
+          await engine.fontReset();
           fontState = null;
           setStatus("使用系统字体");
         }
@@ -1981,39 +1762,30 @@ export function createReader(options) {
       if (!raw || !raw.length) {
         throw new Error("书籍数据不存在");
       }
-      let info;
+      // 开书只在 worker 里发生一次：BOOK 在那边成为唯一权威，主线程拿
+      // 元数据（目录/章节/内嵌字体表）就够画界面了。
       let openedText = "";
       if (record.format === "txt") {
         openedText = decodeText(raw);
         if (!openedText.trim()) {
           throw new Error("TXT 内容为空");
         }
-        info = JSON.parse(eb_open_text(openedText, record.name || record.title || "untitled.txt"));
-      } else {
-        info = JSON.parse(eb_open(raw));
       }
-      if (info.error) {
-        throw new Error(info.error);
-      }
+      const opened = await engine.open(
+        record.format === "txt"
+          ? { kind: "txt", text: openedText, name: record.name || record.title || "untitled.txt" }
+          : { kind: "epub", bytes: raw },
+      );
+      const info = opened.book;
       book = info;
       currentRecord = record;
-      baseFontSize = Number(eb_base_font_size()) || DEFAULT_SETTINGS.fontSize;
+      baseFontSize = Number(opened.baseFontSize) || DEFAULT_SETTINGS.fontSize;
       chapter = 0;
       page = 0;
       layout = null;
       layoutDimsUsed = null;
       setChromeHidden(isNarrowView());
-      const plan = planFonts(info, record);
-      if (record.format === "txt") {
-        workerBook({
-          kind: "txt",
-          text: openedText,
-          name: record.name || record.title || "untitled.txt",
-          loadEmbedded: !plan.reuse,
-        });
-      } else {
-        workerBook({ kind: "epub", bytes: raw, loadEmbedded: !plan.reuse });
-      }
+      const plan = await planFonts(info, record);
       // 字体和首章排版并行：缓存命中通常能在 FONT_WAIT_MS 内完成，直接等；
       // 冷启动要下载 1.5 MB 时先用系统字体画一页，字体到齐后再 relayout。
       const fontReady = prepareFonts(info, plan, token).catch((error) => {
@@ -2031,7 +1803,7 @@ export function createReader(options) {
       if (token !== openToken) {
         return info;
       }
-      updateBook();
+      await updateBook();
       const progress = await Promise.resolve(store.getProgress(record.id)).catch(() => null);
       let target = 0;
       let startChapter = 0;
@@ -2105,6 +1877,8 @@ export function createReader(options) {
   }
 
   return {
+    /** 预热引擎（wasm 在 worker 里实例化）。 */
+    ready: () => engine.ready(),
     open,
     close,
     refresh,

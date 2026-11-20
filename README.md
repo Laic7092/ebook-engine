@@ -124,7 +124,7 @@ op 坐标是**排版流坐标**，不是页面内坐标。`Page.origin` 表示�
 |---|---|---|
 | SVG | `ebook-render` | 参考实现，输出可以直接看，也方便和浏览器排同一份 XHTML 做差分 |
 | 光栅 | `ebook-raster` | 整数混合，跨平台逐字节一致；`to_ppm()` 可以落到文件 |
-| Canvas2D | `web/` | 浏览器阅读器：整页位图来自 `eb_page_bitmap`，宿主只做 `putImageData` + 交互 |
+| Canvas2D | `web/` | 浏览器阅读器：wasm 在 worker 里，整页位图来自 `eb_page_bitmap`，主线程只做 `putImageData` + 交互 |
 
 `paint()` 是三个后端共用的 op 遍历，坐标只在这里被平移到页面内，后端自己不碰坐标。
 

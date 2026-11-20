@@ -131,6 +131,10 @@ pub fn open_file(bytes: &[u8], name: &str) -> String {
 
 fn install(backend: Backend) -> String {
     let json = book_json(backend.book());
+    // 交互状态跟着上一本书：打开新书时 `LAST` 必须清掉，否则排版之前
+    // 的查询/位图会读到旧书的页与行。
+    *LAST.lock().unwrap() = None;
+    *LAST_ERROR.lock().unwrap() = None;
     *BOOK.lock().unwrap() = Some(backend);
     // 图片缓存属于上一本书：href 空间会变，留着只会浪费内存。
     IMAGES.lock().unwrap().clear();
@@ -419,35 +423,81 @@ pub fn toc_json() -> String {
     out
 }
 
-/// 本章的 `id → Anchor`：`{"anchor":{"spine":0,"path":[3,9],"offset":0}}`
-/// 或 `{"anchor":null}`。切章之后要重新查。
-pub fn anchor_json(fragment: &str) -> String {
-    let anchor = with_last(|last| {
-        last.anchors
+/// 当前章节里 `#fragment` 对应的行号（`u32::MAX` = 本章没有这个锚点）。
+///
+/// 宿主只需要行号：翻页/滚动是行号问题，锚点结构（spine/path/offset）是
+/// 引擎内部表示，不该穿过 ABI。
+pub fn fragment_line(fragment: &str) -> u32 {
+    let line = with_last(|last| {
+        let anchor = last
+            .anchors
             .iter()
             .find(|entry| entry.id == fragment)
-            .map(|entry| entry.anchor.clone())
+            .map(|entry| &entry.anchor)?;
+        let mut fallback = None;
+        for (index, line) in last.ir.runs.lines.iter().enumerate() {
+            let Some(line_anchor) = line.anchor.as_ref() else {
+                continue;
+            };
+            if line_anchor.spine != anchor.spine || !line_anchor.path.starts_with(&anchor.path) {
+                continue;
+            }
+            // 元素级锚点（`<p id>`）落在更深的文本节点路径上：定位到该元素的
+            // 第一行。同一层路径才谈得上字节偏移。
+            if line_anchor.path.len() > anchor.path.len() {
+                return Some(index as u32);
+            }
+            if anchor.offset >= line_anchor.offset
+                && anchor.offset - line_anchor.offset <= line.src.len
+            {
+                return Some(index as u32);
+            }
+            fallback = Some(index as u32);
+        }
+        fallback
     })
     .flatten();
-    let mut out = String::from("{\"anchor\":");
-    match anchor {
-        Some(anchor) => {
-            let _ = write!(
-                out,
-                "{{\"spine\":{},\"path\":[{}],\"offset\":{}}}",
-                anchor.spine,
-                anchor
-                    .path
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(","),
-                anchor.offset
-            );
+    line.unwrap_or(u32::MAX)
+}
+
+/// 页级元数据：`[count: u32]` + 每页 9 个 f32
+/// （`w, h, left, right, top, bottom, line_start, line_len, progress`）。
+///
+/// 宿主只需要页盒子、行区间和本章进度就能翻页/滚动/画进度条，不需要整份
+/// IR。这比在 JS 里解 IR 少两个数量级的对象分配。
+pub fn page_meta() -> Vec<u8> {
+    let pages = with_last(|last| {
+        let reader = last.reader();
+        last.ir
+            .pages
+            .iter()
+            .map(|page| {
+                [
+                    page.size.w,
+                    page.size.h,
+                    page.inset.left,
+                    page.inset.right,
+                    page.inset.top,
+                    page.inset.bottom,
+                    page.lines.start as f32,
+                    page.lines.len as f32,
+                    reader.progress(Location {
+                        page: page.index,
+                        line: page.lines.start,
+                        byte: 0,
+                    }),
+                ]
+            })
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+    let mut out = Vec::with_capacity(4 + pages.len() * 36);
+    out.extend_from_slice(&(pages.len() as u32).to_le_bytes());
+    for page in &pages {
+        for value in page {
+            out.extend_from_slice(&value.to_le_bytes());
         }
-        None => out.push_str("null"),
     }
-    out.push('}');
     out
 }
 
@@ -742,27 +792,6 @@ fn layout_doc_full_edges(
 fn with_last<T>(read: impl FnOnce(&LastLayout) -> T) -> Option<T> {
     let slot = LAST.lock().unwrap();
     slot.as_ref().map(read)
-}
-
-/// 把 worker 排版好的 IR 装回主线程。命中、选区、链接、进度都读 `LAST`，
-/// 主线程不需要再跑一遍 `Layout`；只重建 `StyledDoc` 取回选区原文与图片表。
-/// 返回空串表示成功，否则是给宿主显示的错误。
-pub fn adopt_layout(spine: usize, bytes: &[u8]) -> String {
-    let ir: LayoutResult = match codec::decode(bytes) {
-        Ok(ir) => ir,
-        Err(error) => return format!("decode: {error:?}"),
-    };
-    let books = BOOK.lock().unwrap();
-    let Some(reader) = books.as_ref() else {
-        return String::from("no book");
-    };
-    match reader.chapter_with_anchors(spine) {
-        Ok((doc, _, anchors)) => {
-            *LAST.lock().unwrap() = Some(LastLayout { ir, doc, anchors });
-            String::new()
-        }
-        Err(error) => format!("chapter: {error:?}"),
-    }
 }
 
 /// 页内坐标 → 原文位置。`{"location":{...}}` 或 `{"location":null}`。

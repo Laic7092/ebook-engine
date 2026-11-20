@@ -581,7 +581,7 @@ trait Renderer {
 |---|---|---|
 | 参考 | `SvgRenderer` + `SvgSurface` | 可直接看的 SVG；文本用 `GlyphRun.text` |
 | 光栅 | `RgbaSurface` | RGBA8，整数混合，跨平台逐字节一致 |
-| Canvas2D | `web/reader.js` | 浏览器阅读器，文本可选中 |
+| Canvas2D | `web/reader.js` | 浏览器阅读器，文本可选中；wasm 在 `web/engine-worker.js` 里 |
 
 `RgbaSurface::to_ppm()` 输出 P6 PPM，`to_rgba()` 输出裸 RGBA8；
 `render_page()` 会先清成白色再画。`RgbaSurface::from_page(page)` 用
@@ -591,6 +591,11 @@ DPR 不进入 IR：`ScaledSurface` 装饰任何 `Surface`，把坐标、边框�
 advance 与**字号**一起乘 `scale`，因此字形按设备像素光栅化，而不是画完再放大。
 `scale = 1` 与直接绘制逐字节相同（`crates/ebook-raster/tests/scale.rs`）。
 `eb_page_bitmap` 就是“`ScaledSurface` + `RgbaSurface` + `paint`”这三件套。
+
+线程模型：wasm 实例只创建在 worker 里（`web/engine-worker.js`），主线程通过
+`web/engine-client.js` 发 RPC。开书/注册字体/排版/光栅/查询都在 worker 完成，
+回来的只有页元数据（`eb_page_meta`）、位图（`eb_page_bitmap`，`ArrayBuffer`
+`transfer`）与查询结果；IR 字节不过线程边界，主线程也不 import wasm。
 
 ---
 
@@ -608,7 +613,8 @@ advance 与**字号**一起乘 `scale`，因此字形按设备像素光栅化，
 | `eb_layout(spine, w, h, margin)` | `epub` | 排版已打开书籍的指定章 |
 | `eb_layout_insets(spine, w, h, left, right, top, bottom, font_scale)` | `epub` | 四边独立页边距 + 只缩放字号/行高；页面容器不变 |
 | `eb_layout_style(spine, w, h, left, right, top, bottom, font_scale, line_scale, letter_px, align)` | `epub` | 在四边页边距上再独立覆盖行距/字距/对齐；`align` 0=原书、1=左、2=中、3=右、4=两端 |
-| `eb_use_layout(spine, bytes)` | `epub` | 把 worker 排版好的 IR 装回主线程的命中/选区/链接状态；空串表示成功 |
+| `eb_page_meta()` | `epub` | 页级元数据：`[count:u32]` + 每页 9 个 f32（`w,h,left,right,top,bottom,line_start,line_len,progress`）；宿主不解析 IR 就能翻页/画进度 |
+| `eb_fragment_line(fragment)` | `epub` | 当前章 `#fragment` 的行号，`u32::MAX` = 本章没有这个锚点 |
 | `eb_base_font_size()` | `epub` | 当前书首章根节点字号；宿主用它把 px 字号换算成缩放比例 |
 | `eb_font(bytes)` | `epub` | 注册字体，返回 id；失败 `u32::MAX` |
 | `eb_font_reset()` / `eb_font_count()` | `epub` | 字体槽管理 |
@@ -617,6 +623,8 @@ advance 与**字号**一起乘 `scale`，因此字形按设备像素光栅化，
 | `eb_link_at(page, x, y)` | 任意 | 页内坐标上的链接：`{"href":"..."|"null"}` |
 | `eb_selection(a_page,a_line,a_byte,b_page,b_line,b_byte)` | 任意 | 选区：`{start,end,rects:[{page,rect}],text}` |
 | `eb_progress(page, line, byte)` | 任意 | 全书进度：`{"progress":0..1}` |
+| `eb_toc()` | 任意 | 目录：`[{label,spine,fragment,depth}]`，`spine` 可为 `null` |
+| `eb_resolve_link(href)` | 任意 | 在当前章上下文里解析书内链接：`{target:{spine,fragment,external}}` |
 | `eb_version()` | 任意 | `(major << 16) | minor` |
 
 `eb_hit` / `eb_link_at` / `eb_selection` / `eb_progress` 都作用在**最近一次**

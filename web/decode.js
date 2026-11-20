@@ -341,25 +341,6 @@ export function decodeToc(input) {
   });
 }
 
-export function decodeAnchor(input) {
-  const value = parseJson(input, "anchor");
-  if (value.anchor === null || value.anchor === undefined) {
-    return null;
-  }
-  const anchor = value.anchor;
-  if (!Array.isArray(anchor.path)) {
-    throw new Error("anchor: path is not an array");
-  }
-  for (const step of anchor.path) {
-    nonNegativeInt(step, "anchor", "path step");
-  }
-  return {
-    spine: nonNegativeInt(anchor.spine, "anchor", "spine"),
-    path: anchor.path.slice(),
-    offset: nonNegativeInt(anchor.offset, "anchor", "offset"),
-  };
-}
-
 export function decodeResolvedLink(input) {
   const value = parseJson(input, "resolve");
   if (value.target === null || value.target === undefined) {

@@ -6,7 +6,6 @@
 //   reader.js    阅读页、排版、目录、字体、进度
 //   text.js      文件格式识别与 TXT 编码检测
 
-import init from "./pkg/ebook_web.js";
 import * as store from "./db.js";
 import { createLibrary } from "./library.js";
 import { createReader, DEFAULT_SETTINGS } from "./reader.js";
@@ -30,10 +29,11 @@ const settingsApplied = new Promise((resolve) => {
   resolveSettingsApplied = resolve;
 });
 
-// 书架和 wasm 并行加载；真正打开书/排版前才等 wasm 与设置就绪。
+// 书架和引擎并行加载；真正打开书/排版前才等引擎与设置就绪。
+// wasm 只在 worker 里实例化，主线程自己不 import 它。
 function ensureWasm() {
   if (!wasmReady) {
-    wasmReady = init();
+    wasmReady = reader.ready();
   }
   return wasmReady;
 }
@@ -364,10 +364,10 @@ async function boot() {
   const savedSettings = store.getSetting(SETTINGS_KEY).catch(() => null);
 
   try {
-    setStatus("正在加载 wasm");
+    setStatus("正在启动引擎");
     await ensureWasm();
   } catch (error) {
-    setBanner(`wasm 加载失败：${error.message || error}。请确认 web/pkg/ 已构建（./web/build.sh），并且通过 http 访问。`);
+    setBanner(`引擎加载失败：${error.message || error}。请确认 web/pkg/ 已构建（./web/build.sh），并且通过 http 访问。`);
     return;
   }
   // wasm 就绪后再注册：首次访问时 install 能复用 wasm 的 HTTP 缓存，

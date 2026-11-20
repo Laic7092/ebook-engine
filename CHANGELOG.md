@@ -10,10 +10,12 @@
 - 内嵌字体支持 WOFF / WOFF2：`FontBook` 在加载入口用纯 Rust 的 `wuff` 解包成
   sfnt，再复用现有 harfrust 整形、read-fonts 度量与光栅链路；Web 端「加载本地字体」
   也接受 `.woff` / `.woff2`。解包失败通过 `FontBook` 诊断与 `eb_font_error` 暴露，
-  不再静默丢弃；给浏览器 `FontFace` 的仍是原始字体字节。
+  不再静默丢弃。
 - 阅读器翻页动画：淡入淡出与跟手滑动，设置面板新增「翻页动画」开关。
-- 排版 Worker（`web/layout-worker.js`）与 `eb_use_layout`：整章 `Layout` 在 worker
-  执行，主线程只装回 IR 供命中/选区/链接查询；worker 失败或超时自动退回主线程。
+- 引擎 Worker（`web/engine-worker.js`）：wasm 实例只存在于 worker 里，开书、注册
+  字体、排版、整页光栅、命中/选区/链接查询全在那边；主线程只发 RPC，拿页元数据
+  （`eb_page_meta`）、位图（`eb_page_bitmap`，`transfer`）和查询结果。开书只解析
+  一次，字体只注册一次，整份 IR 不再穿过线程边界。
 
 **IR 1.2 / 1.3 / 1.4**
 
@@ -27,8 +29,12 @@
   行数、字形数、op 数、IR 字节与估算内存。
 - IR 1.4：`GlyphRun.weight` / `style` / `underline` 与 `TextStyle.underline`。
   文字样式不再依赖 FontBook 是否命中；宿主没装字体时也能用系统字体合成粗体/斜体。
-- `eb_glyph_bitmap`：Web 端按 `GlyphRun` 的 gid 取 FontBook 光栅位图，用
-  `drawImage`/WebGL 自己画字；不再把粗体/斜体/字距交给浏览器合成。
+- `eb_page_bitmap`：整页光栅由引擎完成（`paint()` + `ScaledSurface` + `RgbaSurface`），
+  Web 端只 `putImageData`。字形光栅、图片解码、主题调色、下划线都不再由 JS 承担；
+  粗/斜体是绘制期的 face 替换，不改 IR。
+- `eb_page_meta` / `eb_fragment_line`：页盒子、行区间、本章进度与锚点行号直接来自
+  引擎，宿主不再解码 IR。
+- PNG + JPEG 图片解码（`zune-jpeg`），按归档路径做全书图片缓存。
 - 移动端手势：左右 30% 轻点翻页，中间轻点切换工具栏；触屏横向滑动翻页。
 - PWA：`manifest.webmanifest`、Service Worker 应用壳、192/512 图标；可安装、离线打开。
 - 字体缓存：CJK 字体写入 Cache Storage（`ebook-fonts-v1`），第二次冷启动不再下载。
@@ -48,8 +54,19 @@
   去掉 `DecompressionStream` 解压与 `.gz` 兜底分支，Cache Storage 直接存原始字节；
   `_headers` 与 Service Worker 缓存名同步更新。
 
+### Removed
+
+- `web/` 的 Canvas2D 绘制栈：字形 atlas、`drawOp`/`drawRun`/`drawGlyphRun`、
+  `FontFace` 注册、章节图片解码。对应 ABI 一并下掉：`eb_glyph_bitmap`、
+  `eb_font_desc`、`eb_font_face_bytes`、`eb_asset`、`eb_chapter_images`、
+  `eb_use_layout`（主线程不再有交互状态副本，也就不需要装回）。
+
 ### Fixed
 
+- `web/selection.js` 漏解构 `onSwipeStart` / `onSwipeMove` / `onSwipeEnd` /
+  `onSwipeCancel`，横向滑动一按就抛 `ReferenceError`。
+- 拖选把每个 `pointermove` 都发一次引擎查询：现在合并到一个动画帧，晚到的结果
+  按序号丢弃。
 - PWA 冷启动：导航请求改为 cache-first + 后台回源，iOS 从主屏启动不再等
   一次网络往返（1s 白屏的主要来源）。预缓存逐项容错，单个图标失败不会让
   install 整体失败；`latin.ttf` 移出安装清单，首次用到时再缓存。

@@ -10,7 +10,7 @@
 
 // 发布时如果改了 app.js / reader.js 等未带哈希的文件，记得同时改 CACHE_NAME：
 // 这些资源是 cache-first，浏览器不会主动发现它们变了。
-const CACHE_NAME = "ebook-v11";
+const CACHE_NAME = "ebook-v12";
 const FONT_CACHE = "ebook-fonts-v1";
 const INDEX_URL = new URL("./index.html", self.location.href).href;
 const CORE = [
@@ -21,7 +21,8 @@ const CORE = [
   "./db.js",
   "./text.js",
   "./selection.js",
-  "./layout-worker.js",
+  "./engine-client.js",
+  "./engine-worker.js",
   "./decode.js",
   "./encode.js",
   "./pkg/ebook_web.js",

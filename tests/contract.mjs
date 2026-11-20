@@ -339,10 +339,17 @@ async function selectionModuleSelfCheck() {
     onChange: () => {},
   });
 
+  // 引擎查询是异步的（worker RPC），宿主只保证「一次拖动 = 一次查询」，
+  // 所以这里按真实节奏等一轮事件循环再断言。
+  const settle = () => new Promise((done) => setTimeout(done, 30));
+
   // 拖动：x=10 → byte 1，x=40 → byte 4。
   fire("pointerdown", { clientX: 10, clientY: 10 });
+  await settle();
   fire("pointermove", { clientX: 40, clientY: 10 });
+  await settle();
   fire("pointerup", { clientX: 40, clientY: 10 });
+  await settle();
   if (!selection.active() || selection.text() !== "xxx") {
     throw new Error(`selection module: drag ${JSON.stringify({ active: selection.active(), text: selection.text() })}`);
   }
@@ -372,7 +379,9 @@ async function selectionModuleSelfCheck() {
     throw new Error("selection module: clear left rects behind");
   }
   fire("pointerdown", { clientX: 10, clientY: 10 });
+  await settle();
   fire("pointerup", { clientX: 10, clientY: 10 });
+  await settle();
   if (linked !== "ch2.xhtml#n") {
     throw new Error(`selection module: link click ${linked}`);
   }
@@ -382,7 +391,9 @@ async function selectionModuleSelfCheck() {
   swiped = null;
   fire("pointerdown", { clientX: 90, clientY: 10, pointerType: "touch" });
   fire("pointermove", { clientX: 40, clientY: 12, pointerType: "touch" });
+  await settle();
   fire("pointerup", { clientX: 40, clientY: 12, pointerType: "touch" });
+  await settle();
   if (swiped !== "next" || linked !== null) {
     throw new Error(`selection module: swipe ${swiped}, link ${linked}`);
   }

@@ -18,8 +18,7 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 1. **格式/样式语义**：选择器、`white-space` 之外的 CSS 细节、表格/列表、背景/边框。
 2. **资源层**：native 图片只解 PNG（JPEG 缺）；可变字体/彩色字体/子集化缺。
 3. **宿主/架构**：Web 打开书泄漏字节，没有增量重排，`max_lines` 拦截偏晚；
-   光栅已统一到引擎（页面像素只有一套实现），但主线程仍包办解析/光栅/查询
-   （G-21），翻页动画与跟手滑动仍在 JS 且基本不可用（G-19）。
+   翻页动画与跟手滑动仍在 JS 且基本不可用（G-19）。
 
 另有一批是**明确不做**的（竖排、flex/grid、PDF、DRM、scroll/tile），见第 5 节。
 
@@ -256,35 +255,6 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 - `page-break-*` 与 `break-*` 只支持一部分，`left/right/recto/verso` 没有奇偶页处理。
 - `linear="no"` 只记录在 `SpineItem`，阅读顺序没有真正跳过。
 
-### G-21 主线程仍承担解析、光栅、绘制、解码、查询
-
-- **状态**：未修复
-- **现象**：
-  - `layout-worker` 只接 `layout`；开书在主线程 `eb_open` 一遍，worker 又解析一遍，
-    且 `workerBook` 是结构化克隆整本字节（没有 `transfer`）。
-  - 每章主线程做两次 IR 解码：`eb_use_layout` → `adopt_layout` 里 `codec::decode`
-    并 `chapter_with_anchors` **重新解析本章 XHTML/CSS**；随后 `decodeLayout` 又把
-    同一份字节解成 JS 对象图（`ops` / `glyphs` / `lines` 每项一个对象）。
-  - 整页绘制、首见字形的 `eb_glyph_bitmap` 光栅化与 atlas 写入、页快照拷贝、
-    idle 里的 `renderPageCanvas`，全在主线程。
-  - 字体解析两份：`eb_font`（主线程）与 worker 的 `eb_font`；不再有
-    `new FontFace` 那一份。
-  - `eb_hit` / `eb_selection` / `eb_link_at` / `eb_progress` 走 JSON 信封 + JS 二次
-    解码，选区拖动每个 `pointermove` 一次，没有 rAF 合并。
-  - worker 8s 超时后回退主线程排版。
-  - 导入时 `text.js` 的 `fingerprint` 在 JS 里逐字节循环；IndexedDB 整本存取。
-- **影响**：切章有可见停顿与 GC 尖峰；预取绘制与手势争线程；峰值内存与
-  G-13 / G-16 叠加，移动端更容易触顶。
-- **证据**：`crates/ebook-web/src/lib.rs` 的 `adopt_layout` / `layout_cached_style`；
-  `web/layout-worker.js`；`web/reader.js` 的 `open` / `layoutChapter` / `render` /
-  `requestLayout`；`web/decode.js`；`web/text.js` 的 `fingerprint`。
-- **修复**：① 交互状态常驻 worker（主线程只发 RPC），删掉 `adopt_layout` 的章节
-  重解析；② 开书只解析一次（worker 权威 + `transfer`）；③ 位图在 worker 里生成并
-  `transfer`；④ `decodeLayout` 只解当前页 ±1 的切片（绘制已经不需要 op 图）；
-  ⑤ 查询改 postcard / typed array 并做 rAF 节流；⑥ `fingerprint` 挪 worker。
-- **验收**：切章期间主线程无 >50ms 长任务；开书解析 1 次、字体解析 ≤2 次；
-  `decodeLayout` 只为可见页生成对象图。
-
 ### G-22 脏 XHTML 的容错边界
 
 - **状态**：部分（容错层已建立，仍在扩展）
@@ -318,11 +288,8 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 2. **G-03 / G-02**：剩余选择器、`hsl()`、`capitalize`。成本低，直接改善真实书样式。
 3. **G-04 / G-05**：背景/边框 op、列表 marker、单层表格。IR 已有 `Rect`/`Border`。
 4. **G-06 JPEG / G-07 字体混淆**：决定「图片和字体能不能显示」。
-5. **G-21**：交互状态回 worker + 开书只解析一次。
-   是宿主架构改造，最好先把单页光栅基准测出来再动手；做完能顺带消掉
-   G-13 / G-16 的峰值内存。
-6. **G-12 / G-11**：`max_lines` 前移、真正的增量重排。内核改动，放在语义修复之后。
-7. **G-09 / G-10 / G-08 / G-14**：RTL、fixed-layout、可变/彩色字体、精确 SVG。
+5. **G-12 / G-11**：`max_lines` 前移、真正的增量重排。内核改动，放在语义修复之后。
+6. **G-09 / G-10 / G-08 / G-14**：RTL、fixed-layout、可变/彩色字体、精确 SVG。
    工作量大，单独排期。
 
 ---
@@ -340,6 +307,8 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 - `hyphen-en` 已改成 opt-in，不再默认把 `en.pat` 打进 wasm。
 - 页 → 像素只有一套实现：`paint()` + `RgbaSurface`，native（`--ppm`）与 wasm
   （`eb_page_bitmap`）同源，`ScaledSurface` 负责 DPR。
+- wasm 实例只在 worker 里创建一次：开书/字体/排版/光栅/查询都在那个线程，主线程
+  拿页元数据与位图，IR 不过线程边界。
 
 ---
 

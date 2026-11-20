@@ -45,8 +45,13 @@ export function createSelection(options) {
   let swiping = false;
   let swipeBlocked = false;
   let swipeStart = 0;
+  let swipePending = null;
   let startClient = { x: 0, y: 0 };
   let timer = 0;
+  // 引擎查询是异步的：拖动只在一个动画帧里发一次，晚到的结果按序号丢弃。
+  let dragFrame = 0;
+  let lastPoint = null;
+  let selectSeq = 0;
 
   function clear() {
     anchor = null;
@@ -94,20 +99,27 @@ export function createSelection(options) {
 
   function hitAt(point) {
     if (!point) {
-      return null;
+      return Promise.resolve(null);
     }
-    return hit(point.page, point.x, point.y);
+    return Promise.resolve(hit(point.page, point.x, point.y)).catch(() => null);
   }
 
-  function refresh() {
+  async function refresh() {
     if (!anchor || !focus) {
       return;
     }
+    const seq = ++selectSeq;
     try {
-      const result = select(anchor, focus);
+      const result = await select(anchor, focus);
+      if (seq !== selectSeq) {
+        return;
+      }
       rects = result.rects;
       text = result.text;
     } catch (error) {
+      if (seq !== selectSeq) {
+        return;
+      }
       rects = [];
       text = "";
       setStatus(`选区失败：${error.message || error}`);
@@ -117,12 +129,17 @@ export function createSelection(options) {
     }
   }
 
-  function begin(point) {
-    anchor = hitAt(point);
-    focus = anchor;
+  async function begin(point) {
+    const seq = ++selectSeq;
+    const at = await hitAt(point);
+    if (seq !== selectSeq) {
+      return;
+    }
+    anchor = at;
+    focus = at;
     rects = [];
     text = "";
-    dragging = anchor !== null;
+    dragging = at !== null;
     moved = false;
     if (onChange) {
       onChange();
@@ -160,16 +177,11 @@ export function createSelection(options) {
     }
   }
 
-  function handleLink(point) {
+  async function handleLink(point) {
     if (!linkAt || !onLink) {
       return false;
     }
-    let href = null;
-    try {
-      href = linkAt(point.page, point.x, point.y);
-    } catch (error) {
-      href = null;
-    }
+    const href = await Promise.resolve(linkAt(point.page, point.x, point.y)).catch(() => null);
     if (href) {
       onLink(href);
       return true;
@@ -177,16 +189,17 @@ export function createSelection(options) {
     return false;
   }
 
-  function tap(event, point) {
+  async function tap(event, point) {
     if (!point) {
       return;
     }
-    if (!handleLink(point) && onTap) {
+    const linked = await handleLink(point);
+    if (!linked && onTap) {
       onTap(event);
     }
   }
 
-  function end(event) {
+  async function end(event) {
     if (!pressed) {
       return;
     }
@@ -199,11 +212,11 @@ export function createSelection(options) {
     if (dragging) {
       // 拖动结束：保留高亮，写剪贴板。
       if (moved && anchor && focus && (anchor.line !== focus.line || anchor.byte !== focus.byte)) {
-        refresh();
+        await refresh();
         copyText(text);
       } else {
         // 没有真正拖动 → 当成点击（链接或宿主轻点）。
-        tap(event, point);
+        await tap(event, point);
         clear();
         if (onChange) {
           onChange();
@@ -213,7 +226,7 @@ export function createSelection(options) {
       return;
     }
     // 触屏长按前就抬手 = 轻点：只处理链接或宿主轻点。
-    tap(event, point);
+    await tap(event, point);
     clear();
     if (onChange) {
       onChange();
@@ -285,7 +298,33 @@ export function createSelection(options) {
           timer = 0;
           const direction = dx < 0 ? "next" : "prev";
           if (onSwipeStart) {
-            if (onSwipeStart(direction)) {
+            const started = onSwipeStart(direction);
+            if (started && typeof started.then === "function") {
+              swipePending = started;
+              started
+                .then((ok) => {
+                  swipePending = null;
+                  if (!pressed) {
+                    return;
+                  }
+                  if (ok) {
+                    swiping = true;
+                    swipeStart = now();
+                    if (onSwipeMove) {
+                      onSwipeMove(dx, dy);
+                    }
+                  } else {
+                    swipeBlocked = true;
+                  }
+                })
+                .catch(() => {
+                  swipePending = null;
+                  swipeBlocked = true;
+                });
+              event.preventDefault();
+              return;
+            }
+            if (started) {
               swiping = true;
               swipeStart = now();
               if (onSwipeMove) {
@@ -318,21 +357,51 @@ export function createSelection(options) {
       return;
     }
     moved = true;
-    const point = toPage(event);
-    const next = hitAt(point);
-    if (!next) {
+    lastPoint = toPage(event);
+    event.preventDefault();
+    if (dragFrame) {
       return;
     }
-    if (!focus || next.line !== focus.line || next.byte !== focus.byte) {
-      focus = next;
-      refresh();
-    }
-    event.preventDefault();
+    const schedule =
+      typeof requestAnimationFrame === "function"
+        ? (fn) => requestAnimationFrame(fn)
+        : (fn) => setTimeout(fn, 16);
+    dragFrame = schedule(async () => {
+      dragFrame = 0;
+      if (!dragging || !lastPoint) {
+        return;
+      }
+      const point = lastPoint;
+      const next = await hitAt(point);
+      if (!dragging || !next) {
+        return;
+      }
+      if (!focus || next.line !== focus.line || next.byte !== focus.byte) {
+        focus = next;
+        refresh();
+      }
+    });
   }
 
-  function pointerUp(event) {
+  async function pointerUp(event) {
     if (!pressed) {
       return;
+    }
+    if (swipePending) {
+      // 起手还在等邻页位图：等它落定再决定跟手翻页还是当点击。
+      await swipePending.catch(() => {});
+      if (!pressed) {
+        if (swiping) {
+          const dx = event.clientX - startClient.x;
+          const dt = Math.max(1, now() - swipeStart);
+          swiping = false;
+          if (onSwipeEnd) {
+            onSwipeEnd(dx, dt);
+          }
+          return;
+        }
+        return;
+      }
     }
     if (swiping) {
       const dx = event.clientX - startClient.x;

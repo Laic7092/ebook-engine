@@ -114,12 +114,11 @@ pub fn eb_layout_book_style(
     )
 }
 
-/// worker 排版好之后，把 IR 装回主线程的交互状态（命中/选区/链接/进度）。
-/// 返回空串表示成功。
+/// 页级元数据（`[count] + 每页 9 个 f32`）。宿主不解析 IR 就能翻页。
 #[cfg(feature = "epub")]
 #[wasm_bindgen]
-pub fn eb_use_layout(spine: u32, bytes: &[u8]) -> String {
-    crate::adopt_layout(spine as usize, bytes)
+pub fn eb_page_meta() -> Vec<u8> {
+    crate::page_meta()
 }
 
 /// 当前书第一章根节点的字号，宿主用它把“字号 18px”换算成缩放比例。
@@ -191,10 +190,10 @@ pub fn eb_toc() -> String {
     crate::toc_json()
 }
 
-/// 当前章节的 `#fragment` → Anchor。
+/// 当前章节的 `#fragment` → 行号（`u32::MAX` = 没有这个锚点）。
 #[wasm_bindgen]
-pub fn eb_anchor(fragment: &str) -> String {
-    crate::anchor_json(fragment)
+pub fn eb_fragment_line(fragment: &str) -> u32 {
+    crate::fragment_line(fragment)
 }
 
 /// 按当前章节解析书内链接：`{target:{spine,fragment,external}}`。
