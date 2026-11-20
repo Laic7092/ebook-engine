@@ -107,7 +107,7 @@ face 下标。`FontId::NONE = u16::MAX`。
 | IR magic | `EBIR` | 4 字节 |
 | IR header | `8` 字节 | magic + major/minor（LE u16） |
 | IR 版本 | `1.4` | 见 [api.md](api.md#33-版本与兼容策略) |
-| wasm gzip 预算 | `544 KiB` | `xtask size`；core 与 core+epub 分别卡 |
+| wasm gzip 预算 | `680 KiB` | `xtask size`；core 与 core+epub 分别卡 |
 | `wasm-bindgen` | `0.2.129` | 与 `ebook-web` 精确锁定 |
 | wasm target | `wasm32-unknown-unknown` | `rust-toolchain.toml` |
 

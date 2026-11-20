@@ -11,8 +11,14 @@ use ebook_raster::RgbaSurface;
 // 512 KiB 是原始预算。EPUB 容错（ZIP64、编码回退、病态输入限额）约 +21 KB；
 // WOFF/WOFF2 的 Brotli 解码器约 +105 KB（WOFF1 复用 ebook-format 已有的
 // miniz_oxide，不再额外链 flate2）；read-fonts 替换 ttf-parser 约 -11 KB。
-// 合并后实测约 614 KiB，留波动余量后定在 656 KiB。
-const GZIP_BUDGET: usize = 656 * 1024;
+//
+// Rust 1.100.0 实测：core 228,925 B，core+epub 679,015 B，超上一版 656 KiB 约
+// 7 KB。构成上 code 占 gzip 的 73%、data 占 25%；其中 epub 适配器独占约 450 KB
+// （zune-jpeg ~30 KB、wuff+brotli ~25 KB、roxmltree ~12 KB）。这些零件都在
+// Web 上真干活（引擎自己解 JPEG、自己解 woff2），做条件编译会掉功能，换不来
+// 1% 的体积，所以这里抬高预算而不是加 feature。
+// 顺带记录已排除的调参项：opt-level="s" 反而 +33 KB；wasm-opt -Oz 只 -0.3% gzip。
+const GZIP_BUDGET: usize = 680 * 1024;
 fn target_dir() -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
