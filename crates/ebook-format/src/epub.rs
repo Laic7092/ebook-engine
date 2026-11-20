@@ -159,6 +159,20 @@ impl<'a> EpubReader<'a> {
                 &format!("duplicate element id {id}"),
             );
         }
+        if built.repaired {
+            self.record(
+                EpubIssueCode::RepairedXhtml,
+                href.clone(),
+                "chapter is not well-formed XML; parsed with the HTML-tolerant repair pass",
+            );
+        }
+        if built.text_fallback {
+            self.record(
+                EpubIssueCode::TextFallback,
+                href,
+                "chapter XHTML could not be parsed; only plain text was kept",
+            );
+        }
         Ok((built.doc, built.links, built.anchors))
     }
 
@@ -290,10 +304,11 @@ impl<'a> EpubReader<'a> {
                     allow_dtd: true,
                     nodes_limit: MAX_XML_NODES,
                 };
-                let doc = roxmltree::Document::parse_with_options(&expanded, options).ok()?;
-                let found = doc
-                    .descendants()
-                    .any(|node| node.is_element() && attr(node, "id") == Some(id));
+                let (found, _) =
+                    crate::html_repair::parse_with_repair(&expanded, options, |doc| {
+                        doc.descendants()
+                            .any(|node| node.is_element() && attr(node, "id") == Some(id))
+                    })?;
                 found.then_some(index)
             })
     }
@@ -368,8 +383,20 @@ fn build_chapter(
         zip,
         base: dirname(&item.href).to_string(),
     };
-    let mut built = xhtml::build_document(&text, index as u32, &mut resolver)
-        .map_err(|_| FormatError::Malformed("xhtml"))?;
+    let mut built = match xhtml::build_document(&text, index as u32, &mut resolver) {
+        Ok(built) => built,
+        // 容错解析仍失败（通常意味着触到格式层硬上限）。最后一道兜底是
+        // 纯文本：宁可丢结构，也不要整章白屏。
+        Err(_) => xhtml::Built {
+            doc: xhtml::text_document(&text, index as u32),
+            links: Vec::new(),
+            anchors: Vec::new(),
+            duplicate_ids: Vec::new(),
+            unsupported_css: Vec::new(),
+            repaired: false,
+            text_fallback: true,
+        },
+    };
     // 固有尺寸与 MIME 属于格式层：排版只认入参，不应该自己读图。
     // 同一张图可能在一章里出现很多次；按 src 缓存，避免反复解压与线性查 manifest。
     let mut mime_exact: BTreeMap<&str, &str> = BTreeMap::new();
@@ -472,12 +499,14 @@ fn container_opf(zip: &ZipArchive<'_>) -> Option<String> {
         allow_dtd: true,
         nodes_limit: 4_096,
     };
-    let doc = roxmltree::Document::parse_with_options(&text, options).ok()?;
-    doc.descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "rootfile")
-        .and_then(|n| attr(n, "full-path"))
-        .map(|s| path_from_href(s))
-        .filter(|s| !s.is_empty())
+    let (path, _) = crate::html_repair::parse_with_repair(&text, options, |doc| {
+        doc.descendants()
+            .find(|n| tag_is(*n, "rootfile"))
+            .and_then(|n| attr(n, "full-path"))
+            .map(path_from_href)
+            .filter(|s| !s.is_empty())
+    })?;
+    path
 }
 
 /// 没有可用的 container 时按归档内容找包文档：优先浅层路径，再按名字稳定排序。
@@ -523,8 +552,16 @@ fn parse_package(
         allow_dtd: true,
         nodes_limit: MAX_XML_NODES,
     };
-    let doc = roxmltree::Document::parse_with_options(&text, options)
-        .map_err(|_| FormatError::Malformed("opf"))?;
+    // OPF 也可能不是合法 XML；容错修复避免“一本坏 OPF 整本打不开”。
+    let repaired_text: alloc::borrow::Cow<'_, str>;
+    let doc = match roxmltree::Document::parse_with_options(&text, options) {
+        Ok(doc) => doc,
+        Err(_) => {
+            repaired_text = crate::html_repair::repair(&text);
+            roxmltree::Document::parse_with_options(&repaired_text, options)
+                .map_err(|_| FormatError::Malformed("opf"))?
+        }
+    };
 
     let mut manifest: Vec<ManifestItem> = Vec::new();
     let mut by_id: BTreeMap<String, usize> = BTreeMap::new();
@@ -564,9 +601,7 @@ fn parse_package(
         });
     }
 
-    let spine_node = doc
-        .descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "spine");
+    let spine_node = doc.descendants().find(|n| tag_is(*n, "spine"));
     let spine_toc = spine_node
         .and_then(|n| attr(n, "toc"))
         .map(|s| s.to_string());
@@ -602,7 +637,7 @@ fn parse_package(
 
     let guide: Vec<(String, String)> = doc
         .descendants()
-        .filter(|n| n.is_element() && n.tag_name().name() == "reference")
+        .filter(|n| tag_is(*n, "reference"))
         .filter_map(|n| {
             let href = attr(n, "href")?;
             let kind = attr(n, "type").unwrap_or("");
@@ -611,7 +646,7 @@ fn parse_package(
         .collect();
     let meta_cover = doc
         .descendants()
-        .filter(|n| n.is_element() && n.tag_name().name() == "meta")
+        .filter(|n| tag_is(*n, "meta"))
         .find(|n| {
             attr(*n, "name")
                 .map(|name| name.eq_ignore_ascii_case("cover"))
@@ -629,9 +664,7 @@ fn parse_package(
         .and_then(|wanted| {
             doc.descendants()
                 .find(|n| {
-                    n.is_element()
-                        && n.tag_name().name() == "identifier"
-                        && attr(*n, "id") == Some(wanted)
+                    n.is_element() && tag_is(*n, "identifier") && attr(*n, "id") == Some(wanted)
                 })
                 .and_then(text_of)
         })
@@ -774,11 +807,13 @@ fn first_img_src(text: &str) -> Option<String> {
         allow_dtd: true,
         nodes_limit: 100_000,
     };
-    let doc = roxmltree::Document::parse_with_options(&expanded, options).ok()?;
-    doc.descendants()
-        .find(|n| n.is_element() && n.tag_name().name() == "img")
-        .and_then(|n| attr(n, "src"))
-        .map(|s| s.to_string())
+    let (src, _) = crate::html_repair::parse_with_repair(&expanded, options, |doc| {
+        doc.descendants()
+            .find(|n| tag_is(*n, "img"))
+            .and_then(|n| attr(n, "src"))
+            .map(|s| s.to_string())
+    })?;
+    src
 }
 
 fn collect_fonts(
@@ -989,21 +1024,24 @@ fn parse_nav(text: &str, nav_path: &str) -> Result<Vec<TocRow>, ()> {
         allow_dtd: true,
         nodes_limit: MAX_XML_NODES,
     };
-    let doc = roxmltree::Document::parse_with_options(&expanded, options).map_err(|_| ())?;
-    let nav = doc
-        .descendants()
-        .find(|node| node.is_element() && node.tag_name().name() == "nav" && is_toc_nav(*node));
-    let Some(nav) = nav else {
-        return Ok(Vec::new());
-    };
-    let list = nav
-        .descendants()
-        .find(|node| node.is_element() && matches!(node.tag_name().name(), "ol" | "ul"));
-    let Some(list) = list else {
-        return Ok(Vec::new());
-    };
-    let mut out = Vec::new();
-    nav_list(list, nav_path, 0, &mut out);
+    let (out, _) = crate::html_repair::parse_with_repair(&expanded, options, |doc| {
+        let mut out = Vec::new();
+        let nav = doc
+            .descendants()
+            .find(|node| tag_is(*node, "nav") && is_toc_nav(*node));
+        let Some(nav) = nav else {
+            return out;
+        };
+        let list = nav
+            .descendants()
+            .find(|node| tag_is(*node, "ol") || tag_is(*node, "ul"));
+        let Some(list) = list else {
+            return out;
+        };
+        nav_list(list, nav_path, 0, &mut out);
+        out
+    })
+    .ok_or(())?;
     Ok(out)
 }
 
@@ -1017,10 +1055,7 @@ fn nav_list(list: roxmltree::Node<'_, '_>, base: &str, depth: u16, out: &mut Vec
     if depth > MAX_TOC_DEPTH || out.len() >= MAX_TOC_ENTRIES {
         return;
     }
-    for item in list
-        .children()
-        .filter(|node| node.is_element() && node.tag_name().name() == "li")
-    {
+    for item in list.children().filter(|node| tag_is(*node, "li")) {
         if out.len() >= MAX_TOC_ENTRIES {
             break;
         }
@@ -1028,7 +1063,7 @@ fn nav_list(list: roxmltree::Node<'_, '_>, base: &str, depth: u16, out: &mut Vec
         let mut children = Vec::new();
         for child in item
             .children()
-            .filter(|node| node.is_element() && matches!(node.tag_name().name(), "ol" | "ul"))
+            .filter(|node| tag_is(*node, "ol") || tag_is(*node, "ul"))
         {
             nav_list(child, base, depth.saturating_add(1), &mut children);
         }
@@ -1123,15 +1158,16 @@ fn parse_ncx(text: &str, ncx_path: &str) -> Result<Vec<TocRow>, ()> {
         allow_dtd: true,
         nodes_limit: MAX_XML_NODES,
     };
-    let doc = roxmltree::Document::parse_with_options(&expanded, options).map_err(|_| ())?;
-    let nav_map = doc
-        .descendants()
-        .find(|node| node.is_element() && node.tag_name().name() == "navMap");
-    let Some(nav_map) = nav_map else {
-        return Ok(Vec::new());
-    };
-    let mut out = Vec::new();
-    ncx_points(nav_map, ncx_path, 0, &mut out);
+    let (out, _) = crate::html_repair::parse_with_repair(&expanded, options, |doc| {
+        let mut out = Vec::new();
+        let nav_map = doc.descendants().find(|node| tag_is(*node, "navMap"));
+        let Some(nav_map) = nav_map else {
+            return out;
+        };
+        ncx_points(nav_map, ncx_path, 0, &mut out);
+        out
+    })
+    .ok_or(())?;
     Ok(out)
 }
 
@@ -1139,27 +1175,20 @@ fn ncx_points(parent: roxmltree::Node<'_, '_>, base: &str, depth: u16, out: &mut
     if depth > MAX_TOC_DEPTH || out.len() >= MAX_TOC_ENTRIES {
         return;
     }
-    for point in parent
-        .children()
-        .filter(|node| node.is_element() && node.tag_name().name() == "navPoint")
-    {
+    for point in parent.children().filter(|node| tag_is(*node, "navPoint")) {
         if out.len() >= MAX_TOC_ENTRIES {
             break;
         }
         let label = point
             .children()
-            .find(|node| node.is_element() && node.tag_name().name() == "navLabel")
-            .and_then(|label| {
-                label
-                    .children()
-                    .find(|node| node.is_element() && node.tag_name().name() == "text")
-            })
+            .find(|node| tag_is(*node, "navLabel"))
+            .and_then(|label| label.children().find(|node| tag_is(*node, "text")))
             .and_then(|text| text.text())
             .map(collapse)
             .unwrap_or_default();
         let src = point
             .children()
-            .find(|node| node.is_element() && node.tag_name().name() == "content")
+            .find(|node| tag_is(*node, "content"))
             .and_then(|content| attr(content, "src"));
         let (path, fragment) = match src {
             Some(src) => split_href(base, src),
@@ -1297,6 +1326,10 @@ fn has_property(properties: &str, wanted: &str) -> bool {
     properties
         .split_whitespace()
         .any(|property| property.eq_ignore_ascii_case(wanted))
+}
+
+fn tag_is(node: roxmltree::Node<'_, '_>, name: &str) -> bool {
+    node.is_element() && node.tag_name().name().eq_ignore_ascii_case(name)
 }
 
 fn attr<'a, 'input>(node: roxmltree::Node<'a, 'input>, name: &str) -> Option<&'a str> {

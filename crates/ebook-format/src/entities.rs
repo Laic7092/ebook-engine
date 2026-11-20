@@ -421,7 +421,12 @@ pub(crate) fn expand(text: &str) -> alloc::borrow::Cow<'_, str> {
         let start = cursor + offset;
         push_limited(&mut out, &text[cursor..start]);
         // 实体名很短：只在有限窗口里找分号，避免一整章没有分号时退化成 O(n²)。
-        let window_end = (start + 1 + 64).min(text.len());
+        // 窗口按字节截断，必须退到字符边界，否则 `&` 后面紧跟中文时会切在
+        // 多字节字符中间而 panic（`&` 后 64 字节内没有分号的正文很常见）。
+        let mut window_end = (start + 1 + 64).min(text.len());
+        while window_end > start + 1 && !text.is_char_boundary(window_end) {
+            window_end -= 1;
+        }
         let resolved = text[start + 1..window_end].find(';').and_then(|end| {
             let name = &text[start + 1..start + 1 + end];
             if name.starts_with('#') || is_xml_builtin(name) {
@@ -499,6 +504,16 @@ mod tests {
     #[test]
     fn borrows_when_nothing_to_do() {
         assert!(matches!(expand("plain"), alloc::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn dangling_amp_before_cjk_does_not_panic() {
+        // `&` 后 64 字节里没有分号，且窗口边界落在多字节字符中间。
+        let text = format!("&{}{}", "a".repeat(63), "中国文字");
+        assert_eq!(
+            expand(&text),
+            format!("&amp;{}{}", "a".repeat(63), "中国文字")
+        );
     }
 
     #[test]

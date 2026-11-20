@@ -169,22 +169,25 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 
 - **状态**：部分
 - **已修复**：`ZipArchive` 支持 ZIP64 EOCD 与中央目录扩展字段；单个非 UTF-8
-  文件名只跳过该条目，不再让整包失败；`read_text` 支持 UTF-8 BOM、UTF-16
-  LE/BE、`iso-8859-1` 与 `windows-1252`；container 缺失/坏路径会回退扫描 `.opf`；
+  文件名只跳过该条目，不再让整包失败；`read_text` 按浏览器顺序解码：BOM →
+  无 BOM UTF-16 → 合法 UTF-8 → XML/`<meta charset>` 声明 → `chardetng`
+  （Firefox 的编码探测器，仅 native）。native 构建用 `encoding_rs` 覆盖
+  GBK / Big5 / Shift_JIS / EUC-KR / windows-125x 等全部 WHATWG 编码；
+  wasm 为体积预算只内置 BOM/UTF-16/UTF-8/latin-1/windows-1252，其余旧编码
+  仍需宿主先用 `TextDecoder` 解码。container 缺失/坏路径会回退扫描 `.opf`；
   XML 非法控制字符替换为 U+FFFD 后继续解析。测试见 `zip.rs` 单测与
-  `tests/robust.rs`。
+  `tests/robust.rs`（含 GBK 章节）。
 - **仍未修复**：
   - 不处理 `META-INF/encryption.xml`：DRM、IDPF/Adobe 字体混淆的字体
     会以原始加密字节交给字体解析（`read-fonts`），解析失败。
-  - GBK / Big5 / Shift_JIS 等 CJK 旧编码仍由 Web 宿主先解码；格式层只认
-    UTF-8/UTF-16/latin-1。
-- **影响**：商业 EPUB 的混淆字体仍会丢；无 BOM 且无法识别的旧编码正文仍可能乱码。
+- **影响**：商业 EPUB 的混淆字体仍会丢；无声明且探测器也判不准的极短文本
+  仍可能乱码（但不会报错或白屏）。
 - **证据**：
   - `crates/ebook-format/src/zip.rs`：EOCD / central directory / 文本解码。
   - `crates/ebook-format/src/epub.rs`：没有 encryption.xml 分支。
   - `docs/limits.md`：文本编码与 ZIP64 行。
 - **修复**：继续处理 `encryption.xml` 的 `font/obfuscation`（IDPF 算法不复杂，
-  且不需要 DRM 解密）；CJK 旧编码仍建议由宿主用平台解码器处理。
+  且不需要 DRM 解密）。
 
 ### G-08 字体：WOFF、可变字体、彩色字体、子集化
 
@@ -432,6 +435,22 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
   切片；⑤ 查询改 postcard / typed array 并做 rAF 节流；⑥ `fingerprint` 挪 worker。
 - **验收**：切章期间主线程无 >50ms 长任务；开书解析次数 1、字体解析次数 ≤2；
   `decodeLayout` 只为可见页生成对象图。
+
+### G-22 脏 XHTML 的容错边界
+
+- **状态**：已建立，仍在扩展
+- **已修复**：格式层先用 `roxmltree` 严格解析；失败后走
+  `crates/ebook-format/src/html_repair.rs` 的 HTML 容错层（tokenizer + 树构造
+  恢复），支持裸属性值、裸 `&`、void 元素、错配/多余结束标签、可选结束标签、
+  重复属性、多根/纯片段、大小写不敏感等。修复后仍失败则退化成纯文本，保证
+  「每一章至少能出字」。OPF / container / nav / NCX 也走同一修复入口，避免
+  一本坏 OPF 导致整本打不开。诊断码：`RepairedXhtml` / `TextFallback`。
+- **仍未覆盖**：完整的 HTML5 树构造算法（例如表格 foster parenting、
+  `<select>` 插入模式、模板内容）、`<frameset>`、表单控件语义。遇到这些
+  结构时只保证「不白屏」，不保证与浏览器逐节点一致。
+- **证据**：`crates/ebook-format/src/html_repair.rs`；`tests/robust.rs`；
+  `crates/ebook-format/examples/audit.rs`（对目录逐章审计）。
+- **验收**：坏章节只影响自己；公开语料 + 变异 fuzz 下无 panic、无整本失败。
 
 ---
 

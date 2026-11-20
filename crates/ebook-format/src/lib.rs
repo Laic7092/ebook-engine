@@ -4,6 +4,7 @@ extern crate alloc;
 pub mod css;
 mod entities;
 pub mod epub;
+mod html_repair;
 pub mod image;
 pub mod txt;
 pub mod xhtml;
@@ -98,6 +99,10 @@ pub enum EpubIssueCode {
     MissingAsset,
     /// 章节 XHTML 解析失败。
     MalformedXhtml,
+    /// 章节不是合法 XML，但已用 HTML 容错层恢复；内容基本保留。
+    RepairedXhtml,
+    /// 容错解析也失败，退化成纯文本；结构/样式/链接可能丢失。
+    TextFallback,
     /// CSS 属性/值无法落到 IR，已丢弃。
     UnsupportedCss,
     /// EPUB3 导航文档缺失或无法解析。

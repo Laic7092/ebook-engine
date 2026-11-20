@@ -9,6 +9,12 @@ ebook-ir.workspace = true
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 roxmltree = { version = "0.20", default-features = false }
 
+# 完整的 WHATWG 编码表（GBK/Big5/Shift_JIS/…）只在 native 构建里打包。
+# wasm 的体积预算留给排版核心；Web 端旧编码由宿主用 TextDecoder 先解码。
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+chardetng = { version = "1", default-features = false }
+encoding_rs = { version = "0.8", default-features = false, features = ["alloc"] }
+
 # 本 crate 的 src 由并行分支持有，硬化任务不改它的行为。下面几条是纯风格
 # warning（同一 if 分支、多余闭包、先 Default 再赋值、map_or(false, ..)），
 # 先按包抑制以免整个 workspace 的 clippy 闸门被挡住；等格式层改动合入后

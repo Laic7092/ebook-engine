@@ -54,6 +54,10 @@ pub struct Built {
     pub anchors: Vec<ChapterAnchor>,
     pub duplicate_ids: Vec<String>,
     pub unsupported_css: Vec<String>,
+    /// 严格 XML 解析失败后，用 HTML 容错层归一化并成功解析。
+    pub repaired: bool,
+    /// 连容错解析也失败，退化成纯文本抽取。内容可能有损。
+    pub text_fallback: bool,
 }
 
 struct Builder {
@@ -213,13 +217,20 @@ impl Builder {
             }
             let id = self.doc.images.len() as ImageId;
             // `src` 由 resolver 解析成归档内路径；解析不了就保留属性原文。
-            let src = xml
-                .attribute("src")
+            // SVG 封面用 `<image xlink:href>`，`href` 的命名空间前缀由
+            // roxmltree 去掉，所以按本地名匹配即可。
+            let src = image_ref(xml)
                 .map(|href| resolver.resolve(href).unwrap_or_else(|| href.to_string()));
             self.doc.images.push(ImageMeta {
-                size: None,
+                // HTML `<img>` 优先用文件里的真实尺寸（build_chapter 会补）；
+                // SVG `<image>` 没有文件尺寸可依，先用 width/height 属性。
+                size: if name.eq_ignore_ascii_case("image") {
+                    attr_size(xml)
+                } else {
+                    None
+                },
                 mime: None,
-                alt: xml.attribute("alt").map(|s| s.to_string()),
+                alt: local_attr(xml, "alt").map(|s| s.to_string()),
                 src,
             });
             Some(id)
@@ -329,8 +340,19 @@ pub fn build_document(
         allow_dtd: true,
         nodes_limit: MAX_XHTML_NODES as u32,
     };
-    let tree = roxmltree::Document::parse_with_options(&xml, options)
-        .map_err(|_| FormatError::Malformed("xhtml"))?;
+    // 严格解析优先：合法 XML 不做任何改写，保持既有行为与性能。失败时用
+    // HTML 容错层归一化后重试——这是浏览器级兼容的入口，错误只留在本章内。
+    let repaired_text: alloc::borrow::Cow<'_, str>;
+    let mut repaired = false;
+    let tree = match roxmltree::Document::parse_with_options(&xml, options) {
+        Ok(tree) => tree,
+        Err(_) => {
+            repaired_text = super::html_repair::repair(&xml);
+            repaired = true;
+            roxmltree::Document::parse_with_options(&repaired_text, options)
+                .map_err(|_| FormatError::Malformed("xhtml"))?
+        }
+    };
     let mut builder = Builder {
         doc: StyledDoc::default(),
         keys: Vec::new(),
@@ -381,7 +403,240 @@ pub fn build_document(
         anchors: builder.anchors,
         duplicate_ids: builder.duplicate_ids,
         unsupported_css,
+        repaired,
+        text_fallback: false,
     })
+}
+
+/// 最后一道兜底：连容错解析都失败时，至少把文字按行留下来。
+///
+/// 结构信息（标题、链接、图片、样式）全部丢失，但对读者来说「能读」优于
+/// 「白屏」。调用方应当把这次降级作为 issue 上报。
+pub fn text_document(xml: &str, spine: u32) -> StyledDoc {
+    let mut doc = StyledDoc::default();
+    doc.meta.spine = spine;
+
+    let root = doc.push_node(Node {
+        kind: NodeKind::Element(Tag::Body),
+        style: ComputedStyle::default(),
+        parent: None,
+        first_child: 0,
+        child_len: 0,
+        src: Some(Anchor {
+            spine,
+            path: Vec::new(),
+            offset: 0,
+        }),
+        link: None,
+    });
+    doc.root = root;
+
+    let mut kids: Vec<NodeId> = Vec::new();
+    let mut path_index: u16 = 0;
+    let mut used = 0usize;
+    for line in extract_lines(xml) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let remaining = MAX_XHTML_TEXT_BYTES.saturating_sub(used);
+        if remaining == 0 {
+            break;
+        }
+        let mut end = line.len().min(remaining);
+        while end > 0 && !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == 0 {
+            break;
+        }
+        let line = &line[..end];
+
+        let path = alloc::vec![path_index];
+        path_index = path_index.saturating_add(1);
+
+        let p = doc.push_node(Node {
+            kind: NodeKind::Element(Tag::P),
+            style: ComputedStyle::default(),
+            parent: Some(root),
+            first_child: 0,
+            child_len: 0,
+            src: Some(Anchor {
+                spine,
+                path: path.clone(),
+                offset: 0,
+            }),
+            link: None,
+        });
+
+        let start = doc.text.len() as u32;
+        doc.text.push_str(line);
+        used += line.len();
+        let text = doc.push_node(Node {
+            kind: NodeKind::Text(Span::new(start, line.len() as u32)),
+            style: ComputedStyle {
+                display: Display::Inline,
+                ..ComputedStyle::default()
+            },
+            parent: Some(p),
+            first_child: 0,
+            child_len: 0,
+            src: Some(Anchor {
+                spine,
+                path,
+                offset: 0,
+            }),
+            link: None,
+        });
+        doc.set_kids(p, &[text]);
+        kids.push(p);
+    }
+    doc.set_kids(root, &kids);
+    doc
+}
+
+/// 去标签，按块级边界切行。只用于 `text_document`。
+fn extract_lines(xml: &str) -> Vec<String> {
+    let bytes = xml.as_bytes();
+    let mut out = String::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] != b'<' {
+            let ch = xml[i..].chars().next().expect("char boundary");
+            if ch != '\r' {
+                out.push(if ch == '\t' { ' ' } else { ch });
+            }
+            i += ch.len_utf8();
+            continue;
+        }
+
+        let mut j = i + 1;
+        let closing = j < bytes.len() && bytes[j] == b'/';
+        if closing {
+            j += 1;
+        }
+        let name_start = j;
+        while j < bytes.len()
+            && (bytes[j].is_ascii_alphanumeric() || matches!(bytes[j], b':' | b'-' | b'_'))
+        {
+            j += 1;
+        }
+        let name = &xml[name_start..j].to_ascii_lowercase();
+
+        // script/style 的内容不是正文，整段跳过。
+        if !closing && matches!(name.as_str(), "script" | "style") {
+            let lower = xml[i..].to_ascii_lowercase();
+            let needle = alloc::format!("</{name}");
+            i = match lower.find(&needle) {
+                Some(at) => match xml[i + at..].find('>') {
+                    Some(gt) => i + at + gt + 1,
+                    None => xml.len(),
+                },
+                None => xml.len(),
+            };
+            out.push('\n');
+            continue;
+        }
+
+        if is_text_break(name.as_str()) {
+            out.push('\n');
+        }
+
+        let mut quote = 0u8;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if quote != 0 {
+                if b == quote {
+                    quote = 0;
+                }
+            } else if b == b'"' || b == b'\'' {
+                quote = b;
+            } else if b == b'>' {
+                i += 1;
+                break;
+            }
+            i += 1;
+        }
+    }
+    out.split('\n')
+        .map(alloc::string::ToString::to_string)
+        .collect()
+}
+
+fn is_text_break(name: &str) -> bool {
+    matches!(
+        name,
+        "address"
+            | "article"
+            | "aside"
+            | "blockquote"
+            | "br"
+            | "dd"
+            | "div"
+            | "dl"
+            | "dt"
+            | "figcaption"
+            | "figure"
+            | "footer"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "header"
+            | "hr"
+            | "li"
+            | "main"
+            | "nav"
+            | "ol"
+            | "p"
+            | "pre"
+            | "section"
+            | "table"
+            | "td"
+            | "th"
+            | "tr"
+            | "ul"
+    )
+}
+
+/// 图片地址：优先 `src`，其次 `href` / `xlink:href`。
+///
+/// `roxmltree::Attribute::name()` 返回本地名，所以 `xlink:href` 会以 `href`
+/// 出现，不需要自己拆前缀。
+fn image_ref<'a, 'input>(node: roxmltree::Node<'a, 'input>) -> Option<&'a str> {
+    let mut fallback = None;
+    for attr in node.attributes() {
+        if attr.name().eq_ignore_ascii_case("src") {
+            return Some(attr.value());
+        }
+        if fallback.is_none() && attr.name().eq_ignore_ascii_case("href") {
+            fallback = Some(attr.value());
+        }
+    }
+    fallback
+}
+
+/// 按本地名读属性（忽略命名空间），用于 `alt` 这类可能带前缀的属性。
+fn local_attr<'a, 'input>(node: roxmltree::Node<'a, 'input>, name: &str) -> Option<&'a str> {
+    node.attributes()
+        .find(|attr| attr.name().eq_ignore_ascii_case(name))
+        .map(|attr| attr.value())
+}
+
+/// SVG `<image>` 的 `width`/`height` 属性（只认无单位或 `px`）。
+fn attr_size(node: roxmltree::Node<'_, '_>) -> Option<ebook_ir::SizeF> {
+    let w = node.attribute("width").and_then(px_value)?;
+    let h = node.attribute("height").and_then(px_value)?;
+    (w > 0.0 && h > 0.0).then(|| ebook_ir::SizeF::new(w, h))
+}
+
+fn px_value(value: &str) -> Option<f32> {
+    let value = value.trim();
+    let value = value.strip_suffix("px").unwrap_or(value).trim();
+    let number: f32 = value.parse().ok()?;
+    number.is_finite().then_some(number)
 }
 
 fn map_tag(name: &str) -> Tag {
@@ -416,6 +671,8 @@ fn map_tag(name: &str) -> Tag {
         "pre" => Tag::Pre,
         "code" => Tag::Code,
         "img" => Tag::Img,
+        // SVG 的 `<image>` 与 HTML 的 `<image>`（`img` 的旧别名）都按图片处理。
+        "image" => Tag::Img,
         "br" => Tag::Br,
         "ruby" => Tag::Ruby,
         "rt" => Tag::Rt,

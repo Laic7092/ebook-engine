@@ -176,10 +176,23 @@ impl<'a> ZipArchive<'a> {
     }
 }
 
-/// 文本条目的解码。EPUB 规范要求 UTF-8，但真实书里常见带 BOM 的 UTF-8、
-/// UTF-16（Windows 工具重存），以及声明成 latin-1/windows-1252 的旧内容。
-/// 这里只做无外部表的确定性子集；其它编码继续用 UTF-8 lossy 兜底。
+/// 文本条目的解码。
+///
+/// EPUB 规范要求 UTF-8，但真实书里常见带 BOM 的 UTF-8、UTF-16，以及
+/// GBK/Big5/Shift_JIS 等 CJK 旧编码。决策顺序与浏览器一致：
+///
+/// 1. BOM；
+/// 2. 无 BOM 的 UTF-16 字节特征；
+/// 3. 合法 UTF-8；
+/// 4. XML 声明 / HTML `<meta charset>` 里的编码标签；
+/// 5. `chardetng`（Firefox 的编码探测器）猜测（仅 native）；
+/// 6. 最后才是 UTF-8 lossy。
+///
+/// 任何一步都不失败；最坏情况是替换字符，而不是整章/整本打不开。
 pub(crate) fn decode_text(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
     if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
         return String::from_utf8_lossy(rest).into_owned();
     }
@@ -189,22 +202,40 @@ pub(crate) fn decode_text(bytes: &[u8]) -> String {
     if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
         return decode_utf16(rest, false);
     }
-    // 没有 BOM 的 UTF-16 也能从开头几个字节判断：XML/XHTML 的第一个字符
-    // 是 `<` 或 `?`，在 LE/BE 下会留下明显的 0。
+    // 无 BOM 的 UTF-16 必须放在 UTF-8 之前：NUL 是合法 UTF-8，直接
+    // `from_utf8` 会把 UTF-16 当成带 NUL 的 UTF-8。
     if is_utf16(bytes, true) {
         return decode_utf16(bytes, true);
     }
     if is_utf16(bytes, false) {
         return decode_utf16(bytes, false);
     }
+    if let Ok(text) = core::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+    decode_legacy(bytes)
+}
 
-    match core::str::from_utf8(bytes) {
-        Ok(text) => text.to_string(),
-        Err(_) => match declared_encoding(bytes) {
-            Some("iso-8859-1" | "latin1" | "latin-1") => decode_latin1(bytes),
-            Some("windows-1252" | "cp1252") => decode_windows_1252(bytes),
-            _ => String::from_utf8_lossy(bytes).into_owned(),
-        },
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_legacy(bytes: &[u8]) -> String {
+    if let Some(label) = declared_label(bytes) {
+        if let Some(encoding) = encoding_rs::Encoding::for_label(&label) {
+            return encoding.decode_without_bom_handling(bytes).0.into_owned();
+        }
+    }
+    let mut detector = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Deny);
+    detector.feed(bytes, true);
+    let encoding = detector.guess(None, chardetng::Utf8Detection::Deny);
+    encoding.decode_without_bom_handling(bytes).0.into_owned()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn decode_legacy(bytes: &[u8]) -> String {
+    // wasm 不打包完整编码表（体积预算）。宿主可以用 `TextDecoder` 先解码。
+    match declared_label(bytes).as_deref() {
+        Some(b"iso-8859-1" | b"latin1" | b"latin-1") => decode_latin1(bytes),
+        Some(b"windows-1252" | b"cp1252") => decode_windows_1252(bytes),
+        _ => String::from_utf8_lossy(bytes).into_owned(),
     }
 }
 
@@ -253,37 +284,98 @@ fn decode_utf16(bytes: &[u8], little_endian: bool) -> String {
     out
 }
 
-fn declared_encoding(bytes: &[u8]) -> Option<&'static str> {
-    let head = bytes.get(..bytes.len().min(512))?;
-    // XML 声明本身一定是 ASCII；正文可能在后面含非法 UTF-8，不能因为
-    // 整个 512 字节窗口解不出来就放弃声明里的编码。
-    let end = head.windows(2).position(|pair| pair == b"?>")?;
-    let text = core::str::from_utf8(&head[..end]).ok()?.trim_start();
-    let text = text.strip_prefix("<?xml")?;
-    let declaration = text;
-    let lower = declaration.to_ascii_lowercase();
-    let at = lower.find("encoding")?;
-    let rest = declaration.get(at + "encoding".len()..)?.trim_start();
-    let rest = rest.strip_prefix('=')?.trim_start();
-    let (quote, rest) = match rest.as_bytes().first().copied()? {
-        b'\'' => ('\'', &rest[1..]),
-        b'"' => ('"', &rest[1..]),
-        _ => return None,
-    };
-    let end = rest.find(quote)?;
-    let encoding = rest[..end].trim().to_ascii_lowercase();
-    Some(match encoding.as_str() {
-        "iso-8859-1" => "iso-8859-1",
-        "latin1" | "latin-1" => "latin1",
-        "windows-1252" | "cp1252" => "windows-1252",
-        _ => "utf-8",
-    })
+/// XML 声明或 `<meta charset>` 里声明的编码标签。标签本身是 ASCII，所以可以
+/// 在原始字节上扫描，不受正文编码影响。
+fn declared_label(bytes: &[u8]) -> Option<Vec<u8>> {
+    let head = &bytes[..bytes.len().min(1024)];
+    xml_encoding_label(head).or_else(|| meta_charset_label(head))
 }
 
+fn find_ascii(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > hay.len() {
+        return None;
+    }
+    hay.windows(needle.len())
+        .position(|window| window.eq_ignore_ascii_case(needle))
+}
+
+fn xml_encoding_label(head: &[u8]) -> Option<Vec<u8>> {
+    let start = head.iter().position(|byte| !byte.is_ascii_whitespace())?;
+    if !head[start..].starts_with(b"<?xml") {
+        return None;
+    }
+    let end = find_ascii(&head[start..], b"?>")? + start;
+    let decl = &head[start..end];
+    let at = find_ascii(decl, b"encoding")?;
+    let mut i = at + b"encoding".len();
+    while i < decl.len() && decl[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if decl.get(i) != Some(&b'=') {
+        return None;
+    }
+    i += 1;
+    while i < decl.len() && decl[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let quote = *decl.get(i)?;
+    if quote == b'"' || quote == b'\'' {
+        i += 1;
+        let label_start = i;
+        while i < decl.len() && decl[i] != quote {
+            i += 1;
+        }
+        (i > label_start).then(|| decl[label_start..i].to_ascii_lowercase())
+    } else {
+        let label_start = i;
+        while i < decl.len() && !decl[i].is_ascii_whitespace() && !matches!(decl[i], b'>' | b'?') {
+            i += 1;
+        }
+        (i > label_start).then(|| decl[label_start..i].to_ascii_lowercase())
+    }
+}
+
+fn meta_charset_label(head: &[u8]) -> Option<Vec<u8>> {
+    // 只认 `<meta` 之后第一次出现的 charset，避免正文里的单词误命中。
+    let meta = find_ascii(head, b"<meta")?;
+    let at = find_ascii(&head[meta..], b"charset")? + meta;
+    let mut i = at + b"charset".len();
+    while i < head.len() && head[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if head.get(i) != Some(&b'=') {
+        return None;
+    }
+    i += 1;
+    while i < head.len() && head[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let quote = *head.get(i)?;
+    let label_start;
+    if quote == b'"' || quote == b'\'' {
+        i += 1;
+        label_start = i;
+        while i < head.len() && head[i] != quote {
+            i += 1;
+        }
+    } else {
+        label_start = i;
+        while i < head.len()
+            && !head[i].is_ascii_whitespace()
+            && !matches!(head[i], b';' | b'"' | b'\'' | b'>')
+        {
+            i += 1;
+        }
+    }
+    (i > label_start).then(|| head[label_start..i].to_ascii_lowercase())
+}
+
+#[cfg(target_arch = "wasm32")]
 fn decode_latin1(bytes: &[u8]) -> String {
     bytes.iter().map(|&byte| byte as char).collect()
 }
 
+#[cfg(target_arch = "wasm32")]
 fn decode_windows_1252(bytes: &[u8]) -> String {
     const HIGH: [char; 32] = [
         '\u{20AC}', '\u{FFFD}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}',

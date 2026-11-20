@@ -94,7 +94,7 @@ fn opf_with_dangling_spine_item_keeps_the_rest_and_reports() {
 }
 
 #[test]
-fn unclosed_xhtml_does_not_take_down_the_book() {
+fn unclosed_xhtml_is_repaired_not_fatal() {
     let opf = minimal_opf(
         r#"<itemref idref="c1"/>"#,
         r#"<item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>"#,
@@ -102,8 +102,14 @@ fn unclosed_xhtml_does_not_take_down_the_book() {
     let ch1 = br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>never closed"#;
     let bytes = support::epub("OEBPS/content.opf", &opf, &[("OEBPS/ch1.xhtml", ch1)]);
     let src = support::source(bytes);
-    let opened = open(&src).expect("open");
-    assert!(opened.chapter(&src, 0).is_err());
+    let raw = src.document().expect("document");
+    let reader = EpubReader::open(&raw).expect("open");
+    let doc = reader.chapter(0).expect("repaired chapter");
+    assert!(doc.text.contains("never closed"), "{:?}", doc.text);
+    assert!(reader
+        .issues()
+        .iter()
+        .any(|issue| issue.code == ebook_format::EpubIssueCode::RepairedXhtml));
 }
 
 #[test]
@@ -269,6 +275,26 @@ fn utf16_chapter_is_decoded() {
 }
 
 #[test]
+fn gbk_chapter_is_decoded_from_its_declaration() {
+    let opf = minimal_opf(
+        r#"<itemref idref="c1"/>"#,
+        r#"<item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>"#,
+    );
+    // “正文”的 GBK 字节；声明本身是 ASCII，正文不是合法 UTF-8。
+    let mut chapter = Vec::new();
+    chapter.extend_from_slice(
+        br#"<?xml version="1.0" encoding="gbk"?><html xmlns="http://www.w3.org/1999/xhtml"><body><p>"#,
+    );
+    chapter.extend_from_slice(&[0xD5, 0xFD, 0xCE, 0xC4]);
+    chapter.extend_from_slice(b"</p></body></html>");
+    let bytes = support::epub("OEBPS/content.opf", &opf, &[("OEBPS/ch1.xhtml", &chapter)]);
+    let src = support::source(bytes);
+    let opened = open(&src).expect("open");
+    let doc = opened.chapter(&src, 0).expect("GBK chapter");
+    assert!(doc.text.contains("正文"), "{:?}", doc.text);
+}
+
+#[test]
 fn invalid_xml_control_bytes_are_replaced_not_fatal() {
     let opf = minimal_opf(
         r#"<itemref idref="c1"/>"#,
@@ -312,13 +338,15 @@ fn deeply_nested_xhtml_is_bounded_and_does_not_take_down_other_chapters() {
     let src = support::source(bytes);
     let raw = src.document().expect("document");
     let reader = EpubReader::open(&raw).expect("open");
-    assert!(reader.chapter(0).is_err());
+    // 超深结构不再整章报错：降级成纯文本，正文仍可读。
+    let doc = reader.chapter(0).expect("deep chapter keeps readable text");
+    assert!(doc.text.contains("正文"), "{:?}", doc.text);
     let doc = reader.chapter(1).expect("second chapter");
     assert!(doc.text.contains("still readable"));
     assert!(reader
         .issues()
         .iter()
-        .any(|issue| issue.code == ebook_format::EpubIssueCode::MalformedXhtml));
+        .any(|issue| issue.code == ebook_format::EpubIssueCode::TextFallback));
 }
 
 #[test]
@@ -363,4 +391,86 @@ fn deeply_nested_nav_and_css_are_bounded() {
     let opened = open(&src).expect("open");
     let doc = opened.chapter(&src, 0).expect("chapter");
     assert!(doc.text.contains("survives"));
+}
+
+#[test]
+fn dirty_html_variants_still_build_documents() {
+    // 这些都是浏览器能读、严格 XML 会拒绝的真实写法。断言格式层也能读。
+    let cases: &[(&str, &str)] = &[
+        (r#"<html><body><p>a<p>b</body></html>"#, "b"),
+        (r#"<html><body><div><p>a</div>"#, "a"),
+        (r#"<p>one</p><p>two</p>"#, "two"),
+        (
+            r#"<HTML><BODY><P CLASS=x>Hi<BR>There</P></BODY></HTML>"#,
+            "There",
+        ),
+        (r#"<p>a < b and c > d</p>"#, "c"),
+        (
+            r#"<p><a href=http://example.com/a?x=1&y=2>go</a></p>"#,
+            "go",
+        ),
+        (r#"<ul><li>one<li>two</ul>"#, "two"),
+    ];
+    let mut no_assets = ebook_format::xhtml::NoAssets;
+    for (xml, needle) in cases {
+        let doc = ebook_format::xhtml::build(xml, 0, &mut no_assets)
+            .unwrap_or_else(|error| panic!("{xml}: {error:?}"));
+        assert!(doc.text.contains(needle), "{xml}: {:?}", doc.text);
+    }
+}
+
+#[test]
+fn svg_image_is_an_image_with_intrinsic_size() {
+    let xml = r#"<html><body><svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><image xlink:href="cover.jpeg" width="430" height="571"/></svg></body></html>"#;
+    let mut no_assets = ebook_format::xhtml::NoAssets;
+    let doc = ebook_format::xhtml::build(xml, 0, &mut no_assets).expect("svg cover");
+    assert_eq!(doc.images.len(), 1);
+    let image = &doc.images[0];
+    assert_eq!(image.src.as_deref(), Some("cover.jpeg"));
+    let size = image.size.expect("width/height become intrinsic size");
+    assert_eq!((size.w, size.h), (430.0, 571.0));
+}
+
+#[test]
+fn malformed_ncx_keeps_camel_case_tags_and_toc() {
+    let opf = r#"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>NCX</dc:title><dc:language>en</dc:language><dc:identifier id="id">n</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    <item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine toc="ncx"><itemref idref="c1"/></spine>
+</package>"#;
+    // 裸属性触发容错修复；NCX 的 camelCase 标签必须原样保留。
+    let ncx = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <navMap><navPoint id="p1"><navLabel><text>Chapter One</text></navLabel>
+  <content src=ch1.xhtml/></navPoint></navMap>
+</ncx>"#;
+    let chapter = br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>hello</p></body></html>"#;
+    let bytes = support::epub(
+        "OEBPS/content.opf",
+        opf,
+        &[
+            ("OEBPS/toc.ncx", ncx.as_bytes()),
+            ("OEBPS/ch1.xhtml", chapter),
+        ],
+    );
+    let src = support::source(bytes);
+    let raw = src.document().expect("document");
+    let reader = EpubReader::open(&raw).expect("open");
+    let doc = reader.chapter(0).expect("chapter");
+    assert!(doc.text.contains("hello"));
+    assert!(
+        reader
+            .book()
+            .toc
+            .iter()
+            .any(|entry| entry.label == "Chapter One"),
+        "{:?}",
+        reader.book().toc
+    );
 }

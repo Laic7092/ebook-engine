@@ -154,6 +154,22 @@
 
 ### Fixed
 
+- **脏 XHTML 不再整章失败**：新增 `html_repair` 容错层（tokenizer + HTML 树构造
+  恢复），严格 XML 解析失败后自动修复并重试。覆盖裸属性值（`href=http://...`）、
+  裸 `&`、未闭合 void 元素、错配结束标签、可选结束标签、重复属性、多根片段、
+  大小写不敏感等真实世界的 HTML 写法；仍失败时退化成纯文本，保证每章至少能
+  出字。OPF / container / nav / NCX 走同一入口，避免一本坏 OPF 导致整本打不开。
+  诊断码新增 `RepairedXhtml` / `TextFallback`。
+- 实体展开在 `&` 后 64 字节内没有分号、且窗口落在多字节字符中间时会 panic；
+  现已退到字符边界并补回归测试。
+- 文本解码按浏览器顺序补齐：BOM → 无 BOM UTF-16 → 合法 UTF-8 → XML/`<meta
+  charset>` → `chardetng` → UTF-8 lossy。native 构建用 `encoding_rs` 支持
+  GBK / Big5 / Shift_JIS / EUC-KR / windows-125x；wasm 为体积预算保留
+  latin-1/windows-1252，其余旧编码仍由宿主先解码。
+- Calibre 常见的 `<svg><image xlink:href="cover.jpeg"/></svg>` 封面现在识别为
+  图片，并用 `width`/`height` 作为固有尺寸；纯图片封面不再排版出 0 页。
+- `<!DOCTYPE html>` 之外的坏 XHTML（未闭合标签、裸属性等）不再被判成
+  `Malformed("xhtml")`；超深/超限章节降级为可读的纯文本而不是白屏。
 - 目录里超长、无空格的章节名可以任意断行，不再把面板撑出横向滚动条。
 - 目录/设置底部弹层关闭后只移出屏幕、阴影仍从视口底部漏出；关闭态现在同步
   隐藏，滑动动画结束后才彻底不可见。
