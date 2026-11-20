@@ -1,0 +1,97 @@
+name: Pages
+
+# 构建 wasm + 静态包并发布到 GitHub Pages。
+# 站点挂在 /<repo>/ 子路径下：web/ 里所有资源都是相对路径，
+# 不要为了部署把 "./x" 改成 "/x"。
+#
+# 首次使用：仓库 Settings → Pages → Source 选 "GitHub Actions"。
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Actions runner 在境外，直连比走镜像快也更稳。
+  GH_PROXY: ""
+
+jobs:
+  build:
+    name: build site
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install Rust (stable + wasm32)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # 与 ci.yml 分开 key：CI 的 target 是 debug，这里是 release wasm。
+      - name: cache cargo and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-pages-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-pages-
+
+      # ebook-web 把 wasm-bindgen 精确锁在 0.2.129，CLI 必须同版本。
+      - name: install wasm-bindgen-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.129
+
+      # generate.sh 用 woff CLI 生成测试字体（web/latin.ttf 由它复制）。
+      - name: install woff
+        run: cargo install woff --version 0.6.4 --features binary --locked
+
+      # 字体、图标、启动图、Unicode 数据都不入库，部署前重建。
+      - name: generate assets
+        run: scripts/generate.sh
+
+      - name: build wasm (web/pkg)
+        run: web/build.sh
+
+      # esbuild 在 PATH 上就压缩，否则原样拷贝；两者都能部署。
+      - name: install esbuild
+        run: npm install --global esbuild@0.25.x
+
+      - name: minify (web/dist)
+        run: web/minify.sh
+
+      # artifact 方式不走 Jekyll，这个文件只是防御。
+      - name: touch .nojekyll
+        run: touch web/dist/.nojekyll
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    name: deploy
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

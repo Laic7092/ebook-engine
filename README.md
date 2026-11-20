@@ -1,7 +1,12 @@
 # ebook-engine
 
 [![CI](https://github.com/Laic7092/ebook-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/Laic7092/ebook-engine/actions/workflows/ci.yml)
+[![Pages](https://github.com/Laic7092/ebook-engine/actions/workflows/pages.yml/badge.svg)](https://github.com/Laic7092/ebook-engine/actions/workflows/pages.yml)
 <!-- 发布到 GitHub 时把 OWNER 换成实际组织/用户名。 -->
+
+在线演示：<https://laic7092.github.io/ebook-engine/> （每次 push 到 `main` 由
+`.github/workflows/pages.yml` 重建；首次需在 Settings → Pages 把 Source 设成
+"GitHub Actions"）。
 
 电子书渲染引擎。Web 优先，跨平台，可 Worker 并行。
 
