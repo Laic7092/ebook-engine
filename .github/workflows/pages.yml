@@ -71,13 +71,24 @@ jobs:
         with:
           tool: wasm-bindgen-cli@0.2.129
 
-      # generate.sh 用 woff CLI 生成测试字体（web/latin.ttf 由它复制）。
-      - name: install woff
-        run: command -v woff >/dev/null || cargo install woff --version 0.6.4 --features binary --locked
+      # 部署只需要 web/ 的资源：字体、图标、启动图。测试字体、Unicode 表、
+      # 断字表和 EPUB 夹具与站点无关，--web-only 不碰它们（也就不需要 woff）。
+      # 5 MB 的中文字体每次都下太慢，按内容固定 key 缓存。
+      - name: cache web assets
+        uses: actions/cache@v4
+        with:
+          path: |
+            fixtures/font/test.ttf
+            web/latin.ttf
+            web/cjk.woff2
+            web/icon-180.png
+            web/icon-192.png
+            web/icon-512.png
+            web/splash
+          key: ${{ runner.os }}-web-assets-v1
 
-      # 字体、图标、启动图、Unicode 数据都不入库，部署前重建。
-      - name: generate assets
-        run: scripts/generate.sh
+      - name: generate web assets
+        run: scripts/generate.sh --web-only
 
       - name: build wasm (web/pkg)
         run: web/build.sh

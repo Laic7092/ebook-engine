@@ -66,6 +66,14 @@ jobs:
         with:
           tool: wasm-bindgen-cli@0.2.129
 
+      # woff 只在 generate.sh 里把夹具字体转成 woff/woff2。它是纯 Rust 编译，
+      # 每次现编约 1 分钟；按版本单独缓存一个二进制最省。
+      - name: cache woff
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/woff
+          key: ${{ runner.os }}-woff-0.6.4
+
       # 字体/EPUB 夹具不再入库，测试前按需重建（跳过图标与 5 MB 中文字体）。
       - name: install woff
         run: command -v woff >/dev/null || cargo install woff --version 0.6.4 --features binary --locked
@@ -97,6 +105,3 @@ jobs:
       # 上直接逐字节比较；这里不跑 bless，否则回归会被覆盖成“通过”。
       - name: xtask all (golden / contract / app / pixel / size / parity)
         run: cargo run -p xtask -- all
-
-      - name: xtask size
-        run: cargo run -p xtask -- size
