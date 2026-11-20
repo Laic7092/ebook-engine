@@ -11,6 +11,7 @@ import {
   eb_font,
   eb_font_count,
   eb_font_desc,
+  eb_font_error,
   eb_font_face,
   eb_font_face_bytes,
   eb_font_face_count,
@@ -2032,11 +2033,13 @@ export function createReader(options) {
     }
     const count = eb_font_face_count();
     let loaded = 0;
+    let lastError = null;
     for (let index = 0; index < count; index += 1) {
       if (token !== openToken) {
         return false;
       }
       if (eb_font_face(index) === 0xffffffff) {
+        lastError = eb_font_error() || lastError;
         continue;
       }
       loaded += 1;
@@ -2058,6 +2061,14 @@ export function createReader(options) {
     if (token !== openToken) {
       return false;
     }
+    if (lastError) {
+      // 有字体成功时不要用状态栏盖住正常进度，但诊断仍要让人看得到。
+      if (loaded) {
+        console.warn(lastError);
+      } else {
+        setStatus(lastError);
+      }
+    }
     fontDescs.clear();
     if (loaded) {
       enableGlyphAtlas();
@@ -2066,7 +2077,9 @@ export function createReader(options) {
   }
 
   async function loadFont(bytes, family = FONT_FAMILY) {
-    eb_font(bytes);
+    if (eb_font(bytes) === 0xffffffff) {
+      throw new Error(eb_font_error() || "字体无法解析");
+    }
     workerFont(bytes);
     const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
     try {

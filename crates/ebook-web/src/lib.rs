@@ -21,9 +21,24 @@ static LAST: Mutex<Option<LastLayout>> = Mutex::new(None);
 /// 最近一次排版失败的原因。`eb_layout` 失败时只能返回空 `Vec`，JS 侧靠它
 /// 把“排版失败”变成一个具体错误，而不是让用户对着空页面猜。
 static LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
+/// 最近一次字体加载失败的原因。字体加载接口保留 `u32` 返回值的兼容性，
+/// 诊断单独暴露，避免坏 WOFF/WOFF2 被静默跳过。
+static FONT_ERROR: Mutex<Option<String>> = Mutex::new(None);
 
 pub fn last_error() -> String {
     LAST_ERROR.lock().unwrap().clone().unwrap_or_default()
+}
+
+pub fn font_error() -> String {
+    FONT_ERROR.lock().unwrap().clone().unwrap_or_default()
+}
+
+fn set_font_error(error: impl Into<String>) {
+    *FONT_ERROR.lock().unwrap() = Some(error.into());
+}
+
+fn clear_font_error() {
+    *FONT_ERROR.lock().unwrap() = None;
 }
 
 struct LastLayout {
@@ -118,14 +133,21 @@ fn install(backend: Backend) -> String {
 pub fn register_font(bytes: &[u8]) -> u32 {
     let mut slot = FONT.lock().unwrap();
     let font = slot.get_or_insert_with(FontBook::new);
-    match font.add(bytes.to_vec()) {
-        Some(id) => id.0 as u32,
-        None => u32::MAX,
+    match font.try_add(bytes.to_vec()) {
+        Ok(id) => {
+            clear_font_error();
+            id.0 as u32
+        }
+        Err(error) => {
+            set_font_error(error.to_string());
+            u32::MAX
+        }
     }
 }
 
 pub fn reset_fonts() {
     *FONT.lock().unwrap() = None;
+    clear_font_error();
 }
 
 /// 宿主按 `GlyphRun` 的 glyph id 取回光栅位图，自己合成页面。
@@ -182,9 +204,15 @@ pub fn load_font_face(index: usize) -> u32 {
     };
     let mut slot = FONT.lock().unwrap();
     let font = slot.get_or_insert_with(FontBook::new);
-    match font.add_styled(&face.family, face.weight, face.style, face.bytes) {
-        Some(id) => id.0 as u32,
-        None => u32::MAX,
+    match font.try_add_styled(&face.family, face.weight, face.style, face.bytes) {
+        Ok(id) => {
+            clear_font_error();
+            id.0 as u32
+        }
+        Err(error) => {
+            set_font_error(format!("{}: {error}", face.href));
+            u32::MAX
+        }
     }
 }
 

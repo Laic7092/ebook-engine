@@ -7,6 +7,10 @@
 
 ### Added
 
+- 内嵌字体支持 WOFF / WOFF2：`FontBook` 在加载入口用纯 Rust 的 `wuff` 解包成
+  sfnt，再复用现有 harfrust 整形、ttf-parser 度量与光栅链路；Web 端「加载本地字体」
+  也接受 `.woff` / `.woff2`。解包失败通过 `FontBook` 诊断与 `eb_font_error` 暴露，
+  不再静默丢弃；给浏览器 `FontFace` 的仍是原始字体字节。
 - 阅读器翻页动画：淡入淡出与跟手滑动，设置面板新增「翻页动画」开关。
 - 排版 Worker（`web/layout-worker.js`）与 `eb_use_layout`：整章 `Layout` 在 worker
   执行，主线程只装回 IR 供命中/选区/链接查询；worker 失败或超时自动退回主线程。

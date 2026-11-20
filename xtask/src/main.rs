@@ -8,7 +8,9 @@ use ebook_ir::{codec, EdgesF, LayoutResult};
 use ebook_layout::{Layout, LayoutEnv, NoImageSizes, PageConstraint, StubMeasurer};
 use ebook_raster::RgbaSurface;
 
-const GZIP_BUDGET: usize = 512 * 1024;
+// 内置 WOFF/WOFF2 解包后，Brotli 解码器本身约占 105 KB gzip；WOFF1 的 zlib
+// 复用 ebook-format 已有的 miniz_oxide，不再额外链一套 flate2。预算相应上调。
+const GZIP_BUDGET: usize = 640 * 1024;
 fn target_dir() -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
