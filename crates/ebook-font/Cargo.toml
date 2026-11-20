@@ -14,4 +14,10 @@ ebook-ir.workspace = true
 ebook-layout.workspace = true
 harfrust.workspace = true
 read-fonts.workspace = true
+# WOFF/WOFF2 → sfnt 解包。wuff 只做容器/表重组，压缩后端由这里显式指定；
+# 两个后端都是纯 Rust，wasm32 可用。WOFF1 复用格式层已有的 miniz_oxide，
+# 不再额外链入 flate2 的 zlib 后端。
+wuff = { version = "=0.2.10", default-features = false }
+brotli-decompressor = { version = "=5.0.3" }
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 ab_glyph_rasterizer = { version = "0.1", default-features = false, features = ["std"] }

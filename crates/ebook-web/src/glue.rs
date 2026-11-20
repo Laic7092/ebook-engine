@@ -44,6 +44,13 @@ pub fn eb_last_error() -> String {
     crate::last_error()
 }
 
+/// 最近一次 `eb_font` / `eb_font_face` 失败的原因（成功或重置后为空）。
+#[cfg(feature = "epub")]
+#[wasm_bindgen]
+pub fn eb_font_error() -> String {
+    crate::font_error()
+}
+
 #[cfg(feature = "epub")]
 #[wasm_bindgen]
 pub fn eb_font_reset() {

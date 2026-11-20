@@ -337,11 +337,15 @@ fn print_anchor(anchors: &[ChapterAnchor], fragment: &str) {
     }
 }
 
-/// 把书里声明的内嵌字体装进 `FontBook`。坏字体跳过，不阻止排版。
+/// 把书里声明的内嵌字体装进 `FontBook`。坏字体跳过，不阻止排版，但要留下诊断。
 fn load_fonts(book: &Book) -> FontBook {
     let mut fonts = FontBook::new();
     for face in book.fonts() {
-        let _ = fonts.add_styled(&face.family, face.weight, face.style, face.bytes.clone());
+        if let Err(error) =
+            fonts.try_add_styled(&face.family, face.weight, face.style, face.bytes.clone())
+        {
+            eprintln!("font {} ({}): {error}", face.href, face.family);
+        }
     }
     fonts
 }

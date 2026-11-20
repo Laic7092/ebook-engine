@@ -7,6 +7,10 @@
 
 ### Added
 
+- 内嵌字体支持 WOFF / WOFF2：`FontBook` 在加载入口用纯 Rust 的 `wuff` 解包成
+  sfnt，再复用现有 harfrust 整形、read-fonts 度量与光栅链路；Web 端「加载本地字体」
+  也接受 `.woff` / `.woff2`。解包失败通过 `FontBook` 诊断与 `eb_font_error` 暴露，
+  不再静默丢弃；给浏览器 `FontFace` 的仍是原始字体字节。
 - 阅读器翻页动画：淡入淡出与跟手滑动，设置面板新增「翻页动画」开关。
 - 排版 Worker（`web/layout-worker.js`）与 `eb_use_layout`：整章 `Layout` 在 worker
   执行，主线程只装回 IR 供命中/选区/链接查询；worker 失败或超时自动退回主线程。
@@ -104,8 +108,11 @@
 - 整形后端从 `rustybuzz` 换成 `harfrust`（HarfBuzz 15.2 算法移植，基于
   `read-fonts`）：`FontBook` 在 `Metrics::parse` 时建好 `harfrust::Font` 并随
   `FontBook` 复用，shaping plan/layout 缓存不再每次 `shape` 重建；字体字节用
-  `Arc<Vec<u8>>` 与 ttf-parser 共享，不额外复制。公共 `TextMeasurer::shape`
+  `Arc<Vec<u8>>` 与度量/光栅共享，不额外复制。公共 `TextMeasurer::shape`
   契约（逻辑序、簇首字节偏移、返回宽等于字形宽之和）不变。
+- 去掉 `ttf-parser`：cmap、upem、ascent/descent、advance 与 glyf/CFF 轮廓
+  全部改由 `read-fonts`（harfrust 的底层）读取，光栅器仍是 `ab_glyph_rasterizer`；
+  wasm gzip 反而小了约 11 KB。
 - Web 阅读器交互优化：canvas 尺寸不变时不再重设 `width/height`；当前页 ±1
   预渲染到位图缓存，翻页/跟手滑动优先搬图；选区改画在独立 overlay canvas 上，
   拖动选区不再重绘正文页。

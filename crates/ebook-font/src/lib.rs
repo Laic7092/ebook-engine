@@ -1,5 +1,6 @@
 use core::cell::RefCell;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 
 use ab_glyph_rasterizer::{point, Point, Rasterizer};
@@ -23,6 +24,9 @@ use read_fonts::{
     types::{F2Dot14, Fixed, GlyphId, Point as FontPoint},
     FontRef, TableProvider,
 };
+
+mod woff;
+pub use woff::{FontLoadError, WoffKind};
 
 const SYNTH_FLAG: u16 = 0x8000;
 const SYNTH_BOLD: u16 = 0x1000;
@@ -83,6 +87,28 @@ impl ShapeKey {
     }
 }
 
+/// 一次失败的字体加载。`FontBook` 保留最近所有失败，宿主可以取走显示；
+/// 失败不会阻止其它字体或排版，只是不再静默丢弃。
+#[derive(Clone, Debug, PartialEq)]
+pub struct FontDiagnostic {
+    pub desc: FontDesc,
+    pub error: FontLoadError,
+}
+
+impl fmt::Display for FontDiagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.desc.family.is_empty() {
+            write!(f, "字体加载失败: {}", self.error)
+        } else {
+            write!(
+                f,
+                "字体 {:?}（weight {}）加载失败: {}",
+                self.desc.family, self.desc.weight, self.error
+            )
+        }
+    }
+}
+
 struct Metrics {
     desc: FontDesc,
     /// 度量、cmap 与轮廓都从这份字节读取；harfrust 也共享同一个 Arc，
@@ -113,23 +139,25 @@ impl core::fmt::Debug for Metrics {
 }
 
 impl Metrics {
-    fn parse(desc: FontDesc, bytes: Vec<u8>) -> Option<Self> {
+    fn parse(desc: FontDesc, bytes: Vec<u8>) -> Result<Self, FontLoadError> {
+        let bytes = woff::unpack(bytes)?;
         let bytes = Arc::new(bytes);
-        let font = FontRef::from_index(bytes.as_slice(), 0).ok()?;
+        let font =
+            FontRef::from_index(bytes.as_slice(), 0).map_err(|_| FontLoadError::InvalidFont)?;
         // 与原实现一致：head/hhea/maxp 是必需表，head 的 upem 和 loca 格式
         // 还必须在合法范围内。
-        let head = font.head().ok()?;
+        let head = font.head().map_err(|_| FontLoadError::InvalidFont)?;
         let units_per_em = head.units_per_em();
         if !(16..=16384).contains(&units_per_em) || !matches!(head.index_to_loc_format(), 0 | 1) {
-            return None;
+            return Err(FontLoadError::InvalidFont);
         }
         let units_per_em = units_per_em as f32;
-        font.hhea().ok()?;
-        let maxp = font.maxp().ok()?;
+        font.hhea().map_err(|_| FontLoadError::InvalidFont)?;
+        let maxp = font.maxp().map_err(|_| FontLoadError::InvalidFont)?;
         if maxp.num_glyphs() == 0 {
-            return None;
+            return Err(FontLoadError::InvalidFont);
         }
-        let (ascender, descender) = line_metrics(&font)?;
+        let (ascender, descender) = line_metrics(&font).ok_or(FontLoadError::InvalidFont)?;
         // harfrust 与度量/轮廓共用同一份字节，只克隆 Arc，不拷贝。
         let source: Arc<dyn AsRef<[u8]> + Send + Sync> = bytes.clone();
         let hb_font = harfrust::Font::new(source, 0);
@@ -142,7 +170,7 @@ impl Metrics {
             })
             .collect();
         let cmap = build_cmap(&font);
-        Some(Self {
+        Ok(Self {
             desc,
             bytes,
             hb_font,
@@ -176,6 +204,9 @@ impl Metrics {
 #[derive(Debug, Default)]
 pub struct FontBook {
     faces: Vec<Metrics>,
+    /// 加载失败的字体。与 `faces` 分开，失败不会占用 `FontId`，也不会改变
+    /// fallback 顺序；宿主可以读出来显示，避免坏 woff 静默消失。
+    diagnostics: Vec<FontDiagnostic>,
     /// 文档语言（BCP-47 前缀，如 `zh` / `ja` / `en`）。
     ///
     /// 排版层的 `TextMeasurer::shape` 拿不到 `DocMeta`，所以语言由宿主在排版前
@@ -202,19 +233,52 @@ impl FontBook {
         self.add_face(FontDesc::default(), bytes)
     }
 
+    /// 可诊断版本的 [`Self::add`]。
+    pub fn try_add(&mut self, bytes: Vec<u8>) -> Result<FontId, FontLoadError> {
+        self.try_add_face(FontDesc::default(), bytes)
+    }
+
     pub fn add_face(&mut self, desc: FontDesc, bytes: Vec<u8>) -> Option<FontId> {
+        self.try_add_face(desc, bytes).ok()
+    }
+
+    /// 可诊断版本：失败时返回具体原因，同时记入 [`Self::diagnostics`]。
+    pub fn try_add_face(
+        &mut self,
+        desc: FontDesc,
+        bytes: Vec<u8>,
+    ) -> Result<FontId, FontLoadError> {
         let mut desc = desc;
         if desc.weight == 0 {
             desc.weight = 400;
         }
-        let metrics = Metrics::parse(desc, bytes)?;
+        let metrics = match Metrics::parse(desc.clone(), bytes) {
+            Ok(metrics) => metrics,
+            Err(error) => {
+                self.diagnostics.push(FontDiagnostic {
+                    desc,
+                    error: error.clone(),
+                });
+                return Err(error);
+            }
+        };
         let id = FontId(self.faces.len() as u16);
         self.faces.push(metrics);
         // 新 face 会改变后续 select/fallback 的候选集。旧逻辑 `FontId` 仍指向
         // 原来的 base face，本身不会串味，但候选集变化后旧缓存已不再代表
         // “当前 FontBook 的结果”，直接清空最稳。
         self.clear_caches();
-        Some(id)
+        Ok(id)
+    }
+
+    /// 加载失败的字体，按发生顺序。成功的字体不在这里。
+    pub fn diagnostics(&self) -> &[FontDiagnostic] {
+        &self.diagnostics
+    }
+
+    /// 取走诊断。宿主通常在一次批量加载后调用一次，避免重复显示。
+    pub fn take_diagnostics(&mut self) -> Vec<FontDiagnostic> {
+        core::mem::take(&mut self.diagnostics)
     }
 
     pub fn add_with_desc(&mut self, desc: FontDesc, bytes: Vec<u8>) -> Option<FontId> {
@@ -228,7 +292,18 @@ impl FontBook {
         style: FontStyle,
         bytes: Vec<u8>,
     ) -> Option<FontId> {
-        self.add_face(
+        self.try_add_styled(family, weight, style, bytes).ok()
+    }
+
+    /// 可诊断版本的 [`Self::add_styled`]。
+    pub fn try_add_styled(
+        &mut self,
+        family: &str,
+        weight: u16,
+        style: FontStyle,
+        bytes: Vec<u8>,
+    ) -> Result<FontId, FontLoadError> {
+        self.try_add_face(
             FontDesc {
                 family: family.into(),
                 weight,
