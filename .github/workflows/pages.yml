@@ -54,8 +54,10 @@ jobs:
       - name: cache cargo and target
         uses: actions/cache@v4
         with:
+          # 不收 ~/.cargo/bin：缓存里的二进制会让 `cargo install` 报
+          # "binary already exists in destination"。二进制交给各自的
+          # install action/命令，registry 缓存已经足够省时间。
           path: |
-            ~/.cargo/bin
             ~/.cargo/registry
             ~/.cargo/git
             target
@@ -71,7 +73,7 @@ jobs:
 
       # generate.sh 用 woff CLI 生成测试字体（web/latin.ttf 由它复制）。
       - name: install woff
-        run: cargo install woff --version 0.6.4 --features binary --locked
+        run: command -v woff >/dev/null || cargo install woff --version 0.6.4 --features binary --locked
 
       # 字体、图标、启动图、Unicode 数据都不入库，部署前重建。
       - name: generate assets
