@@ -29,6 +29,8 @@ jobs:
         with:
           toolchain: "1.100.0"
           targets: wasm32-unknown-unknown
+          # action 只装 minimal profile，fmt/clippy 必须显式点名。
+          components: rustfmt, clippy
 
       - name: verify toolchain pin
         run: |
