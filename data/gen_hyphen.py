@@ -56,12 +56,21 @@ def read_go_patterns(path):
 
 
 def read_tex_patterns(path):
-    lines = []
     with open(path, encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line or line.startswith("%"):
-                continue
+        text = handle.read()
+    # hyph-utf8 的 .tex 把模式包在 \patterns{ ... } 里，后面可能还有
+    # \hyphenation{...}；只取 patterns 块，避免把 TeX 命令当模式。
+    start = text.find("\\patterns{")
+    if start >= 0:
+        body = text[start + len("\\patterns{") :]
+        end = body.find("\n}")
+        if end >= 0:
+            body = body[:end]
+        text = body
+    lines = []
+    for line in text.splitlines():
+        line = line.split("%", 1)[0].strip()
+        if line:
             lines.append(line)
     return lines
 

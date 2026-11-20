@@ -42,6 +42,7 @@ PYTHON="${PYTHON:-python3}"
 GH_PROXY="${GH_PROXY-https://gh-proxy.com/}"
 FONT_DIR="$ROOT/fixtures/font"
 FONT="$FONT_DIR/test.ttf"
+CACHE="$ROOT/.cache"
 
 say() { printf '==> %s\n' "$*"; }
 
@@ -54,7 +55,7 @@ command -v "$PYTHON" >/dev/null 2>&1 || {
 	exit 1
 }
 
-mkdir -p "$FONT_DIR"
+mkdir -p "$FONT_DIR" "$CACHE"
 
 # GitHub 默认走代理，国内直连 release/raw 经常超时。
 github_url() {
@@ -160,6 +161,29 @@ if [ "$WITH_CJK" = 1 ] && { [ "$FORCE" = 1 ] || [ ! -s "$ROOT/web/cjk.woff2" ]; 
 		echo "下载到的不是 WOFF2 文件，已删除" >&2
 		exit 1
 	fi
+fi
+
+# ---------------------------------------------------------------- Unicode / 断字
+
+LINEBREAK="$ROOT/data/unicode/LineBreak.txt"
+LINEBREAK_TABLE="$ROOT/crates/ebook-layout/src/linebreak_table.rs"
+if [ "$FORCE" = 1 ] || [ ! -s "$LINEBREAK" ]; then
+	download "$LINEBREAK" "https://www.unicode.org/Public/18.0.0/ucd/LineBreak.txt"
+fi
+if [ "$FORCE" = 1 ] || [ ! -s "$LINEBREAK_TABLE" ] || [ "$LINEBREAK" -nt "$LINEBREAK_TABLE" ]; then
+	say "生成 linebreak_table.rs"
+	"$PYTHON" data/gen_linebreak.py
+fi
+
+HYPHEN_TEX="$CACHE/hyph-en-us.tex"
+HYPHEN_PAT="$ROOT/crates/ebook-layout/src/hyphen/en.pat"
+if [ "$FORCE" = 1 ] || [ ! -s "$HYPHEN_TEX" ]; then
+	download "$HYPHEN_TEX" \
+		"https://github.com/hyphenation/tex-hyphen/raw/master/hyph-utf8/tex/generic/hyph-utf8/patterns/tex/hyph-en-us.tex"
+fi
+if [ "$FORCE" = 1 ] || [ ! -s "$HYPHEN_PAT" ] || [ "$HYPHEN_TEX" -nt "$HYPHEN_PAT" ]; then
+	say "生成英文断字表 en.pat"
+	"$PYTHON" data/gen_hyphen.py --tex "$HYPHEN_TEX" --out "$HYPHEN_PAT"
 fi
 
 # ---------------------------------------------------------------- EPUB 夹具

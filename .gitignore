@@ -20,3 +20,7 @@ Cargo.lock.bak
 
 __pycache__/
 *.pyc
+
+# Unicode / 断字原始数据（scripts/generate.sh 下载后生成代码/表）
+/data/unicode/LineBreak.txt
+/crates/ebook-layout/src/hyphen/en.pat
