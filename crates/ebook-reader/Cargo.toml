@@ -1,0 +1,23 @@
+[package]
+name = "ebook-reader"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[features]
+default = []
+# 内置英文断字词典：native 静态库不在乎这几百 KB，web 端默认不带。
+hyphen-en = ["ebook-font/hyphen-en"]
+# 多线程排版（`layout_parallel`）。wasm 上没有真线程，native 上应该开。
+parallel = ["ebook-layout/parallel"]
+
+[dependencies]
+ebook-ir.workspace = true
+ebook-layout.workspace = true
+ebook-format.workspace = true
+ebook-font.workspace = true
+ebook-raster.workspace = true
+ebook-render.workspace = true

@@ -117,7 +117,10 @@ impl<'a> Reader<'a> {
     }
 
     /// 命中 `Op::Link` 时返回 href，否则 `None`。
-    pub fn link_at(&self, page: u32, p: PointF) -> Option<&str> {
+    ///
+    /// 返回的 `&str` 属于 IR（`'a`），不绑定 `Reader` 本身——宿主可以把
+    /// href 直接交出去，不必先拷成 `String`。
+    pub fn link_at(&self, page: u32, p: PointF) -> Option<&'a str> {
         let page_ref = self.ir.page(page)?;
         let flow = self.to_flow(page, p)?;
         for op in self.ir.display.op_slice(page_ref.ops) {

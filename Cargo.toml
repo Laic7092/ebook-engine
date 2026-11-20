@@ -8,6 +8,8 @@ members = [
   "crates/ebook-render",
   "crates/ebook-cli",
   "crates/ebook-web",
+  "crates/ebook-reader",
+  "crates/ebook-abi",
   "crates/ebook-font",
   "crates/ebook-raster",
   "xtask",
@@ -24,6 +26,7 @@ ebook-layout = { path = "crates/ebook-layout", default-features = false }
 ebook-cache = { path = "crates/ebook-cache" }
 ebook-format = { path = "crates/ebook-format" }
 ebook-render = { path = "crates/ebook-render" }
+ebook-reader = { path = "crates/ebook-reader" }
 ebook-font = { path = "crates/ebook-font", default-features = false }
 ebook-raster = { path = "crates/ebook-raster" }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
@@ -38,3 +41,12 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# native（iOS/Android/桌面）：跨 cgo 边界必须能 `catch_unwind`，
+# 所以 `panic` 不能用 release 里的 `abort`；体积也不是这几 MB 的问题。
+# 用法：cargo build --profile native --target aarch64-apple-ios
+[profile.native]
+inherits = "release"
+opt-level = 3
+panic = "unwind"
+strip = "none"

@@ -10,6 +10,12 @@ pub mod txt;
 pub mod xhtml;
 pub mod zip;
 
+/// 字节 → 文本的解码入口（UTF-8/UTF-16/GBK/Big5…）。
+///
+/// wasm 上没有完整编码表，宿主先用 `TextDecoder` 解好再走 `open_text`；
+/// native 直接用这个入口，格式层与 web 端因此保持同一套文本语义。
+pub use zip::decode_text;
+
 use alloc::string::String;
 use alloc::vec::Vec;
 

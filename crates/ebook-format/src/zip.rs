@@ -189,7 +189,7 @@ impl<'a> ZipArchive<'a> {
 /// 6. 最后才是 UTF-8 lossy。
 ///
 /// 任何一步都不失败；最坏情况是替换字符，而不是整章/整本打不开。
-pub(crate) fn decode_text(bytes: &[u8]) -> String {
+pub fn decode_text(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return String::new();
     }

@@ -110,6 +110,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
 
 [[package]]
+name = "ebook-abi"
+version = "0.1.0"
+dependencies = [
+ "ebook-reader",
+ "postcard",
+ "serde",
+]
+
+[[package]]
 name = "ebook-cache"
 version = "0.1.0"
 dependencies = [
@@ -182,6 +191,18 @@ dependencies = [
  "ebook-layout",
  "ebook-render",
  "read-fonts",
+]
+
+[[package]]
+name = "ebook-reader"
+version = "0.1.0"
+dependencies = [
+ "ebook-font",
+ "ebook-format",
+ "ebook-ir",
+ "ebook-layout",
+ "ebook-raster",
+ "ebook-render",
 ]
 
 [[package]]

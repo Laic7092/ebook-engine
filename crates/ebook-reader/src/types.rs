@@ -1,0 +1,193 @@
+//! 宿主侧的类型。全部是值类型或纯数据，没有 JSON、没有全局状态。
+//!
+//! 适配层（wasm 的 `ebook-web`、C ABI 的 `ebook-abi`）负责把这些翻译成
+//! 各自宿主方便的形状；核心与这里的类型不知道宿主是谁。
+
+use ebook_ir::{EdgesF, Location};
+use ebook_layout::SelectionRect;
+
+/// 排版视口：页面区域（点）+ 四边内边距。
+///
+/// 内边距是"正文避开工具栏"用的，与页边距叠加；它不改变页面几何，
+/// 所以工具栏显隐不需要重新排版。
+#[derive(Clone, Copy, Debug)]
+pub struct Viewport {
+    pub width: f32,
+    pub height: f32,
+    pub insets: EdgesF,
+}
+
+impl Viewport {
+    pub fn new(width: f32, height: f32) -> Self {
+        Self {
+            width,
+            height,
+            insets: EdgesF::all(0.0),
+        }
+    }
+
+    pub fn with_insets(mut self, insets: EdgesF) -> Self {
+        self.insets = insets;
+        self
+    }
+
+    /// 四边相同的页边距。
+    pub fn with_margin(self, margin: f32) -> Self {
+        self.with_insets(EdgesF::all(margin))
+    }
+}
+
+/// 阅读设置。`font_scale` 只缩放文档字号/行高/间距，页面几何不变。
+#[derive(Clone, Copy, Debug)]
+pub struct Style {
+    pub font_scale: f32,
+    /// 行距倍数（1.5 = 1.5em），覆盖书里写的 `line-height`。
+    pub line_scale: f32,
+    /// 额外字距（px），叠加在书的 `letter-spacing` 上。
+    pub letter_px: f32,
+    /// 0=保留原书，1=起始，2=居中，3=末尾，4=两端。
+    pub align: u32,
+}
+
+impl Default for Style {
+    fn default() -> Self {
+        Self {
+            font_scale: 1.0,
+            line_scale: 1.0,
+            letter_px: 0.0,
+            align: 0,
+        }
+    }
+}
+
+impl Style {
+    /// 把设置写进 `StyledDoc`。排版层仍然拿到一份普通的文档，不知道有"阅读器设置"。
+    pub fn apply(&self, doc: &mut ebook_ir::StyledDoc) {
+        scale_fonts(doc, self.font_scale);
+        let line_scale = if self.line_scale.is_finite() && self.line_scale > 0.0 {
+            self.line_scale
+        } else {
+            1.0
+        };
+        let letter_px = if self.letter_px.is_finite() {
+            self.letter_px
+        } else {
+            0.0
+        };
+        let align = match self.align {
+            1 => Some(ebook_ir::TextAlign::Start),
+            2 => Some(ebook_ir::TextAlign::Center),
+            3 => Some(ebook_ir::TextAlign::End),
+            4 => Some(ebook_ir::TextAlign::Justify),
+            _ => None,
+        };
+        for node in &mut doc.nodes {
+            node.style.line_height = ebook_ir::LineHeight::Mul(line_scale);
+            if letter_px.abs() > 1.0e-4 {
+                node.style.text.letter_spacing += letter_px;
+            }
+            if let Some(align) = align {
+                node.style.text.align = align;
+            }
+        }
+    }
+}
+
+fn scale_fonts(doc: &mut ebook_ir::StyledDoc, scale: f32) {
+    if !scale.is_finite() || scale <= 0.0 || (scale - 1.0).abs() < 1.0e-4 {
+        return;
+    }
+    for node in &mut doc.nodes {
+        node.style.font.size = (node.style.font.size * scale).max(0.0);
+        if let ebook_ir::LineHeight::Px(px) = &mut node.style.line_height {
+            *px *= scale;
+        }
+        if let ebook_ir::Len::Px(px) = &mut node.style.text.indent {
+            *px *= scale;
+        }
+        node.style.text.letter_spacing *= scale;
+        node.style.text.word_spacing *= scale;
+    }
+}
+
+/// 一页的几何、行区间和本章进度。宿主靠它翻页、画进度条，不需要 IR。
+#[derive(Clone, Copy, Debug)]
+pub struct PageBox {
+    pub index: u32,
+    pub width: f32,
+    pub height: f32,
+    pub inset: EdgesF,
+    pub line_from: u32,
+    pub line_len: u32,
+    /// 本章内进度 0..1。
+    pub progress: f32,
+}
+
+/// 一张设备像素位图：`rgba` 是 `width * height * 4` 字节，行优先，非预乘。
+#[derive(Clone, Debug)]
+pub struct Bitmap {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// 选区：规范化后的端点 + 页内矩形 + 原文。
+#[derive(Clone, Debug)]
+pub struct SelectionResult {
+    pub start: Location,
+    pub end: Location,
+    pub rects: Vec<SelectionRect>,
+    pub text: String,
+}
+
+/// 宿主的资源上限。native 与 wasm 的预算不同，所以是每个 `Engine` 的配置。
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    /// 单页像素上限，拦得住"把 scale 传成 1000"的调用。
+    pub max_page_pixels: u64,
+    /// 书级图片缓存上限（解码后的 RGBA 字节数）。
+    pub image_cache_bytes: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            // 4096×4096：1170×2532@3x ≈ 2.96M，余量足够。
+            max_page_pixels: 4096 * 4096,
+            image_cache_bytes: 64 * 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum EngineError {
+    /// 还没有打开书。
+    NoBook,
+    /// 还没有排版，或者排版的章节已经被换掉。
+    NoLayout,
+    /// 页号越界。
+    PageOutOfRange(u32),
+    /// 格式层/章节解析失败。
+    Chapter(String),
+    /// 光栅化失败。
+    Render(String),
+    /// 请求的位图超过 `Limits::max_page_pixels`。
+    TooLarge { width: u32, height: u32 },
+}
+
+impl std::fmt::Display for EngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EngineError::NoBook => write!(f, "没有打开的书"),
+            EngineError::NoLayout => write!(f, "还没有排版"),
+            EngineError::PageOutOfRange(page) => write!(f, "页号越界: {page}"),
+            EngineError::Chapter(message) => write!(f, "章节解析失败: {message}"),
+            EngineError::Render(message) => write!(f, "光栅化失败: {message}"),
+            EngineError::TooLarge { width, height } => {
+                write!(f, "位图太大: {width}×{height}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for EngineError {}

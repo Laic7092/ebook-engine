@@ -1,0 +1,20 @@
+[package]
+name = "ebook-abi"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+# `staticlib` 给 iOS/Android/桌面链接（cgo）；`rlib` 给本仓库的测试用。
+crate-type = ["staticlib", "rlib"]
+
+[features]
+default = []
+# native 上有真线程与真断字词典的空间，默认不开，由构建命令按平台打开。
+parallel = ["ebook-reader/parallel"]
+hyphen-en = ["ebook-reader/hyphen-en"]
+
+[dependencies]
+ebook-reader.workspace = true
+serde.workspace = true
+postcard.workspace = true
