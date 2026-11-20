@@ -19,7 +19,16 @@ use std::path::PathBuf;
 use ebook_font::FontBook;
 use ebook_ir::{FontId, Resources};
 use ebook_layout::TextMeasurer;
-use ttf_parser::OutlineBuilder;
+use read_fonts::{
+    model::{
+        glyph::{
+            outline::{DrawMemory, DrawOptions, PathContourStart, PathSink},
+            GlyphSource, GlyphSourceOrder,
+        },
+        Font,
+    },
+    types::GlyphId,
+};
 
 const SS: usize = 16;
 
@@ -61,7 +70,7 @@ impl Contours {
     }
 }
 
-impl OutlineBuilder for Contours {
+impl PathSink for Contours {
     fn move_to(&mut self, x: f32, y: f32) {
         if self.current.len() >= 3 {
             self.contours.push(std::mem::take(&mut self.current));
@@ -178,9 +187,12 @@ fn supersample(contours: &[Vec<[f32; 2]>], w: usize, h: usize, left: i32, top: i
     out
 }
 
-fn face(bytes: &[u8]) -> ttf_parser::Face<'_> {
-    ttf_parser::Face::parse(bytes, 0).expect("face")
+fn face(bytes: &[u8]) -> Font {
+    Font::new(bytes.to_vec(), 0).expect("face")
 }
+
+const OUTLINE_SOURCES: GlyphSourceOrder =
+    GlyphSourceOrder::new(&[GlyphSource::Glyf, GlyphSource::Cff]);
 
 /// 均值/最大值上界来自实测（`fixtures/font/test.ttf`，8 个字形 × 12/24/48px，
 /// 11909 个位图像素）：平均差 0.33/255，最大差 8/255。剩下的差主要是
@@ -212,9 +224,14 @@ fn coverage_matches_supersampling_reference() {
             };
             let scale = px / upem;
             let mut builder = Contours::new(scale);
-            if parsed
-                .outline_glyph(ttf_parser::GlyphId(gid), &mut builder)
-                .is_none()
+            let outlines = parsed.outline_glyphs_with(OUTLINE_SOURCES);
+            let Some(glyph) = outlines.get(GlyphId::new(gid as u32)) else {
+                continue;
+            };
+            let options = DrawOptions::new().with_contour_start(PathContourStart::ScanForward);
+            if glyph
+                .draw(&options, DrawMemory::Scratch, &mut builder)
+                .is_err()
             {
                 continue;
             }

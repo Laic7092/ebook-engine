@@ -12,4 +12,4 @@ ebook-render.workspace = true
 ebook-format.workspace = true
 ebook-font.workspace = true
 ebook-layout.workspace = true
-ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
+read-fonts.workspace = true

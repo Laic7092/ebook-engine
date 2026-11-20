@@ -12,6 +12,6 @@ hyphen-en = ["ebook-layout/hyphen-en"]
 [dependencies]
 ebook-ir.workspace = true
 ebook-layout.workspace = true
-ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
 harfrust.workspace = true
+read-fonts.workspace = true
 ab_glyph_rasterizer = { version = "0.1", default-features = false, features = ["std"] }

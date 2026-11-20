@@ -7,7 +7,22 @@ use ebook_ir::{FontDesc, FontId, FontSpec, FontStyle, GlyphBitmap, ImageData, Im
 #[cfg(feature = "hyphen-en")]
 use ebook_layout::English;
 use ebook_layout::{shape_per_char, Hyphenator, ShapeGlyph, TextMeasurer};
-use ttf_parser::Face;
+use read_fonts::{
+    model::glyph::outline::PathSink,
+    ps::cff::CffFontRef,
+    tables::{
+        cmap::{CmapSubtable, EncodingRecord, PlatformId},
+        glyf::{
+            outline::{Outline, OutlineContext, PathContourStart, ScaleF32},
+            Glyf,
+        },
+        gvar::GlyphVariationData,
+        loca::{Loca, LocaGlyph},
+        os2::SelectionFlags,
+    },
+    types::{F2Dot14, Fixed, GlyphId, Point as FontPoint},
+    FontRef, TableProvider,
+};
 
 const SYNTH_FLAG: u16 = 0x8000;
 const SYNTH_BOLD: u16 = 0x1000;
@@ -70,13 +85,12 @@ impl ShapeKey {
 
 struct Metrics {
     desc: FontDesc,
-    /// 同一份字节既给 ttf-parser（度量）又给 harfrust（整形）。
-    /// 用 `Arc<Vec<u8>>` 而不是 `Vec<u8>`：harfrust 的 `Font` 需要持有数据，
-    /// 共享同一份 Arc 就不会为整形再复制一遍几十 MB 的 CJK 字体。
+    /// 度量、cmap 与轮廓都从这份字节读取；harfrust 也共享同一个 Arc，
+    /// 不会为整形再复制一遍几十 MB 的 CJK 字体。
     bytes: Arc<Vec<u8>>,
     /// read-fonts 的 owning `Font`。它自带 shaping/layout 缓存，
     /// 必须在 `FontBook` 生命周期内复用；每次 `shape` 重建会丢掉这份缓存。
-    /// `None` 表示 read-fonts 读不了这份数据（ttf-parser 能读），此时退回逐字。
+    /// `None` 表示 read-fonts 读不了这份数据，此时退回逐字。
     hb_font: Option<harfrust::Font>,
     units_per_em: f32,
     ascender: f32,
@@ -101,37 +115,33 @@ impl core::fmt::Debug for Metrics {
 impl Metrics {
     fn parse(desc: FontDesc, bytes: Vec<u8>) -> Option<Self> {
         let bytes = Arc::new(bytes);
-        let face = Face::parse(&bytes, 0).ok()?;
-        let units_per_em = face.units_per_em() as f32;
-        if units_per_em <= 0.0 {
+        let font = FontRef::from_index(bytes.as_slice(), 0).ok()?;
+        // 与原实现一致：head/hhea/maxp 是必需表，head 的 upem 和 loca 格式
+        // 还必须在合法范围内。
+        let head = font.head().ok()?;
+        let units_per_em = head.units_per_em();
+        if !(16..=16384).contains(&units_per_em) || !matches!(head.index_to_loc_format(), 0 | 1) {
             return None;
         }
-        // 与 ttf-parser 共用同一份字节；`Font::new` 只包一层 Arc，不拷贝。
+        let units_per_em = units_per_em as f32;
+        font.hhea().ok()?;
+        let maxp = font.maxp().ok()?;
+        if maxp.num_glyphs() == 0 {
+            return None;
+        }
+        let (ascender, descender) = line_metrics(&font)?;
+        // harfrust 与度量/轮廓共用同一份字节，只克隆 Arc，不拷贝。
         let source: Arc<dyn AsRef<[u8]> + Send + Sync> = bytes.clone();
         let hb_font = harfrust::Font::new(source, 0);
-        let ascender = face.ascender() as f32;
-        let descender = face.descender() as f32;
-        let advances = (0..face.number_of_glyphs())
+        let hmtx = font.hmtx().ok();
+        let advances = (0..maxp.num_glyphs())
             .map(|gid| {
-                face.glyph_hor_advance(ttf_parser::GlyphId(gid))
+                hmtx.as_ref()
+                    .and_then(|table| table.advance(GlyphId::new(gid as u32)))
                     .unwrap_or(0)
             })
             .collect();
-        let mut cmap = Vec::new();
-        if let Some(table) = face.tables().cmap {
-            for subtable in table.subtables {
-                if !subtable.is_unicode() {
-                    continue;
-                }
-                subtable.codepoints(|code| {
-                    if let Some(gid) = subtable.glyph_index(code) {
-                        cmap.push((code, gid.0));
-                    }
-                });
-            }
-        }
-        cmap.sort_unstable_by_key(|entry| entry.0);
-        cmap.dedup_by_key(|entry| entry.0);
+        let cmap = build_cmap(&font);
         Some(Self {
             desc,
             bytes,
@@ -391,9 +401,9 @@ impl FontBook {
         best.map(|(index, _, _, _)| index)
     }
 
-    fn face(&self, id: FontId) -> Option<Face<'_>> {
+    fn face(&self, id: FontId) -> Option<FontRef<'_>> {
         let metrics = self.faces.get(self.real_index(id)?)?;
-        Face::parse(&metrics.bytes, 0).ok()
+        FontRef::from_index(metrics.bytes.as_slice(), 0).ok()
     }
 
     pub fn rasterize(&self, id: FontId, gid: u16, px: f32) -> Option<GlyphBitmap> {
@@ -443,11 +453,11 @@ impl FontBook {
             0.0
         };
         let mut bounds = Bounds::new(shear);
-        face.outline_glyph(ttf_parser::GlyphId(gid), &mut bounds)?;
+        draw_glyph(&face, gid, &mut bounds)?;
         if !bounds.any {
             return None;
         }
-        let scale = px / face.units_per_em() as f32;
+        let scale = px / face.head().ok()?.units_per_em() as f32;
         let left_edge = (bounds.min_x * scale + dx).floor();
         let right_edge = (bounds.max_x * scale + dx).ceil();
         let top_edge = (bounds.max_y * scale - dy).ceil();
@@ -483,7 +493,7 @@ impl FontBook {
             start: point(0.0, 0.0),
             current: point(0.0, 0.0),
         };
-        face.outline_glyph(ttf_parser::GlyphId(gid), &mut outline)?;
+        draw_glyph(&face, gid, &mut outline)?;
         let mut alpha = vec![0u8; w * h];
         rasterizer.for_each_pixel(|index, coverage| {
             alpha[index] = (coverage.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -521,6 +531,203 @@ impl FontBook {
             alpha,
         })
     }
+}
+
+/// 读出与原实现相同的 ascender/descender：OS/2 显式要求 typo 度量时
+/// 优先用它，否则用 hhea；hhea 为 0 时再退回 typo/win 度量。
+fn line_metrics(font: &FontRef<'_>) -> Option<(f32, f32)> {
+    let hhea = font.hhea().ok()?;
+    let os2 = font.os2().ok();
+    // 原实现只在 OS/2 version >= 4 时认 USE_TYPO_METRICS。
+    let use_typo = os2.as_ref().is_some_and(|table| {
+        table.version() >= 4
+            && table
+                .fs_selection()
+                .contains(SelectionFlags::USE_TYPO_METRICS)
+    });
+    let ascent = if use_typo {
+        os2.as_ref().map(|table| table.s_typo_ascender() as i32)
+    } else {
+        None
+    }
+    .unwrap_or_else(|| {
+        let mut value = hhea.ascender().to_i16() as i32;
+        if value == 0 {
+            if let Some(os2) = &os2 {
+                value = os2.s_typo_ascender() as i32;
+                if value == 0 {
+                    value = os2.us_win_ascent() as i16 as i32;
+                }
+            }
+        }
+        value
+    });
+    let descent = if use_typo {
+        os2.as_ref().map(|table| table.s_typo_descender() as i32)
+    } else {
+        None
+    }
+    .unwrap_or_else(|| {
+        let mut value = hhea.descender().to_i16() as i32;
+        if value == 0 {
+            if let Some(os2) = &os2 {
+                value = os2.s_typo_descender() as i32;
+                if value == 0 {
+                    value = -(os2.us_win_descent() as i16 as i32);
+                }
+            }
+        }
+        value
+    });
+    Some((ascent as f32, descent as f32))
+}
+
+fn is_unicode_subtable(record: &EncodingRecord, subtable: &CmapSubtable<'_>) -> bool {
+    const WINDOWS_UNICODE_BMP: u16 = 1;
+    const WINDOWS_UNICODE_FULL: u16 = 10;
+    match record.platform_id() {
+        PlatformId::Unicode => true,
+        PlatformId::Windows if record.encoding_id() == WINDOWS_UNICODE_BMP => true,
+        PlatformId::Windows => {
+            record.encoding_id() == WINDOWS_UNICODE_FULL
+                && matches!(
+                    subtable,
+                    CmapSubtable::Format12(_) | CmapSubtable::Format13(_)
+                )
+        }
+        _ => false,
+    }
+}
+
+/// 按原实现的语义枚举所有 Unicode cmap 子表，只保留非 0 映射；
+/// 同一码点出现多次时保留排序后的第一条，随后查询走二分。
+fn build_cmap(font: &FontRef<'_>) -> Vec<(u32, u16)> {
+    let mut cmap = Vec::new();
+    if let Ok(table) = font.cmap() {
+        for record in table.encoding_records() {
+            let Ok(subtable) = record.subtable(table.offset_data()) else {
+                continue;
+            };
+            if !is_unicode_subtable(record, &subtable) {
+                continue;
+            }
+            for (code, gid) in subtable.iter() {
+                let gid = gid.to_u32();
+                if gid != 0 && gid <= u16::MAX as u32 {
+                    cmap.push((code, gid as u16));
+                }
+            }
+        }
+    }
+    cmap.sort_unstable_by_key(|entry| entry.0);
+    cmap.dedup_by_key(|entry| entry.0);
+    cmap
+}
+
+/// 把 `&mut dyn PathSink` 包成 Sized，避免 glyf/CFF 两条路径按 pen 类型
+/// 单态化，wasm 体积只留一份。`dx` 用来抵消 read-fonts glyf 按左侧边距
+/// 平移坐标的约定，恢复原来的“字形原点”坐标。
+struct DynSink<'a> {
+    inner: &'a mut dyn PathSink,
+    dx: f32,
+}
+
+impl PathSink for DynSink<'_> {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.inner.move_to(x + self.dx, y);
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.inner.line_to(x + self.dx, y);
+    }
+
+    fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
+        self.inner.quad_to(cx0 + self.dx, cy0, x + self.dx, y);
+    }
+
+    fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
+        self.inner
+            .curve_to(cx0 + self.dx, cy0, cx1 + self.dx, cy1, x + self.dx, y);
+    }
+
+    fn close(&mut self) {
+        self.inner.close();
+    }
+}
+
+/// 只给 glyf 轮廓用的最小上下文：不读 gvar/HVAR/OS2/hmtx，因此与原来的
+/// 静态字体行为一致，也不把变体度量的代码拉进来。
+struct StaticOutline<'a> {
+    glyf: Glyf<'a>,
+    loca: Loca<'a>,
+    units_per_em: u16,
+}
+
+impl<'a> OutlineContext<'a> for StaticOutline<'a> {
+    fn glyph(&self, glyph: GlyphId) -> Option<LocaGlyph<'a>> {
+        self.loca.get(glyph, &self.glyf)
+    }
+
+    fn glyph_variation_data(&self, _glyph: GlyphId) -> Option<GlyphVariationData<'a>> {
+        None
+    }
+
+    fn has_gvar(&self) -> bool {
+        false
+    }
+
+    fn phantom_point_deltas(
+        &self,
+        _glyph: GlyphId,
+    ) -> Option<[FontPoint<Fixed>; read_fonts::tables::glyf::PHANTOM_POINT_COUNT]> {
+        None
+    }
+
+    fn units_per_em(&self) -> u16 {
+        self.units_per_em
+    }
+
+    fn h_metrics(&self, _glyph: GlyphId) -> (i32, i32) {
+        (0, 0)
+    }
+
+    fn h_line_metrics(&self) -> (i32, i32) {
+        (0, 0)
+    }
+}
+
+/// 按原实现的来源顺序取轮廓：先 glyf，再 CFF；不启用 CFF2/VARC。
+/// 首点为二次离曲线点时从第二个点/首尾中点起步（ScanForward）。
+fn draw_glyph(font: &FontRef<'_>, gid: u16, sink: &mut dyn PathSink) -> Option<()> {
+    let glyph = GlyphId::new(gid as u32);
+    let mut sink = DynSink {
+        inner: sink,
+        dx: 0.0,
+    };
+    if let (Ok(glyf), Ok(loca)) = (font.glyf(), font.loca(None)) {
+        let context = StaticOutline {
+            glyf,
+            loca,
+            units_per_em: font.head().ok()?.units_per_em(),
+        };
+        let mut outline = Outline::<ScaleF32>::new();
+        let loaded = outline.load(&context, glyph, None).ok()?;
+        // read-fonts 的 OutlineRef 已经按左侧边距平移；加回去得到字形原点坐标。
+        sink.dx = loaded.phantom_points()[0].x;
+        return loaded
+            .to_path(PathContourStart::ScanForward, &mut sink)
+            .then_some(());
+    }
+    let cff = CffFontRef::new_cff(
+        font.cff().ok()?.offset_data().as_bytes(),
+        0,
+        Some(font.head().ok()?.units_per_em() as i32),
+    )
+    .ok()?;
+    let coords: &[F2Dot14] = &[];
+    let subfont = cff.subfont(cff.subfont_index(glyph)?, coords).ok()?;
+    cff.draw(&subfont, glyph, coords, None, &mut sink).ok()?;
+    Some(())
 }
 
 fn style_rank(found: FontStyle, wanted: FontStyle) -> u16 {
@@ -577,7 +784,7 @@ impl Bounds {
     }
 }
 
-impl ttf_parser::OutlineBuilder for Bounds {
+impl PathSink for Bounds {
     fn move_to(&mut self, x: f32, y: f32) {
         self.add(x, y);
     }
@@ -620,7 +827,7 @@ impl RasterOutline<'_> {
     }
 }
 
-impl ttf_parser::OutlineBuilder for RasterOutline<'_> {
+impl PathSink for RasterOutline<'_> {
     fn move_to(&mut self, x: f32, y: f32) {
         let p = self.map(x, y);
         self.start = p;
