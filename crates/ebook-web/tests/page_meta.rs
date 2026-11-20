@@ -42,7 +42,10 @@ fn unpack(bytes: &[u8]) -> Vec<[f32; STRIDE]> {
 fn page_meta_and_fragment_line_describe_the_current_chapter() {
     let info = open_book(&demo());
     assert!(!info.contains("error"), "{info}");
-    assert!(!layout_cached(0, WIDTH, HEIGHT, MARGIN).is_empty(), "layout");
+    assert!(
+        !layout_cached(0, WIDTH, HEIGHT, MARGIN).is_empty(),
+        "layout"
+    );
     let pages = unpack(&page_meta());
     assert!(!pages.is_empty(), "pages");
 
@@ -51,7 +54,10 @@ fn page_meta_and_fragment_line_describe_the_current_chapter() {
             (page[0], page[1], page[2], page[3], page[4], page[5]);
         // 页面盒子就是排版入参：宽高与页边距必须原样回来。
         assert!((w + left + right - WIDTH).abs() < 0.5, "page {index} width");
-        assert!((h + top + bottom - HEIGHT).abs() < 0.5, "page {index} height");
+        assert!(
+            (h + top + bottom - HEIGHT).abs() < 0.5,
+            "page {index} height"
+        );
         assert!(left >= 0.0 && top >= 0.0, "page {index} insets");
         // 行区间连续、有序，最后一个页码正好覆盖全章所有行。
         assert!(page[7] > 0.0, "page {index} has no lines");

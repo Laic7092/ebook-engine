@@ -330,7 +330,11 @@ impl Resources for PageResources<'_> {
     ) -> Option<GlyphBitmap> {
         let book = self.font.as_mut()?;
         // 全局加粗只影响取哪张 face，不改 IR：同一份 IR 可以按开关重画。
-        let face = if self.bold { book.bold_face(font) } else { font };
+        let face = if self.bold {
+            book.bold_face(font)
+        } else {
+            font
+        };
         book.rasterize_at(face, gid, px, dx, dy)
     }
 

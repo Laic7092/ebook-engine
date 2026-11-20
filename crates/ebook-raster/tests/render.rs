@@ -489,8 +489,7 @@ fn underline_is_drawn_below_the_baseline() {
 #[test]
 fn link_text_is_blue_and_underlined() {
     let html = r##"<html><body><p style="margin:0;font-size:16px"><a href="#x">link</a></p></body></html>"##;
-    let doc: StyledDoc =
-        ebook_format::xhtml::build(html, 0, &mut NoAssets).expect("xhtml");
+    let doc: StyledDoc = ebook_format::xhtml::build(html, 0, &mut NoAssets).expect("xhtml");
     let env = LayoutEnv {
         measurer: &StubMeasurer,
         resources: &NoImageSizes,

@@ -81,7 +81,12 @@ fn newest_source_time() -> SystemTime {
     }
 
     let mut newest = None;
-    for path in ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "build.rs"] {
+    for path in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "build.rs",
+    ] {
         if let Ok(time) = std::fs::metadata(path).and_then(|meta| meta.modified()) {
             match newest {
                 Some(current) if time <= current => {}
@@ -316,9 +321,7 @@ fn contract() -> ExitCode {
 }
 
 fn app() -> ExitCode {
-    match build_web_pkg()
-        .and_then(|()| run_script("tests/app.mjs"))
-    {
+    match build_web_pkg().and_then(|()| run_script("tests/app.mjs")) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("{message}");
@@ -335,7 +338,11 @@ fn build_web_pkg() -> Result<(), String> {
         && std::fs::metadata(pkg.join("ebook_web_bg.wasm"))
             .and_then(|meta| meta.modified())
             .ok()
-            .zip(std::fs::metadata(&source).and_then(|meta| meta.modified()).ok())
+            .zip(
+                std::fs::metadata(&source)
+                    .and_then(|meta| meta.modified())
+                    .ok(),
+            )
             .map(|(built, wasm)| built >= wasm)
             .unwrap_or(false);
     if fresh {
@@ -473,7 +480,11 @@ fn run_parity() -> Result<(), String> {
         && std::fs::metadata(pkg.join("ebook_web_bg.wasm"))
             .and_then(|meta| meta.modified())
             .ok()
-            .zip(std::fs::metadata(&source).and_then(|meta| meta.modified()).ok())
+            .zip(
+                std::fs::metadata(&source)
+                    .and_then(|meta| meta.modified())
+                    .ok(),
+            )
             .map(|(built, wasm)| built >= wasm)
             .unwrap_or(false);
     if !fresh {

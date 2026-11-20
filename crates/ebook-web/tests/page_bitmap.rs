@@ -95,9 +95,22 @@ fn page_bitmap_contract() {
     layout_cached(0, WIDTH, HEIGHT, MARGIN);
     let (_, _, plain) = unpack(page_bitmap(0, 1.0, 0, 0, false));
     let (_, _, bold) = unpack(page_bitmap(0, 1.0, 0, 0, true));
-    let plain_ink = plain.as_chunks::<4>().0.iter().filter(|px| **px != WHITE).count();
-    let bold_ink = bold.as_chunks::<4>().0.iter().filter(|px| **px != WHITE).count();
-    assert!(bold_ink > plain_ink, "bold = {bold_ink}, plain = {plain_ink}");
+    let plain_ink = plain
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| **px != WHITE)
+        .count();
+    let bold_ink = bold
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| **px != WHITE)
+        .count();
+    assert!(
+        bold_ink > plain_ink,
+        "bold = {bold_ink}, plain = {plain_ink}"
+    );
 
     // 7. 越界页号、还没打开书都返回空数组。
     assert!(page_bitmap(9999, 1.0, 0, 0, false).is_empty());
