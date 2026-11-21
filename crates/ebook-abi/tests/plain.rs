@@ -48,7 +48,7 @@ fn lays_out_and_writes_a_raw_page() {
     assert!(eb_plain_spine_count(engine) > 0);
     assert!(eb_plain_page_count(engine) == 0, "排版前没有页");
     let rc = eb_plain_layout(
-        engine, 0, 400.0, 700.0, 24.0, 24.0, 24.0, 24.0, 1.0, 1.0, 0.0, 0,
+        engine, 0, 400.0, 700.0, 24.0, 24.0, 24.0, 24.0, 1.0, 1.0, 0.0, 0.0, 0,
     );
     assert_eq!(rc, 0, "排版失败");
     assert!(eb_plain_page_count(engine) > 0, "排出来没有页");
@@ -97,7 +97,7 @@ fn no_font_makes_blank_pages() {
     let engine = unsafe { eb_plain_open(bytes.as_ptr(), bytes.len(), name.as_ptr()) };
     assert!(engine >= 0);
     let _ = eb_plain_layout(
-        engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0,
+        engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0.0, 0,
     );
     let pages = eb_plain_page_count(engine);
     let path = std::env::temp_dir().join("eb-nofont.eqp");
@@ -125,7 +125,7 @@ fn the_ink_colors_the_glyphs() {
         return;
     }
     let _ = eb_plain_layout(
-        engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0,
+        engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0.0, 0,
     );
     let path = std::env::temp_dir().join("eb-night.eqp");
     let c_path = CString::new(path.to_str().unwrap()).unwrap();
@@ -158,6 +158,28 @@ fn the_ink_colors_the_glyphs() {
 }
 
 #[test]
+fn word_spacing_reaches_the_layout() {
+    // 词距是西文的事：同样的字，词与词之间放宽一点，一行就装不下了。
+    // 它走的是 `Style::word_px` → 节点的 `word-spacing`，不经过任何 UI。
+    let text = "the quick brown fox jumps over the lazy dog. ".repeat(400);
+    let bytes = text.into_bytes();
+    let name = c"english.txt";
+    let engine = unsafe { eb_plain_open(bytes.as_ptr(), bytes.len(), name.as_ptr()) };
+    assert!(engine >= 0);
+    let pages = |word: f32| {
+        let _ = eb_plain_layout(
+            engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, word, 0,
+        );
+        eb_plain_page_count(engine)
+    };
+    let tight = pages(0.0);
+    let wide = pages(12.0);
+    assert!(tight > 0);
+    assert!(wide > tight, "词距没进排版: {tight} 页 -> {wide} 页");
+    eb_plain_close(engine);
+}
+
+#[test]
 fn reports_book_and_toc() {
     let (engine, _) = open_book();
     let title = eb_plain_title(engine);
@@ -173,7 +195,7 @@ fn reports_book_and_toc() {
 fn timings() {
     let (engine, _) = open_book();
     let _ = eb_plain_layout(
-        engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0,
+        engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0.0, 0,
     );
     let pages = eb_plain_page_count(engine);
     let run = pages.min(5);
@@ -193,7 +215,7 @@ fn timings() {
     );
     let start = std::time::Instant::now();
     let _ = eb_plain_layout(
-        engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0,
+        engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0.0, 0,
     );
     eprintln!("one chapter layout: {:?}", start.elapsed());
     eb_plain_close(engine);

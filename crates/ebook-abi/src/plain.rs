@@ -319,6 +319,7 @@ pub extern "C" fn eb_plain_layout(
     font_scale: f32,
     line_scale: f32,
     letter_px: f32,
+    word_px: f32,
     align: u32,
 ) -> i32 {
     guard(|| {
@@ -333,6 +334,7 @@ pub extern "C" fn eb_plain_layout(
             font_scale,
             line_scale,
             letter_px,
+            word_px,
             align,
         };
         match with_engine(id, |engine| engine.layout(spine as usize, viewport, style)) {

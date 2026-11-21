@@ -219,6 +219,7 @@ fn dispatch(engine: &mut Engine, request: Request) -> Response {
                 font_scale: style.font_scale,
                 line_scale: style.line_scale,
                 letter_px: style.letter_px,
+                word_px: style.word_px,
                 align: style.align,
             };
             match engine.layout(spine as usize, viewport, style) {

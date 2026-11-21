@@ -26,6 +26,7 @@ pub struct Style {
     pub font_scale: f32,
     pub line_scale: f32,
     pub letter_px: f32,
+    pub word_px: f32,
     pub align: u32,
 }
 

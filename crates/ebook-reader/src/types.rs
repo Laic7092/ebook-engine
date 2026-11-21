@@ -45,6 +45,8 @@ pub struct Style {
     pub line_scale: f32,
     /// 额外字距（px），叠加在书的 `letter-spacing` 上。
     pub letter_px: f32,
+    /// 额外词距（px），叠加在书的 `word-spacing` 上：中文没有词距，西文有。
+    pub word_px: f32,
     /// 0=保留原书，1=起始，2=居中，3=末尾，4=两端。
     pub align: u32,
 }
@@ -55,6 +57,7 @@ impl Default for Style {
             font_scale: 1.0,
             line_scale: 1.0,
             letter_px: 0.0,
+            word_px: 0.0,
             align: 0,
         }
     }
@@ -74,6 +77,11 @@ impl Style {
         } else {
             0.0
         };
+        let word_px = if self.word_px.is_finite() {
+            self.word_px
+        } else {
+            0.0
+        };
         let align = match self.align {
             1 => Some(ebook_ir::TextAlign::Start),
             2 => Some(ebook_ir::TextAlign::Center),
@@ -85,6 +93,9 @@ impl Style {
             node.style.line_height = ebook_ir::LineHeight::Mul(line_scale);
             if letter_px.abs() > 1.0e-4 {
                 node.style.text.letter_spacing += letter_px;
+            }
+            if word_px.abs() > 1.0e-4 {
+                node.style.text.word_spacing += word_px;
             }
             if let Some(align) = align {
                 node.style.text.align = align;

@@ -51,6 +51,7 @@ fn style() -> Style {
         font_scale: 1.0,
         line_scale: 1.0,
         letter_px: 0.0,
+        word_px: 0.0,
         align: 0,
     }
 }
