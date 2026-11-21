@@ -289,7 +289,9 @@ impl Engine {
 
         let mut surface = RgbaSurface::new(width, height);
         if ink != 0 {
+            // 墨色既是对比度的依据，也是字形的颜色：夜里是浅色字，不是黑字。
             surface.set_tone(Some(Tone::ink(unpack_rgba(ink))));
+            surface.set_ink(Some(unpack_rgba(ink)));
         }
         surface.clear(if paper == 0 {
             Rgba8::WHITE

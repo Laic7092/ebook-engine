@@ -115,6 +115,49 @@ fn no_font_makes_blank_pages() {
 }
 
 #[test]
+fn the_ink_colors_the_glyphs() {
+    // 夜纸：黑底浅字。排版时写进 IR 的是黑色，墨色在这一层覆盖它——不然
+    // 夜里就是黑字画在黑纸上。
+    let (engine, has_font) = open_book();
+    if !has_font {
+        eprintln!("no font on this machine: nothing to colour");
+        eb_plain_close(engine);
+        return;
+    }
+    let _ = eb_plain_layout(
+        engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0,
+    );
+    let path = std::env::temp_dir().join("eb-night.eqp");
+    let c_path = CString::new(path.to_str().unwrap()).unwrap();
+    assert_eq!(
+        eb_plain_page_raw(
+            engine,
+            0,
+            2.0,
+            0xd8d6_cfff,
+            0x1616_1aff,
+            false,
+            c_path.as_ptr()
+        ),
+        0
+    );
+    let bytes = std::fs::read(&path).unwrap();
+    let pixels = bytes[12..].as_chunks::<4>().0;
+    let ink = pixels.iter().filter(|px| px[0] > 0xc0).count();
+    let paper = pixels
+        .iter()
+        .filter(|px| px[0] == 0x16 && px[1] == 0x16 && px[2] == 0x1a)
+        .count();
+    assert!(
+        paper > pixels.len() / 2,
+        "纸面不是夜纸: {paper} of {}",
+        pixels.len()
+    );
+    assert!(ink > 500, "没有浅色的字: {ink} 个像素");
+    eb_plain_close(engine);
+}
+
+#[test]
 fn reports_book_and_toc() {
     let (engine, _) = open_book();
     let title = eb_plain_title(engine);

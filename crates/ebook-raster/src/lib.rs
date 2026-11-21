@@ -148,6 +148,9 @@ pub struct RgbaSurface {
     /// 裁剪栈，每一项已经是整条栈的交集，只存像素中心的整数范围。
     clips: Vec<Clip>,
     tone: Option<Tone>,
+    /// 覆盖字形的颜色：正文墨色由调用方定（夜纸上的浅色字），排版时的颜色
+    /// （书里的黑色）只是默认。`None` 时用 `GlyphRun` 自己的颜色。
+    ink: Option<Rgba8>,
 }
 
 /// 一个裁剪矩形的像素范围，`x1`/`y1` 是开区间。
@@ -198,6 +201,7 @@ impl RgbaSurface {
             pixels: vec![Rgba8::WHITE; len],
             clips: Vec::new(),
             tone: None,
+            ink: None,
         }
     }
 
@@ -245,6 +249,16 @@ impl RgbaSurface {
     pub fn with_tone(mut self, tone: Option<Tone>) -> Self {
         self.tone = tone;
         self
+    }
+
+    /// 让所有字形用这个颜色画，而不是排版时写进 `GlyphRun` 的那个。夜间的
+    /// 浅色正文就是这么来的：排版只管几何，颜色在这一层定。
+    pub fn set_ink(&mut self, ink: Option<Rgba8>) {
+        self.ink = ink;
+    }
+
+    pub fn ink(&self) -> Option<Rgba8> {
+        self.ink
     }
 
     pub fn render_page(
@@ -617,7 +631,8 @@ impl Surface for RgbaSurface {
             let dx = pen_x - origin_x as f32;
             let dy = pen_y - origin_y as f32;
             if let Some(bitmap) = res.glyph_alpha_at(run.font, glyph.gid, run.size, dx, dy) {
-                self.draw_glyph(run.color, &bitmap, origin_x, origin_y);
+                let color = self.ink.unwrap_or(run.color);
+                self.draw_glyph(color, &bitmap, origin_x, origin_y);
             }
             pen_x += advance;
         }
@@ -628,7 +643,8 @@ impl Surface for RgbaSurface {
             if width > 0.0 {
                 let y = baseline + (run.size * 0.08).max(1.0);
                 let height = (run.size * 0.055).max(1.0);
-                self.rect(RectF::new(run.origin.x, y, width, height), run.color);
+                let color = self.ink.unwrap_or(run.color);
+                self.rect(RectF::new(run.origin.x, y, width, height), color);
             }
         }
     }
