@@ -61,7 +61,8 @@ struct Handle(*mut EbEngine);
 unsafe impl Send for Handle {}
 unsafe impl Sync for Handle {}
 
-static ENGINES: LazyLock<Mutex<BTreeMap<i32, Handle>>> = LazyLock::new(|| Mutex::new(BTreeMap::new()));
+static ENGINES: LazyLock<Mutex<BTreeMap<i32, Handle>>> =
+    LazyLock::new(|| Mutex::new(BTreeMap::new()));
 static NEXT_ID: AtomicI32 = AtomicI32::new(1);
 
 thread_local! {
@@ -86,7 +87,9 @@ fn scratch(text: &str) -> *const c_char {
         while strings.len() > 32 {
             strings.pop_front();
         }
-        strings.back().map_or(std::ptr::null(), |last| last.as_ptr())
+        strings
+            .back()
+            .map_or(std::ptr::null(), |last| last.as_ptr())
     })
 }
 
@@ -106,7 +109,10 @@ fn c_path(path: *const c_char) -> Option<String> {
     if path.is_null() {
         return None;
     }
-    unsafe { CStr::from_ptr(path) }.to_str().ok().map(str::to_owned)
+    unsafe { CStr::from_ptr(path) }
+        .to_str()
+        .ok()
+        .map(str::to_owned)
 }
 
 /// 跑一段可能 panic 的代码，失败 → -1。
@@ -134,11 +140,7 @@ pub extern "C" fn eb_plain_last_error() -> *const c_char {
 /// # Safety
 /// `data` 必须可读 `len` 字节。
 #[no_mangle]
-pub unsafe extern "C" fn eb_plain_open(
-    data: *const u8,
-    len: usize,
-    name: *const c_char,
-) -> i32 {
+pub unsafe extern "C" fn eb_plain_open(data: *const u8, len: usize, name: *const c_char) -> i32 {
     guard(|| {
         if data.is_null() || len == 0 {
             crate::set_last_error("空的书籍数据");
@@ -186,8 +188,10 @@ pub extern "C" fn eb_plain_close(id: i32) -> i32 {
 /// 书名。指针在本线程有效，直到下一次取字符串。
 #[no_mangle]
 pub extern "C" fn eb_plain_title(id: i32) -> *const c_char {
-    with_engine(id, |engine| scratch(engine.book().title.as_deref().unwrap_or("")))
-        .unwrap_or(std::ptr::null())
+    with_engine(id, |engine| {
+        scratch(engine.book().title.as_deref().unwrap_or(""))
+    })
+    .unwrap_or(std::ptr::null())
 }
 
 /// 阅读顺序（spine）的项数。
@@ -243,7 +247,10 @@ pub extern "C" fn eb_plain_toc_spine(id: i32, index: u32) -> i32 {
 #[no_mangle]
 pub extern "C" fn eb_plain_toc_depth(id: i32, index: u32) -> u32 {
     with_engine(id, |engine| {
-        engine.toc().get(index as usize).map_or(0, |entry| entry.depth as u32)
+        engine
+            .toc()
+            .get(index as usize)
+            .map_or(0, |entry| entry.depth as u32)
     })
     .unwrap_or(0)
 }
@@ -278,14 +285,16 @@ pub unsafe extern "C" fn eb_plain_register_font(id: i32, bytes: *const u8, len: 
 /// 注册字体集合（TTC/OTC）里的第 `index` 个面，先注册整份文件。
 #[no_mangle]
 pub extern "C" fn eb_plain_register_font_face(id: i32, index: u32) -> i32 {
-    guard(|| match with_engine(id, |engine| engine.register_font_face(index as usize)) {
-        Some(Ok(font)) => font.0 as i32,
-        Some(Err(message)) => {
-            crate::set_last_error(message);
-            -2
-        }
-        None => -1,
-    })
+    guard(
+        || match with_engine(id, |engine| engine.register_font_face(index as usize)) {
+            Some(Ok(font)) => font.0 as i32,
+            Some(Err(message)) => {
+                crate::set_last_error(message);
+                -2
+            }
+            None => -1,
+        },
+    )
 }
 
 /// 已注册的字体数。
@@ -455,6 +464,8 @@ pub extern "C" fn eb_plain_progress(id: i32, page: u32, line: u32, byte: u32) ->
 /// 页内点 → 链接地址（`""` 没有）。指针在本线程有效。
 #[no_mangle]
 pub extern "C" fn eb_plain_link_at(id: i32, page: u32, x: f32, y: f32) -> *const c_char {
-    with_engine(id, |engine| scratch(engine.link_at(page, x, y).unwrap_or("")))
-        .unwrap_or(std::ptr::null())
+    with_engine(id, |engine| {
+        scratch(engine.link_at(page, x, y).unwrap_or(""))
+    })
+    .unwrap_or(std::ptr::null())
 }

@@ -20,9 +20,7 @@ use ebook_layout::{Layout, LayoutEnv, NoImageSizes, PageConstraint, Reader, Stub
 use ebook_raster::{RgbaSurface, Tone};
 use ebook_render::ScaledSurface;
 
-use crate::types::{
-    Bitmap, EngineError, Limits, PageBox, SelectionResult, Style, Viewport,
-};
+use crate::types::{Bitmap, EngineError, Limits, PageBox, SelectionResult, Style, Viewport};
 
 /// 最近一次排版的产物。交互查询（命中/选区/进度/锚点）只认这一份。
 struct LastLayout {
@@ -53,10 +51,7 @@ impl Backend {
         }
     }
 
-    fn chapter(
-        &self,
-        index: usize,
-    ) -> Result<(StyledDoc, Vec<ChapterAnchor>), FormatError> {
+    fn chapter(&self, index: usize) -> Result<(StyledDoc, Vec<ChapterAnchor>), FormatError> {
         match self {
             Backend::Epub(reader) => reader
                 .chapter_with_anchors(index)
@@ -109,8 +104,7 @@ impl Engine {
         let boxed = bytes.into_boxed_slice();
         // SAFETY: `boxed` 是堆分配，移动 `Box` 不会移动堆上的字节；切片只在
         // `Engine` 存活期间使用，`bytes` 的析构在 `backend` 之后（字段顺序）。
-        let raw: &'static [u8] =
-            unsafe { std::slice::from_raw_parts(boxed.as_ptr(), boxed.len()) };
+        let raw: &'static [u8] = unsafe { std::slice::from_raw_parts(boxed.as_ptr(), boxed.len()) };
 
         let backend = if boxed.starts_with(b"PK") {
             Backend::Epub(EpubReader::open(raw)?)
@@ -178,14 +172,11 @@ impl Engine {
         viewport: Viewport,
         style: Style,
     ) -> Result<(), EngineError> {
-        let (mut doc, anchors) = self
-            .backend
-            .chapter(spine)
-            .map_err(|error| {
-                let message = format!("{error:?}");
-                self.last_error = Some(message.clone());
-                EngineError::Chapter(message)
-            })?;
+        let (mut doc, anchors) = self.backend.chapter(spine).map_err(|error| {
+            let message = format!("{error:?}");
+            self.last_error = Some(message.clone());
+            EngineError::Chapter(message)
+        })?;
         style.apply(&mut doc);
         self.last_error = None;
 
@@ -435,7 +426,10 @@ impl Engine {
     }
 
     pub fn font_count(&self) -> u32 {
-        self.font.as_ref().map(|font| font.len() as u32).unwrap_or(0)
+        self.font
+            .as_ref()
+            .map(|font| font.len() as u32)
+            .unwrap_or(0)
     }
 
     /// 书里声明了多少个 `@font-face`。

@@ -16,8 +16,8 @@ use std::ffi::{c_char, CStr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Mutex;
 
-use ebook_reader::{Engine, Limits, Location, SelectionRect as CoreRect, Style, Viewport};
 use ebook_reader::EdgesF;
+use ebook_reader::{Engine, Limits, Location, SelectionRect as CoreRect, Style, Viewport};
 
 use protocol::{
     Book, FontFace, Insets, Link, Loc, Page, Request, Response, Selection, SelectionRect,
@@ -132,6 +132,9 @@ pub unsafe extern "C" fn eb_close(engine: *mut EbEngine) {
 }
 
 /// 上次 `eb_open` 失败的细节（UTF-8，不带结尾 0）。空串表示没有错误。
+///
+/// `len` 由 C 调用方给出：本函数写它，调用方保证可写（clippy 只能看到裸指针）。
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn eb_last_error(len: *mut usize) -> *const u8 {
     LAST_ERROR.with(|slot| {
@@ -237,31 +240,29 @@ fn dispatch(engine: &mut Engine, request: Request) -> Response {
             },
             Err(error) => Response::Error(error.to_string()),
         },
-        Request::Hit { page, x, y } => {
-            Response::Hit(engine.hit(page, x, y).map(loc_wire))
-        }
+        Request::Hit { page, x, y } => Response::Hit(engine.hit(page, x, y).map(loc_wire)),
         Request::LinkAt { page, x, y } => {
             Response::Link(engine.link_at(page, x, y).map(str::to_string))
         }
         Request::Selection { a, b } => Response::Selection(
-            engine.selection(loc_core(a), loc_core(b)).map(|sel| Selection {
-                start: loc_wire(sel.start),
-                end: loc_wire(sel.end),
-                rects: sel.rects.iter().map(rect_wire).collect(),
-                text: sel.text,
-            }),
+            engine
+                .selection(loc_core(a), loc_core(b))
+                .map(|sel| Selection {
+                    start: loc_wire(sel.start),
+                    end: loc_wire(sel.end),
+                    rects: sel.rects.iter().map(rect_wire).collect(),
+                    text: sel.text,
+                }),
         ),
         Request::Progress { loc } => Response::Progress(engine.progress(loc_core(loc))),
-        Request::FragmentLine { fragment } => {
-            Response::Line(engine.fragment_line(&fragment))
-        }
-        Request::ResolveLink { href } => Response::Target(engine.resolve_link(&href).map(|link| {
-            Link {
+        Request::FragmentLine { fragment } => Response::Line(engine.fragment_line(&fragment)),
+        Request::ResolveLink { href } => {
+            Response::Target(engine.resolve_link(&href).map(|link| Link {
                 spine: link.spine as i32,
                 fragment: link.fragment,
                 external: link.external,
-            }
-        })),
+            }))
+        }
         Request::RegisterFont { bytes } => match engine.register_font(bytes) {
             Ok(id) => Response::Font(id.0 as u32),
             Err(message) => Response::Error(message),

@@ -6,7 +6,11 @@
 use ebook_reader::{Engine, Location, Style, Viewport};
 
 fn demo() -> Vec<u8> {
-    std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/demo.txt")).unwrap()
+    std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/demo.txt"
+    ))
+    .unwrap()
 }
 
 fn open() -> Engine {
@@ -119,7 +123,7 @@ fn engines_are_independent() {
     let handles: Vec<_> = (0..4)
         .map(|_| {
             std::thread::spawn(|| {
-                let mut engine = open();
+                let engine = open();
                 assert!(engine.page_count() > 0);
                 engine.page_count()
             })

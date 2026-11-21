@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+#
+# Runs before every commit in ebook-engine: rustfmt on the whole workspace (CI
+# checks it, and a formatting-only CI failure is the worst kind of red), then
+# clippy on the crates the commit touches, with warnings denied as CI does.
+#
+# Install it once per clone:
+#
+#   git config core.hooksPath .githooks
+#
+# Skip it with `git commit --no-verify`.
+
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+# Only what this commit changes: staged files, plus the ones it modifies.
+staged="$(git diff --cached --name-only --diff-filter=ACMR)"
+if [ -z "$staged" ]; then
+  exit 0
+fi
+
+if ! printf '%s\n' "$staged" | grep -q '\.rs$' && ! printf '%s\n' "$staged" | grep -q '^Cargo\.\(toml\|lock\)$'; then
+  exit 0
+fi
+
+echo "pre-commit: cargo fmt"
+cargo fmt --all --check || {
+  echo "pre-commit: run 'cargo fmt --all' (CI checks it)" >&2
+  exit 1
+}
+
+# The crates the commit touches, as `-p` flags: clippy on the workspace needs
+# generated fixtures (scripts/generate.sh), and a hook shouldn't take a minute.
+crates="$(printf '%s\n' "$staged" | sed -n 's|^crates/\([^/]*\)/.*|\1|p' | sort -u)"
+if [ -z "$crates" ]; then
+  exit 0
+fi
+
+packages=""
+for crate in $crates; do
+  packages="$packages -p $crate"
+done
+
+echo "pre-commit: cargo clippy$packages"
+# shellcheck disable=SC2086
+cargo clippy $packages --all-targets -- -D warnings || {
+  echo "pre-commit: clippy failed (same flags as CI)" >&2
+  exit 1
+}

@@ -12,9 +12,7 @@ mod engine;
 mod types;
 
 pub use engine::{insets, Engine};
-pub use types::{
-    Bitmap, EngineError, Limits, PageBox, SelectionResult, Style, Viewport,
-};
+pub use types::{Bitmap, EngineError, Limits, PageBox, SelectionResult, Style, Viewport};
 
 pub use ebook_format::TocEntry;
 pub use ebook_ir::{EdgesF, LayoutResult, Location};

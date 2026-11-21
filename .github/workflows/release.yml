@@ -43,8 +43,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      # The toolchain rust-toolchain.toml pins, with this target's std: a
+      # floating `stable` isn't it, and a missing `core` is how that shows.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.100.0"
           targets: ${{ matrix.triple }}
 
       - uses: Swatinem/rust-cache@v2
@@ -53,6 +56,7 @@ jobs:
       # and no LTO (an external linker embeds it).
       - name: Build
         run: |
+          rustup target add "${{ matrix.triple }}"
           cargo build -p ebook-abi --profile native --target "${{ matrix.triple }}"
           cd "target/${{ matrix.triple }}/native"
           tar -czf "libebook_abi-${{ matrix.target }}.tar.gz" libebook_abi.a

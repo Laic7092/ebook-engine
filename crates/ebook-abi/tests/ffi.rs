@@ -1,10 +1,14 @@
 //! C ABI 的往返测试：走真正的 `extern "C"` 入口，包括缓冲区的分配与释放。
 
-use ebook_abi::protocol::{Request, Response, Style, Viewport, Insets};
+use ebook_abi::protocol::{Insets, Request, Response, Style, Viewport};
 use ebook_abi::*;
 
 fn demo() -> Vec<u8> {
-    std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/demo.txt")).unwrap()
+    std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/demo.txt"
+    ))
+    .unwrap()
 }
 
 fn call(engine: *mut EbEngine, request: &Request) -> Response {
@@ -132,7 +136,14 @@ fn hit_progress_and_selection() {
             style: style(),
         },
     );
-    let hit = match call(engine, &Request::Hit { page: 0, x: 80.0, y: 100.0 }) {
+    let hit = match call(
+        engine,
+        &Request::Hit {
+            page: 0,
+            x: 80.0,
+            y: 100.0,
+        },
+    ) {
         Response::Hit(hit) => hit.expect("正文区域应该命中"),
         other => panic!("期望 Hit，拿到 {other:?}"),
     };
