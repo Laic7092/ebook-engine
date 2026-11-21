@@ -80,6 +80,29 @@ fn lays_out_and_writes_a_raw_page() {
 }
 
 #[test]
+fn no_font_makes_blank_pages() {
+    // 没有注册字体时排版仍然出页（StubMeasurer），但位图上一个字也没有：
+    // 这正是 iOS 上「有页码、无正文」的样子。
+    let bytes = demo();
+    let name = c"demo.txt";
+    unsafe {
+        let engine = eb_plain_open(bytes.as_ptr(), bytes.len(), name.as_ptr());
+        assert!(engine >= 0);
+        let _ = eb_plain_layout(engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0);
+        let pages = eb_plain_page_count(engine);
+        let path = std::env::temp_dir().join("eb-nofont.eqp");
+        let c_path = CString::new(path.to_str().unwrap()).unwrap();
+        assert_eq!(eb_plain_page_raw(engine, 0, 2.0, 0, 0, false, c_path.as_ptr()), 0);
+        let bytes = std::fs::read(&path).unwrap();
+        let ink = bytes[12..].chunks_exact(4).any(|px| px[0] < 200);
+        eprintln!("no font: {pages} pages, ink drawn: {ink}");
+        assert!(pages > 0);
+        assert!(!ink, "没有字体时不该有字");
+        eb_plain_close(engine);
+    }
+}
+
+#[test]
 fn reports_book_and_toc() {
     let engine = open();
     unsafe {
