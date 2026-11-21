@@ -50,3 +50,6 @@ inherits = "release"
 opt-level = 3
 panic = "unwind"
 strip = "none"
+# cgo/外部链接器不认 LLVM bitcode（`.llvmbc`），所以这里必须关掉 LTO。
+lto = false
+codegen-units = 16

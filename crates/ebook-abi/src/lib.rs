@@ -9,6 +9,7 @@
 //! - **panic 不出边界**：所有入口都 `catch_unwind`，panic 变成 `Error` 响应，
 //!   而不是让整个 App abort。这条依赖 native profile 里的 `panic = "unwind"`。
 
+pub mod plain;
 pub mod protocol;
 
 use std::ffi::{c_char, CStr};
@@ -32,7 +33,7 @@ pub struct EbEngine {
 
 thread_local! {
     /// 最后一个错误的细节，只在 `eb_open` 这类拿不到 `Response` 的入口用。
-    static LAST_ERROR: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static LAST_ERROR: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 fn set_last_error(message: impl Into<String>) {
