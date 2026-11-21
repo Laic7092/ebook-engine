@@ -25,22 +25,26 @@ fn font() -> Vec<u8> {
     Vec::new()
 }
 
-fn open_book() -> i32 {
+/// 打开示例书，返回句柄和「注册上字体了吗」：CI 的机器上可能没有中文字体，
+/// 没有字体时页照样出，位图上没有字。
+fn open_book() -> (i32, bool) {
     let bytes = demo();
     let name = c"demo.txt";
     let engine = unsafe { eb_plain_open(bytes.as_ptr(), bytes.len(), name.as_ptr()) };
     assert!(engine >= 0, "eb_plain_open 失败");
     let font = font();
+    let mut has_font = false;
     if !font.is_empty() {
         let id = unsafe { eb_plain_register_font(engine, font.as_ptr(), font.len()) };
         assert!(id >= 0, "注册字体失败");
+        has_font = true;
     }
-    engine
+    (engine, has_font)
 }
 
 #[test]
 fn lays_out_and_writes_a_raw_page() {
-    let engine = open_book();
+    let (engine, has_font) = open_book();
     assert!(eb_plain_spine_count(engine) > 0);
     assert!(eb_plain_page_count(engine) == 0, "排版前没有页");
     let rc = eb_plain_layout(
@@ -69,9 +73,13 @@ fn lays_out_and_writes_a_raw_page() {
     assert_eq!(height, 1400);
     assert_eq!(bytes.len(), 12 + (width * height * 4) as usize);
 
-    // 页上一定不是全白：有字。
+    // 有字体时页上一定不是全白：有字。
     let ink = bytes[12..].as_chunks::<4>().0.iter().any(|px| px[0] < 200);
-    assert!(ink, "位图是空的");
+    if has_font {
+        assert!(ink, "位图是空的");
+    } else {
+        eprintln!("no font on this machine: the page is blank, as it should be");
+    }
 
     let hit = eb_plain_hit(engine, 0, 40.0, 40.0);
     assert!(hit.page >= 0, "点在页上没有位置");
@@ -108,7 +116,7 @@ fn no_font_makes_blank_pages() {
 
 #[test]
 fn reports_book_and_toc() {
-    let engine = open_book();
+    let (engine, _) = open_book();
     let title = eb_plain_title(engine);
     assert!(!title.is_null());
     let href = eb_plain_spine_href(engine, 0);
@@ -120,7 +128,7 @@ fn reports_book_and_toc() {
 
 #[test]
 fn timings() {
-    let engine = open_book();
+    let (engine, _) = open_book();
     let _ = eb_plain_layout(
         engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0,
     );
