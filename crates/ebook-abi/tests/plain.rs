@@ -92,3 +92,27 @@ fn reports_book_and_toc() {
         eb_plain_close(engine);
     }
 }
+
+#[test]
+fn timings() {
+    let engine = open();
+    unsafe {
+        let _ = eb_plain_layout(engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0);
+        let start = std::time::Instant::now();
+        let pages = eb_plain_page_count(engine);
+        let run = pages.min(5);
+        let start = std::time::Instant::now();
+        for page in 0..run {
+            let path = std::env::temp_dir().join(format!("eb-bench-{page}.eqp"));
+            let c = CString::new(path.to_str().unwrap()).unwrap();
+            assert_eq!(eb_plain_page_raw(engine, page, 3.0, 0, 0, false, c.as_ptr()), 0);
+        }
+        eprintln!("{run} pages at 3x: {:?} ({} ms a page)", start.elapsed(), start.elapsed().as_millis() / run as u128);
+        let start = std::time::Instant::now();
+        for spine in 0..1u32 {
+            let _ = eb_plain_layout(engine, spine, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0);
+        }
+        eprintln!("one chapter layout: {:?}", start.elapsed());
+        eb_plain_close(engine);
+    }
+}
