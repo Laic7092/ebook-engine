@@ -1,7 +1,10 @@
 name: CI
 
 on:
+  # 只跟分支。tag 触碰同一个 commit，没必要再跑一遍：release 的 gate 是按
+  # commit 找 check-run 的，分支那次就是它要等的那个。
   push:
+    branches: ["**"]
   pull_request:
 
 permissions:
