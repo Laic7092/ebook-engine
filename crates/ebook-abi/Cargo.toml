@@ -16,5 +16,7 @@ hyphen-en = ["ebook-reader/hyphen-en"]
 
 [dependencies]
 ebook-reader.workspace = true
+# 只为了给 `repr(C)` 面命名 `SpineItem` / `TocEntry` 的字段；不绕过 reader。
+ebook-format.workspace = true
 serde.workspace = true
 postcard.workspace = true

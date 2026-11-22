@@ -286,6 +286,30 @@ impl Engine {
             .unwrap_or(0)
     }
 
+    /// 单独一页的元数据。等于 `pages()` 按下标取，但没有整表分配：
+    /// 翻页、画瓦片这类逐页调用不必扫全章。
+    pub fn page(&self, index: u32) -> Option<PageBox> {
+        let last = self.last.as_ref()?;
+        // `Page.index` 是唯一权威；下标对不上就是没有这页。
+        let page = last.ir.pages.get(index as usize)?;
+        if page.index != index {
+            return None;
+        }
+        Some(PageBox {
+            index: page.index,
+            width: page.size.w,
+            height: page.size.h,
+            inset: page.inset,
+            line_from: page.lines.start,
+            line_len: page.lines.len,
+            progress: last.reader().progress(Location {
+                page: page.index,
+                line: page.lines.start,
+                byte: 0,
+            }),
+        })
+    }
+
     /// 页级元数据：几何、行区间、本章进度。宿主翻页/画进度条只需要这些。
     pub fn pages(&self) -> Vec<PageBox> {
         let Some(last) = self.last.as_ref() else {

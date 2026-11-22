@@ -254,7 +254,225 @@ fn reports_book_and_toc() {
     assert!(!href.is_null());
     assert!(eb_plain_toc_count(engine) > 0);
     assert!(eb_plain_toc_spine(engine, 0) >= 0);
+
+    // 新增的书目/spine/TOC 字段：越界一律给空串或 0，不是 null、不 panic。
+    for getter in [
+        eb_plain_language,
+        eb_plain_creator,
+        eb_plain_publisher,
+        eb_plain_identifier,
+        eb_plain_date,
+        eb_plain_description,
+        eb_plain_cover_href,
+        eb_plain_cover_mime,
+    ] {
+        assert!(!getter(engine).is_null(), "句柄有效时不该返回 null");
+        assert!(
+            !getter(engine + 1000).is_null(),
+            "无效句柄时也不该返回 null"
+        );
+    }
+    assert_eq!(eb_plain_cover_len(engine + 1000), 0);
+    // TXT 没有封面：-1 而不是写一个空文件。
+    let path = std::env::temp_dir().join("eb-no-cover.png");
+    let c_path = CString::new(path.to_str().unwrap()).unwrap();
+    assert_eq!(eb_plain_cover_write(engine, c_path.as_ptr()), -1);
+    assert!(!path.exists());
+
+    assert!(!eb_plain_spine_id(engine, 0).is_null());
+    assert!(!eb_plain_spine_media_type(engine, 0).is_null());
+    assert_eq!(eb_plain_spine_linear(engine, 0), 1);
+    assert_eq!(eb_plain_spine_linear(engine, 9999), 0);
+    assert!(!eb_plain_spine_href(engine, 9999).is_null());
+
+    assert!(!eb_plain_toc_href(engine, 0).is_null());
+    // `eb_plain_toc_fragment` 没有 fragment 时是空串，不是 null。
+    assert!(!eb_plain_toc_fragment(engine, 0).is_null());
+
     eb_plain_close(engine);
+
+    // 关掉以后：句柄不再有效，但不 panic。
+    assert_eq!(eb_plain_spine_count(engine), 0);
+    assert_eq!(eb_plain_page_count(engine), 0);
+    assert_eq!(eb_plain_set_limits(engine, 1024, 1024), -1);
+    assert_eq!(eb_plain_select(engine, 0, 0, 0, 0, 1, 0), -1);
+    assert_eq!(eb_plain_selection_rect_count(engine), 0);
+}
+
+#[test]
+fn selection_round_trip() {
+    let (engine, _) = open_book();
+    // 没排版时选不出来，但不干预。
+    assert!(eb_plain_select(engine, 0, 0, 0, 0, 1, 0) < 0);
+    let rc = eb_plain_layout(
+        engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0.0, 0,
+    );
+    assert_eq!(rc, 0);
+
+    let count = eb_plain_select(engine, 0, 0, 0, 0, 2, 0);
+    assert!(count > 0, "跨行选区应该有矩形块: {count}");
+    assert_eq!(eb_plain_selection_rect_count(engine), count as u32);
+
+    let text = eb_plain_selection_text(engine);
+    assert!(!text.is_null());
+    assert!(!unsafe { std::ffi::CStr::from_ptr(text) }
+        .to_bytes()
+        .is_empty());
+
+    for index in 0..count as u32 {
+        let rect = eb_plain_selection_rect(engine, index);
+        assert_eq!(rect.ok, 1, "第 {index} 块");
+        assert!(rect.w > 0.0 && rect.h > 0.0, "第 {index} 块是空矩形");
+    }
+    let out = eb_plain_selection_rect(engine, count as u32 + 5);
+    assert_eq!(out.ok, 0, "越界下标应给 ok == 0");
+
+    let start = eb_plain_selection_start(engine);
+    let end = eb_plain_selection_end(engine);
+    assert_eq!(start.page, 0, "起点应在第 0 页");
+    assert!(end.page >= 0);
+    assert!((0.0..=1.0).contains(&start.progress));
+
+    // 端点越界：-2，且把上一份选区清掉（不留下一半新一半旧的结果）。
+    assert_eq!(eb_plain_select(engine, 0, 0, 0, 99, 0, 0), -2);
+    assert_eq!(eb_plain_selection_rect_count(engine), 0);
+    assert_eq!(eb_plain_selection_start(engine).page, -1);
+    eb_plain_close(engine);
+}
+
+#[test]
+fn resolves_links_and_fragments() {
+    // 用真 EPUB：书内链接是相对当前章解析的，TXT 没有这套路径语义。
+    let Ok(bytes) = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/demo.epub"
+    )) else {
+        // 夹具是生成的（`scripts/generate.sh`），干净 checkout 上没有就跳过，
+        // 与「本机没字体就跳过」同一个态度。
+        eprintln!("fixtures/demo.epub 不在，跳过链接解析测试");
+        return;
+    };
+    let engine = unsafe { eb_plain_open(bytes.as_ptr(), bytes.len(), c"demo.epub".as_ptr()) };
+    assert!(engine >= 0, "打开 demo.epub 失败");
+    assert_eq!(eb_plain_spine_count(engine), 2);
+    let rc = eb_plain_layout(
+        engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0.0, 0,
+    );
+    assert_eq!(rc, 0);
+
+    // 从第 0 章解 `ch2.xhtml`：落到 spine 1。
+    let link = eb_plain_resolve_link(engine, c"ch2.xhtml".as_ptr());
+    assert_eq!(link.ok, 1, "相对链接应该能解开");
+    assert_eq!(link.spine, 1);
+    assert_eq!(link.external, 0);
+    assert_eq!(
+        unsafe { std::ffi::CStr::from_ptr(eb_plain_resolved_fragment(engine)) }.to_bytes(),
+        b""
+    );
+
+    // 带 fragment 的书内链接。
+    let link = eb_plain_resolve_link(engine, c"ch2.xhtml#snow".as_ptr());
+    assert_eq!(link.ok, 1);
+    assert_eq!(link.spine, 1);
+    assert_eq!(
+        unsafe { std::ffi::CStr::from_ptr(eb_plain_resolved_fragment(engine)) }.to_bytes(),
+        b"snow"
+    );
+
+    // 本书内 `#id`：指向当前章。
+    let link = eb_plain_resolve_link(engine, c"#snow".as_ptr());
+    assert_eq!(link.ok, 1);
+    assert_eq!(link.spine, 0);
+
+    // 外链：ok，external == 1，spine == -1。
+    let link = eb_plain_resolve_link(engine, c"https://example.com/x#y".as_ptr());
+    assert_eq!(link.ok, 1);
+    assert_eq!(link.external, 1);
+    assert_eq!(link.spine, -1);
+
+    // 解不出的 href：ok == 0，且不留下上一次的 fragment。
+    assert_eq!(
+        eb_plain_resolve_link(engine, c"nope.xhtml#x".as_ptr()).ok,
+        0
+    );
+    assert_eq!(
+        unsafe { std::ffi::CStr::from_ptr(eb_plain_resolved_fragment(engine)) }.to_bytes(),
+        b""
+    );
+
+    // 锚点行号：本章没有这个 fragment 就是 -1。
+    assert_eq!(
+        eb_plain_fragment_line(engine, c"definitely-not-here".as_ptr()),
+        -1
+    );
+    assert_eq!(eb_plain_fragment_line(engine, std::ptr::null()), -1);
+    eb_plain_close(engine);
+}
+
+#[test]
+fn limits_are_enforced() {
+    let (engine, _) = open_book();
+    let rc = eb_plain_layout(
+        engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0.0, 0,
+    );
+    assert_eq!(rc, 0);
+
+    // 一个很小的单页上限：1x（390×760 = 296k）能过，3x（2.67M）过不去。
+    assert_eq!(eb_plain_set_limits(engine, 400_000, 1024 * 1024), 0);
+    let small = std::env::temp_dir().join("eb-limit-small.eqp");
+    let c_small = CString::new(small.to_str().unwrap()).unwrap();
+    assert_eq!(
+        eb_plain_page_raw(engine, 0, 1.0, 0, 0, false, c_small.as_ptr()),
+        0
+    );
+    let big = std::env::temp_dir().join("eb-limit-big.eqp");
+    let c_big = CString::new(big.to_str().unwrap()).unwrap();
+    assert_eq!(
+        eb_plain_page_raw(engine, 0, 3.0, 0, 0, false, c_big.as_ptr()),
+        -2,
+        "超过 max_page_pixels 应拒绝"
+    );
+    eb_plain_close(engine);
+}
+
+#[test]
+fn the_error_string_is_a_pointer_not_a_leak() {
+    // 失败一次：错误串就在库内的缓冲里，指针不归调用方、也不该每次漏一份。
+    let engine = unsafe { eb_plain_open(std::ptr::null(), 0, std::ptr::null()) };
+    assert_eq!(engine, -1);
+    let first = eb_plain_last_error();
+    assert!(!first.is_null());
+    let message = unsafe { std::ffi::CStr::from_ptr(first) }
+        .to_string_lossy()
+        .into_owned();
+    assert!(!message.is_empty(), "失败的 open 应该留下原因");
+
+    // 再失败一次：还是同一块缓冲（没有 mem::forget 漏出去的旧串），内容不变。
+    let engine = unsafe { eb_plain_open(std::ptr::null(), 0, std::ptr::null()) };
+    assert_eq!(engine, -1);
+    let second = unsafe { std::ffi::CStr::from_ptr(eb_plain_last_error()) }
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(second, message, "同一个失败应该给同一条原因");
+
+    // 成功一次就清空。
+    let bytes = demo();
+    let engine = unsafe { eb_plain_open(bytes.as_ptr(), bytes.len(), c"demo.txt".as_ptr()) };
+    assert!(engine >= 0);
+    assert_eq!(
+        unsafe { std::ffi::CStr::from_ptr(eb_plain_last_error()) }.to_bytes(),
+        b""
+    );
+    eb_plain_close(engine);
+}
+
+#[test]
+fn version_is_not_hard_coded_to_an_old_release() {
+    let version = unsafe { std::ffi::CStr::from_ptr(eb_plain_version()) }
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(version, format!("ebook-abi {}", env!("CARGO_PKG_VERSION")));
+    assert_eq!(eb_plain_abi_version(), ebook_abi::ABI_VERSION);
 }
 
 #[test]

@@ -1,13 +1,17 @@
 name: Release
 
 # A tag makes a release with one static library per target: the C ABI built
-# for the hosts that link it (iOS, macOS, Linux), so a consumer downloads a
-# file instead of building Rust. Asset names are
+# for the hosts that link it (iOS, macOS, Linux, Android, Windows), so a
+# consumer downloads a file instead of building Rust. Asset names are
 #
-#   libebook_abi-<target>.tar.gz   (one libebook_abi.a inside)
+#   libebook_abi-<target>.tar.gz   (libebook_abi.a / ebook_abi.lib + ebook_abi.h)
 #   SHA256SUMS                     (all of them)
 #
-# targets: ios-arm64, ios-simulator-arm64, macos-arm64, macos-x64, linux-x64
+# targets: ios-arm64, ios-simulator-arm64, macos-arm64, macos-x64,
+#          linux-x64, android-arm64, android-armv7, android-x64, windows-x64
+#
+# The header that goes with these is `crates/ebook-abi/include/ebook_abi.h`
+# (checked against the Rust exports by `cargo test -p ebook-abi`).
 
 on:
   push:
@@ -39,6 +43,24 @@ jobs:
           - target: linux-x64
             triple: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+          # Android 的 clang wrapper 名字与 triple 不同（armv7 是 armv7a），
+          # 所以 linker 单独给，不靠字符串拼。
+          - target: android-arm64
+            triple: aarch64-linux-android
+            os: ubuntu-latest
+            linker: aarch64-linux-android21-clang
+          - target: android-armv7
+            triple: armv7-linux-androideabi
+            os: ubuntu-latest
+            linker: armv7a-linux-androideabi21-clang
+          - target: android-x64
+            triple: x86_64-linux-android
+            os: ubuntu-latest
+            linker: x86_64-linux-android21-clang
+          # Windows 出的是 `ebook_abi.lib`（MSVC 的静态库）。
+          - target: windows-x64
+            triple: x86_64-pc-windows-msvc
+            os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -55,12 +77,30 @@ jobs:
       # The `native` profile: panic = unwind (the ABI's catch_unwind needs it)
       # and no LTO (an external linker embeds it).
       - name: Build
+        shell: bash
         run: |
+          set -euo pipefail
           rustup target add "${{ matrix.triple }}"
+          if [ -n "${{ matrix.linker }}" ]; then
+            ndk="${ANDROID_NDK_LATEST_HOME:?this runner has no Android NDK}"
+            toolchain="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+            env_name="CARGO_TARGET_$(echo "${{ matrix.triple }}" | tr 'a-z-' 'A-Z_')_LINKER"
+            export "$env_name=$toolchain/${{ matrix.linker }}"
+            printf '%s -> %s\n' "$env_name" "${!env_name}"
+          fi
           cargo build -p ebook-abi --profile native --target "${{ matrix.triple }}"
-          cd "target/${{ matrix.triple }}/native"
-          tar -czf "libebook_abi-${{ matrix.target }}.tar.gz" libebook_abi.a
-          ls -la libebook_abi.a libebook_abi-${{ matrix.target }}.tar.gz
+
+          out="target/${{ matrix.triple }}/native"
+          # unix 上叫 libebook_abi.a，MSVC 上叫 ebook_abi.lib。
+          lib=""
+          for candidate in "$out/libebook_abi.a" "$out/ebook_abi.lib"; do
+            if [ -f "$candidate" ]; then lib="$candidate"; break; fi
+          done
+          test -n "$lib" || { echo "no static library in $out" >&2; exit 1; }
+          tar -czf "$out/libebook_abi-${{ matrix.target }}.tar.gz" \
+            -C "$out" "$(basename "$lib")" \
+            -C "$GITHUB_WORKSPACE/crates/ebook-abi/include" ebook_abi.h
+          ls -la "$out/libebook_abi-${{ matrix.target }}.tar.gz"
 
       - uses: actions/upload-artifact@v4
         with:

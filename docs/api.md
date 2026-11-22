@@ -666,3 +666,83 @@ IR 或页号越界时返回 `null` 字段，不 panic。
 
 JS 侧解码器是手写的，IR 版本、枚举 tag、字段顺序都见本文第 2、3 节。
 `web/pkg` 是构建产物，不提交；`web/build.sh` 与 `xtask app` 都会生成它。
+
+---
+
+## 9. `ebook-abi`：C ABI
+
+头文件是 `crates/ebook-abi/include/ebook_abi.h`，release 资产（每个 target 一个
+`libebook_abi-<target>.tar.gz`，里面是静态库 + 这个头文件）也带它。
+`cargo test -p ebook-abi` 会把头文件用 `-Wall -Wextra -Werror` 真编译一遍，
+并用 `_Static_assert` 对齐 Rust 侧的 `size_of`；头文件与 `pub extern "C" fn`
+的符号集合必须完全相等。
+
+### 9.1 两个面
+
+| 面 | 入口 | 适合 |
+|---|---|---|
+| postcard | `eb_open` / `eb_request` / `eb_close` | 能读返回缓冲区的宿主：cgo、Swift、Rust |
+| 标量 | `eb_plain_*` | 只能拿 `Pointer` 不读内存的宿主：Asuka 的 `extern`、JNI 薄包装 |
+
+- postcard 面的 `Request` / `Response` 枚举与 wasm 侧同思路，schema 就是
+  `crates/ebook-abi/src/protocol.rs`；新增能力只加枚举变体，不往 C 面加函数。
+- 标量面每条能力一个函数，参数与结果都是标量/字符串/`repr(C)` 结构体，
+  像素与封面由宿主给路径、库写文件。
+- 两面共用一个 `Engine`：postcard 面是 `Mutex<Engine>` 的不透明指针，
+  标量面是整数句柄 + 进程级句柄表。
+
+### 9.2 所有权与生命周期
+
+| 东西 | 归谁 | 有效期 |
+|---|---|---|
+| `eb_alloc` / `eb_request` 返回值 | 调用方 | 直到 `eb_free(ptr, len)` |
+| 其余 `const char *` | 库 | 见下 |
+| `eb_plain_open` 句柄 | 调用方 | 直到 `eb_plain_close` |
+
+- `eb_version` / `eb_plain_version`：静态字符串，进程生命周期。
+- `eb_last_error` / `eb_plain_last_error`：库内缓冲，直到**下一次失败的调用**
+  （原地复用，连续失败不换地址，也不泄漏）。
+- `eb_plain_*` 其余字符串：进程级环形缓冲（最近 64 条），直到后续 64 次取字符串。
+  要长期保存就当场 `strdup`。
+- 无效句柄不返回 `NULL` 而是空串/`0`/`ok == 0` 的结构体；关掉的句柄同理。
+  `NULL` 只表示“参数错”（例如空的路径）。
+
+### 9.3 版本与布局
+
+- `EB_ABI_VERSION`（头文件）必须等于 `eb_abi_version()` / `eb_plain_abi_version()`。
+  任何 `repr(C)` 结构体加字段、改字段顺序、改既有函数参数都要 +1；
+  只加新函数不算破坏性变更。
+- `eb_struct_size(kind)` 返回 `EbPageInfo` / `EbLoc` / `EbSelectionRect` /
+  `EbLink` 的字节数（kind 1..4），宿主可用来二次校验头文件与库同源。
+- 库版本串由 `CARGO_PKG_VERSION` 编进来（不再手写）。
+
+### 9.4 位图落盘格式（`EQP1`）
+
+```text
+"EQP1" | u32le width | u32le height | width * height * 4 bytes RGBA8
+```
+
+行优先、直通 alpha（非预乘）。位图覆盖整个视口（含留白），不是内容盒。
+`eb_plain_page_raw` 出一页；`eb_plain_page_slice_raw` 出滚动流的一片
+（`y`/`height` 是点，`y` 在 `[0, eb_plain_content_height)` 里，同一 `y`
+逐字节可复现）。平台侧只读它：iOS 包成 `CGImage`，GTK 包成 `GdkMemoryTexture`。
+
+### 9.5 句柄上的两份状态
+
+标量面只能返回标量/结构体，所以两样东西留在句柄上：
+
+- 最近一次选区（`eb_plain_select` → `eb_plain_selection_rect` / `_text` /
+  `_start` / `_end`）。矩形数组按 `0..eb_plain_selection_rect_count` 下标取。
+- 最近一次链接解析的 fragment（`eb_plain_resolve_link` →
+  `eb_plain_resolved_fragment`）。
+
+两者都在关书时丢掉，下一次同类调用覆盖。`ok == 0` 是不存在，不是错误。
+
+### 9.6 错误
+
+所有入口都 `catch_unwind`：panic 变成 `Response::Error` 或负返回值 + 错误串，
+不会让宿主 abort。这条依赖 `native` profile 的 `panic = "unwind"`
+（`Cargo.toml` 里已经这么配，`release` 的 `panic = "abort"` 只给 wasm/CLI 用）。
+
+标量面的返回码：`0` 成功 / 继续；`-1` 句柄或参数错；`-2` 引擎侧失败
+（排版、光栅化、字体解析、上限）；`-3` 写文件失败。

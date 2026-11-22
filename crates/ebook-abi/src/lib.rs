@@ -1,11 +1,14 @@
 //! C ABI：给 cgo / Swift / JNI 用的最小面。
 //!
+//! 头文件是 `include/ebook_abi.h`（`tests/header.rs` 保证它与这里的
+//! `pub extern "C" fn` 及 `repr(C)` 结构逐一对得上）。
+//!
 //! 设计原则：
 //! - **有状态但只关于书**：`eb_open` 返回一个不透明句柄，句柄内部是
 //!   `Mutex<Engine>`；viewport/style 这类宿主设置不进 ABI，跟着请求走。
 //! - **一条通用入口**：`eb_request` 收发 postcard 编码的 `Request`/`Response`。
 //!   新增能力只改 `protocol.rs`，不用再往 C 面上加函数。
-//! - **缓冲区归调用方**：`eb_request` 返回的指针必须用 `eb_free_bytes` 释放。
+//! - **缓冲区归调用方**：`eb_request` 返回的指针必须用 `eb_free` 释放。
 //! - **panic 不出边界**：所有入口都 `catch_unwind`，panic 变成 `Error` 响应，
 //!   而不是让整个 App abort。这条依赖 native profile 里的 `panic = "unwind"`。
 
@@ -14,7 +17,7 @@ pub mod protocol;
 
 use std::ffi::{c_char, CStr};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 use ebook_reader::EdgesF;
 use ebook_reader::{Engine, Limits, Location, SelectionRect as CoreRect, Style, Viewport};
@@ -24,20 +27,55 @@ use protocol::{
     SpineItem, TocEntry,
 };
 
-const VERSION: &CStr = c"ebook-abi 0.1.0";
+/// `repr(C)` 结构体与函数签名的布局版本。
+///
+/// 改任何 `#[repr(C)]` 结构、返回值形状或既有函数参数就 +1；头文件里的
+/// `EB_ABI_VERSION` 必须与之一致。宿主在启动时比对 `eb_abi_version()`，
+/// 不一致就别调，而不是把字段读串。
+///
+/// 只加新函数、新枚举变体不算破坏（句柄、缓冲区契约不变），但结构体加字段
+/// 一定算：C 是按偏移读的。
+pub const ABI_VERSION: u32 = 1;
 
 /// 不透明句柄。内部加锁，因为 Go/Swift 侧不保证所有调用都在同一个线程上。
 pub struct EbEngine {
     inner: Mutex<Engine>,
 }
 
-thread_local! {
-    /// 最后一个错误的细节，只在 `eb_open` 这类拿不到 `Response` 的入口用。
-    pub(crate) static LAST_ERROR: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+/// 最后一个错误的细节。进程级、UTF-8、以结尾 0 收尾的 `Vec<u8>`。
+///
+/// 用 `Vec` 而不是 `CString`：`set_last_error` 复用容量，连续失败不会每次
+/// 换一块内存（早期版本对 `Vec` 做 `mem::forget`，每次失败漏一条字符串）。
+/// 指针在**下一次失败的调用**前有效；不归调用方释放。
+static LAST_ERROR: LazyLock<Mutex<Vec<u8>>> = LazyLock::new(|| Mutex::new(vec![0]));
+
+pub(crate) fn set_last_error(message: impl AsRef<str>) {
+    let text = message.as_ref();
+    let mut buffer = LAST_ERROR
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    buffer.clear();
+    buffer.extend_from_slice(text.replace('\0', " ").as_bytes());
+    buffer.push(0);
 }
 
-fn set_last_error(message: impl Into<String>) {
-    LAST_ERROR.with(|slot| *slot.borrow_mut() = Some(message.into()));
+/// 错误串的裸指针（含结尾 0）。原地复用缓冲，所以可以随便返回。
+pub(crate) fn last_error_ptr() -> *const c_char {
+    let buffer = LAST_ERROR
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    buffer.as_ptr() as *const c_char
+}
+
+/// 同上，外加不含结尾 0 的长度，一次加锁取齐（长度与指针必须同源）。
+pub(crate) fn last_error_with_len() -> (*const c_char, usize) {
+    let buffer = LAST_ERROR
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    (
+        buffer.as_ptr() as *const c_char,
+        buffer.len().saturating_sub(1),
+    )
 }
 
 // ---------------------------------------------------------------- 缓冲区
@@ -77,7 +115,28 @@ fn into_raw(bytes: Vec<u8>) -> (*mut u8, usize) {
 
 #[no_mangle]
 pub extern "C" fn eb_version() -> *const c_char {
-    VERSION.as_ptr()
+    // 静态、含结尾 0、进程生命周期内有效。
+    const BYTES: &[u8] = concat!("ebook-abi ", env!("CARGO_PKG_VERSION"), "\0").as_bytes();
+    BYTES.as_ptr() as *const c_char
+}
+
+/// 结构布局版本，见 [`ABI_VERSION`]。宿主应与头文件里的 `EB_ABI_VERSION` 比对。
+#[no_mangle]
+pub extern "C" fn eb_abi_version() -> u32 {
+    ABI_VERSION
+}
+
+/// `repr(C)` 结构体的字节数，供宿主校验头文件与本库同源。`kind` 见头文件
+/// （1 `EbPageInfo`、2 `EbLoc`、3 `EbSelectionRect`、4 `EbLink`）；未知返回 0。
+#[no_mangle]
+pub extern "C" fn eb_struct_size(kind: u32) -> usize {
+    match kind {
+        plain::EB_STRUCT_PAGE_INFO => std::mem::size_of::<plain::EbPageInfo>(),
+        plain::EB_STRUCT_LOC => std::mem::size_of::<plain::EbLoc>(),
+        plain::EB_STRUCT_SELECTION_RECT => std::mem::size_of::<plain::EbSelectionRect>(),
+        plain::EB_STRUCT_LINK => std::mem::size_of::<plain::EbLink>(),
+        _ => 0,
+    }
 }
 
 /// 打开一本书（EPUB 或文本，按魔数识别）。失败返回 null，细节见 `eb_last_error`。
@@ -131,25 +190,21 @@ pub unsafe extern "C" fn eb_close(engine: *mut EbEngine) {
     drop(Box::from_raw(engine));
 }
 
-/// 上次 `eb_open` 失败的细节（UTF-8，不带结尾 0）。空串表示没有错误。
+/// 上次失败（`eb_open` 等拿不到 `Response` 的入口）的细节，UTF-8、不带结尾 0。
+/// 空串表示没有错误。
 ///
 /// `len` 由 C 调用方给出：本函数写它，调用方保证可写（clippy 只能看到裸指针）。
+/// 指针指向库内的错误缓冲，**下一次失败的调用**前有效；不归调用方释放。
+/// 需要 `C string` 的宿主用 `eb_plain_last_error`（同一块内存，带结尾 0）。
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
 pub extern "C" fn eb_last_error(len: *mut usize) -> *const u8 {
-    LAST_ERROR.with(|slot| {
-        let message = slot.borrow().clone().unwrap_or_default();
-        let mut bytes = message.into_bytes();
-        bytes.shrink_to_fit();
-        let len_value = bytes.len();
-        // 调用方拿到指针后马上拷贝；下一次 `eb_open` 会覆盖它。
-        let ptr = bytes.as_ptr();
-        std::mem::forget(bytes);
-        if !len.is_null() {
-            unsafe { *len = len_value };
-        }
-        ptr
-    })
+    let (ptr, size) = last_error_with_len();
+    if !len.is_null() {
+        // 不含结尾 0：`size` 已经把 NUL 减掉了。
+        unsafe { *len = size };
+    }
+    ptr as *const u8
 }
 
 // ---------------------------------------------------------------- 调用

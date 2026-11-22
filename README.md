@@ -136,6 +136,29 @@ op 坐标是**排版流坐标**，不是页面内坐标。`Page.origin` 表示�
 
 ---
 
+## C ABI（手机与桌面）
+
+`crates/ebook-abi` 把引擎做成一个静态库，宿主（iOS、Android、macOS、Linux、
+Windows）链接它而不是自己编 Rust：
+
+```c
+#include "ebook_abi.h"
+
+int32_t book = eb_plain_open(bytes, len, "demo.epub");
+eb_plain_layout(book, 0, 390, 760, 26, 30, 26, 30, 1.0, 1.6, 0, 0, 0);
+eb_plain_page_raw(book, 0, 3.0, ink, paper, false, "/tmp/page0.eqp");
+```
+
+两个面：`eb_open` / `eb_request`（postcard 请求响应，适合 cgo / Swift）与
+`eb_plain_*`（标量 + 整数句柄 + 文件出图，适合只能拿 `Pointer` 的宿主）。
+像素是 `EQP1` 文件（`"EQP1" | u32 w | u32 h | RGBA8`）；滚动模式用
+`eb_plain_layout_scroll` + `eb_plain_content_height` + `eb_plain_page_slice_raw`
+按瓦片取。契约与所有权见 [docs/api.md 第 9 节](docs/api.md)，头文件是
+`crates/ebook-abi/include/ebook_abi.h`，打 tag 时每个 target 一个
+`libebook_abi-<target>.tar.gz`（静态库 + 头文件 + `SHA256SUMS`）。
+
+---
+
 ## 验证
 
 纯函数换来的可验证性，是这个架构真正的收益：
@@ -145,6 +168,7 @@ op 坐标是**排版流坐标**，不是页面内坐标。`Page.origin` 表示�
 | 一键闸门 | `scripts/check.sh` | fmt、clippy `-D warnings`、test、`xtask all` 任一失败。 |
 | golden IR | `xtask golden` | 排版结果变了。字节 diff 直接指出变化面。 |
 | ABI 契约 | `xtask contract` | JS 解码器与 Rust 结构体字段不再一致。做法是把 golden IR 解出来再编回去，要求逐字节还原。 |
+| C 头文件 | `cargo test -p ebook-abi --test header` | 头文件与 `pub extern "C" fn` 的符号或 `repr(C)` 布局漂移；测试会用 `-Werror` 真编译一遍。 |
 | 像素基线 | `xtask pixel` | 渲染结果变了。逐页 FNV 摘要，`pixel-bless` 显式更新。 |
 | 跨目标比对 | `xtask parity` | native 与 wasm 不再逐字节相同。 |
 | 浏览器应用 | `xtask app` | 读者 App 的翻页/打开/字体路径坏了。用 bun + DOM stub 跑端到端。 |

@@ -7,6 +7,25 @@
 
 ### Added
 
+- C ABI 有了头文件：`crates/ebook-abi/include/ebook_abi.h`，两个面
+  （`eb_open`/`eb_request` 与 `eb_plain_*`）、`repr(C)` 结构体、`EQP1` 位图格式
+  与所有权/生命周期都在里面。`cargo test -p ebook-abi --test header` 用
+  `-Wall -Wextra -Werror` 真编译一遍，并用 `_Static_assert` 对齐 Rust 的
+  `size_of`；头文件与 `pub extern "C" fn` 的符号集合必须相等，漏一个就红。
+- C ABI 版本检查：`EB_ABI_VERSION` / `eb_abi_version()` /
+  `eb_plain_abi_version()`，外加 `eb_struct_size(kind)`（`EbPageInfo` /
+  `EbLoc` / `EbSelectionRect` / `EbLink`），宿主启动时能拒绝布局不一致的库。
+- 标量面补齐（`eb_plain_*`）：书目元数据（`language` / `creator` / `publisher` /
+  `identifier` / `date` / `description` / `cover_href` / `cover_mime` /
+  `cover_len`）、spine 的 `id` / `media_type` / `linear`、TOC 的
+  `href` / `fragment`、选区（`select` + `selection_rect_count` / `_rect` /
+  `_text` / `_start` / `_end`）、链接解析（`resolve_link` /
+  `resolved_fragment`）、`fragment_line`、`set_limits`。
+- `Engine::page(index)`：单页元数据按下标直取，不再为了第一页把整章页表
+  拉出来（`eb_plain_page_info` 因此从 O(页数) 变成 O(1)）。
+- release 矩阵扩到 Android（`arm64` / `armv7` / `x64`，用 runner 自带的 NDK
+  clang）与 Windows（`x64`，MSVC 的 `ebook_abi.lib`）；每个 tar 里多带一份
+  `ebook_abi.h`。
 - 滚动模式：`Mode::Scroll` 把整章排成一页（`Page.origin == (0, 0)`，
   `Page.size.h` 是内容高度），`paint_window` 按内容 `y` 取瓦片。与分页共用同一份
   断行/块布局，`Page.origin` 与页切片契约不变。`Engine::layout_scroll` /
@@ -68,6 +87,19 @@
   `eb_use_layout`（主线程不再有交互状态副本，也就不需要装回）。
 
 ### Fixed
+
+- `eb_last_error` 每次失败都 `mem::forget` 一条 `Vec<u8>`：现在错误串是原地
+  复用的缓冲，连续失败不换指针、也不泄漏。
+- `eb_version` 写死 `ebook-abi 0.1.0`，与 workspace 的 `0.2.1` 脱节：现在由
+  `CARGO_PKG_VERSION` 编进来。
+- 标量面返回的字符串指针原来是 thread-local，跨线程用（或换线程再取）就失效，
+  只靠「调用都在主线程」的口头约定：现在是进程级、带 `Mutex` 的环形缓冲，
+  任意线程调用都安全，寿命写进头文件（后续 64 次取字符串）。
+- 无效句柄上的字符串 getter 返回 `NULL`：现在统一返回空串，宿主不必逐处判空。
+- 外部链接的 `EbLink.spine` 沿用 reader 的 `0`（「相对当前章」没意义）：标量面
+  统一说 `-1`，宿主只看 `spine` 也不会误跳第 1 章。
+- `eb_plain_select` 的端点越界会返回 0 块矩形并留下一份空选区：现在给 `-2`
+  并清空，不留下对不上号的矩形表。
 
 - `web/selection.js` 漏解构 `onSwipeStart` / `onSwipeMove` / `onSwipeEnd` /
   `onSwipeCancel`，横向滑动一按就抛 `ReferenceError`。
