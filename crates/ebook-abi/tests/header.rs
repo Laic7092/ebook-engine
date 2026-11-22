@@ -81,6 +81,47 @@ fn header_declares_exactly_the_exported_symbols() {
     );
 }
 
+/// `pub extern "C" fn` 只有带上 `#[no_mangle]` 才会以 C 名字导出。文档注释
+/// 里的 `#[no_mangle]` 只是文字：它必须真的是紧挨着函数的一项属性。头文件
+/// 测试只比对名字，抓不到这个，所以在这里扫一遍源码。
+#[test]
+fn every_c_export_is_no_mangle() {
+    for (file, source) in [
+        ("src/lib.rs", include_str!("../src/lib.rs")),
+        ("src/plain.rs", include_str!("../src/plain.rs")),
+    ] {
+        let lines: Vec<&str> = source.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            let declaration = line.trim_start();
+            if !(declaration.starts_with("pub extern \"C\" fn ")
+                || declaration.starts_with("pub unsafe extern \"C\" fn "))
+            {
+                continue;
+            }
+            let mut no_mangle = false;
+            for prev in lines[..i].iter().rev() {
+                let prev = prev.trim();
+                if prev.starts_with("#[") {
+                    if prev == "#[no_mangle]" {
+                        no_mangle = true;
+                    }
+                    continue;
+                }
+                if prev.is_empty() || prev.starts_with("//") {
+                    continue;
+                }
+                break;
+            }
+            assert!(
+                no_mangle,
+                "{file}:{}: this C export has no #[no_mangle] attribute:\n{}",
+                i + 1,
+                line
+            );
+        }
+    }
+}
+
 #[test]
 fn header_version_matches_the_library() {
     let declared = HEADER

@@ -434,7 +434,8 @@ pub extern "C" fn eb_plain_toc_title(id: i32, index: u32) -> *const c_char {
     .unwrap_or_else(|| scratch(""))
 }
 
-/// 目录项落在哪一项 spine 上（-1：不在阅读顺序里）。#[no_mangle]
+/// 目录项落在哪一项 spine 上（-1：不在阅读顺序里）。
+#[no_mangle]
 pub extern "C" fn eb_plain_toc_spine(id: i32, index: u32) -> i32 {
     with_engine(id, |engine| {
         engine
