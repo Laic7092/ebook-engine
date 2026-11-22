@@ -36,7 +36,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use ebook_reader::{SelectionResult, Style, Viewport};
+use ebook_reader::{EdgesF, SelectionResult, Style, Viewport};
 
 use crate::EbEngine;
 
@@ -733,6 +733,69 @@ pub extern "C" fn eb_plain_page_slice_raw(
             None => return -1,
         };
         write_raw(&path, &bitmap)
+    })
+}
+
+/// 排版一章并光栅化它的一个滚动窗口，一次调用完成。
+///
+/// 宿主在后台线程取瓦片时，`layout_scroll` 和 `bitmap_window` 必须在同一次
+/// 锁里：否则另一次调用可能在这两步之间换掉“最近一次排版”，画出来的就是
+/// 另一章。参数与 `eb_plain_layout_scroll` + `eb_plain_page_slice_raw` 相同。
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn eb_plain_scroll_slice_raw(
+    id: i32,
+    spine: u32,
+    width: f32,
+    height: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    left: f32,
+    font_scale: f32,
+    line_scale: f32,
+    letter_px: f32,
+    word_px: f32,
+    align: u32,
+    y: f32,
+    slice_height: f32,
+    scale: f32,
+    ink: u32,
+    paper: u32,
+    bold: bool,
+    path: *const c_char,
+) -> i32 {
+    guard(|| {
+        let Some(path) = c_path(path) else {
+            crate::set_last_error("位图路径为空");
+            return -1;
+        };
+        let result = with_engine(id, |engine| {
+            let mut viewport = Viewport::new(width, height);
+            viewport.insets = EdgesF {
+                top,
+                right,
+                bottom,
+                left,
+            };
+            let style = Style {
+                font_scale,
+                line_scale,
+                letter_px,
+                word_px,
+                align,
+            };
+            engine.layout_scroll(spine as usize, viewport, style)?;
+            engine.bitmap_window(0, y, slice_height, scale, ink, paper, bold)
+        });
+        match result {
+            Some(Ok(bitmap)) => write_raw(&path, &bitmap),
+            Some(Err(error)) => {
+                crate::set_last_error(format!("{error:?}"));
+                -2
+            }
+            None => -1,
+        }
     })
 }
 

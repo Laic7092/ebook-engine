@@ -251,6 +251,15 @@ int32_t eb_plain_page_slice_raw(int32_t id, uint32_t page, float y, float height
                                 float scale, uint32_t ink, uint32_t paper,
                                 bool bold, const char *path);
 
+/* 排一章并取它的一个滚动窗口，一次调用完成：后台线程取瓦片时，排版与光栅
+ * 之间不会插入别的调用。参数同 eb_plain_layout_scroll + eb_plain_page_slice_raw。 */
+int32_t eb_plain_scroll_slice_raw(int32_t id, uint32_t spine, float width, float height,
+                                  float top, float right, float bottom, float left,
+                                  float font_scale, float line_scale, float letter_px,
+                                  float word_px, uint32_t align, float y, float height_slice,
+                                  float scale, uint32_t ink, uint32_t paper, bool bold,
+                                  const char *path);
+
 /* ---- 位置与交互 ---- */
 
 /* 页内点（点坐标）→ 原文位置；page == -1 表示没有命中。 */

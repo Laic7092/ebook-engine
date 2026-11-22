@@ -161,6 +161,36 @@ fn lays_out_scroll_and_writes_a_slice() {
         assert_eq!(lower_bytes.len(), bytes.len());
     }
 
+    // 新入口在同一个锁里排版 + 取窗口：后台线程不用先 layout 再 slice。
+    let one = std::env::temp_dir().join("eb-plain-scroll-one-call.raw");
+    let c_one = CString::new(one.to_str().unwrap()).unwrap();
+    assert_eq!(
+        eb_plain_scroll_slice_raw(
+            engine,
+            0,
+            400.0,
+            700.0,
+            0.0,
+            24.0,
+            0.0,
+            24.0,
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            0,
+            0.0,
+            300.0,
+            2.0,
+            0,
+            0,
+            false,
+            c_one.as_ptr(),
+        ),
+        0
+    );
+    assert_eq!(std::fs::read(&one).unwrap(), bytes);
+
     let hit = eb_plain_hit(engine, 0, 40.0, 40.0);
     assert!(hit.page >= 0, "滚动页上应该有位置");
     assert!((0.0..=1.0).contains(&hit.progress));
