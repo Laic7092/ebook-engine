@@ -13,6 +13,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # 与 pages.yml 一致：runner 在境外，直连比走国内镜像快也更稳。gh-proxy 对
+  # 数据中心 IP 回 403，v0.2.1 / v0.2.2 的 CI 都是卡在 hyph-en-us.tex 这一步。
+  GH_PROXY: ""
 
 jobs:
   check:
