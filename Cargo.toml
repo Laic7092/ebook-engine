@@ -23,7 +23,6 @@ publish = false
 [workspace.dependencies]
 ebook-ir = { path = "crates/ebook-ir" }
 ebook-layout = { path = "crates/ebook-layout", default-features = false }
-ebook-cache = { path = "crates/ebook-cache" }
 ebook-format = { path = "crates/ebook-format" }
 ebook-render = { path = "crates/ebook-render" }
 ebook-reader = { path = "crates/ebook-reader" }

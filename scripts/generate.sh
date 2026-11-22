@@ -120,9 +120,9 @@ if [ "$WEB_ONLY" = 0 ]; then
 		elif "$PYTHON" -c 'import fontTools' >/dev/null 2>&1; then
 			WOFF="python-fonttools"
 		else
-			echo "缺少 woff/woff2 转换工具。运行 scripts/setup.sh，或：" >&2
-			echo "  cargo install woff --version 0.6.4 --features binary --locked" >&2
-			exit 1
+			# 只影响两个夹具文件：ebook-font 的 woff 测试会自己 skip。
+			# 造数据的工具不该把整条闸门（fmt/clippy/test）拦死。
+			WOFF="missing"
 		fi
 	fi
 
@@ -145,9 +145,14 @@ if [ "$WEB_ONLY" = 0 ]; then
 		fi
 	}
 
-	say "生成 WOFF / WOFF2 测试字体"
-	make_woff "$FONT_DIR/test.woff"
-	make_woff "$FONT_DIR/test.woff2"
+	if [ "$WOFF" = "missing" ]; then
+		say "跳过 WOFF/WOFF2 测试字体：没有 woff CLI，也没有 fontTools"
+		say "  （ebook-font 的 woff 测试会 skip；要跑它们：cargo install woff --version 0.6.4 --features binary --locked）"
+	else
+		say "生成 WOFF / WOFF2 测试字体"
+		make_woff "$FONT_DIR/test.woff"
+		make_woff "$FONT_DIR/test.woff2"
+	fi
 fi
 
 if [ "$FORCE" = 1 ] || [ ! -s "$ROOT/web/latin.ttf" ] || ! cmp -s "$FONT" "$ROOT/web/latin.ttf"; then

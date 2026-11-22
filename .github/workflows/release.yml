@@ -22,8 +22,37 @@ permissions:
   contents: write
 
 jobs:
+  # 发版前先等这次提交的 CI 变绿：v0.2.1 / v0.2.2 都是 CI 红着发的版。
+  # 手动 dispatch（没有 tag）时直接放过，只用于试跑产物。
+  gate:
+    name: CI must be green
+    runs-on: ubuntu-latest
+    steps:
+      - name: wait for CI on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          case "${GITHUB_REF}" in
+            refs/tags/*) ;;
+            *) echo "not a tag, skipping the gate"; exit 0 ;;
+          esac
+          check="fmt / clippy / test / xtask"
+          for _ in $(seq 1 60); do
+            conclusion="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs" \
+              --jq "[.check_runs[] | select(.name == \"${check}\")] | .[0].conclusion // \"\"")"
+            case "$conclusion" in
+              success) echo "CI: success"; exit 0 ;;
+              "") echo "CI not started yet, checking again in 30s"; sleep 30 ;;
+              *) echo "CI: ${conclusion}, refusing to ship" >&2; exit 1 ;;
+            esac
+          done
+          echo "CI still not green after 30 minutes" >&2
+          exit 1
+
   build:
     name: ${{ matrix.target }}
+    needs: gate
     strategy:
       fail-fast: false
       matrix:
