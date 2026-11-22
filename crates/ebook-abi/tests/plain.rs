@@ -142,7 +142,14 @@ fn lays_out_scroll_and_writes_a_slice() {
         ),
         0
     );
-    assert_ne!(std::fs::read(&lower).unwrap(), bytes);
+    let lower_bytes = std::fs::read(&lower).unwrap();
+    if has_font {
+        // 流里有字：不同 y 拿到的必须不是同一张图。
+        assert_ne!(lower_bytes, bytes, "不同 y 的瓦片居然逐字节相同");
+    } else {
+        // 没有字体时整页是纸（StubMeasurer），两片都白，尺寸相同即可。
+        assert_eq!(lower_bytes.len(), bytes.len());
+    }
 
     let hit = eb_plain_hit(engine, 0, 40.0, 40.0);
     assert!(hit.page >= 0, "滚动页上应该有位置");
