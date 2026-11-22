@@ -329,8 +329,12 @@ fn image_size(&self, id: ImageId) -> Option<SizeF>;
 ### 4.6 `LayoutOptions` / `Limits`
 
 ```rust
-pub struct LayoutOptions { pub limits: Limits }
-impl LayoutOptions { pub fn with_limits(limits: Limits) -> Self; }
+pub enum Mode { Paged, Scroll }
+pub struct LayoutOptions { pub limits: Limits, pub mode: Mode }
+impl LayoutOptions {
+    pub fn with_limits(limits: Limits) -> Self;
+    pub fn scroll() -> Self;
+}
 
 pub struct Limits {
     pub max_nodes: u32,
@@ -361,7 +365,34 @@ pub struct Limits {
 
 `max_image_pixels` 是**像素数**不是字节数（`w × h`，按资源给出的固有尺寸）。
 
-### 4.7 `LayoutCache`（`ebook-cache`）
+### 4.7 滚动模式
+
+```rust
+pub enum Mode { Paged, Scroll }
+
+// ebook-render
+pub fn paint_window(ir: &LayoutResult, page: u32, top: f32,
+                    surface: &mut dyn Surface,
+                    res: &mut dyn Resources) -> Result<(), RenderError>;
+```
+
+- `Mode::Scroll` 只改变“取窗口”：断行与块布局和 `Mode::Paged` 完全相同，
+  所以滚动/分页切换不会让行或排版位置分裂。
+- 整章产出一页：`Page.origin == (0, 0)`，`Page.size.h` 是内容实际高度
+  （最后一行底边），`Page.ops` / `Page.lines` 覆盖整章。
+- 上下 `PageConstraint.margin` 应传 0，左右保留；宿主在滚动容器上自己留
+  上下白，瓦片之间才没有空白带。
+- `paint_window(ir, 0, y, surface, res)` 把流坐标 `y` 画到 surface 的 y=0，
+  surface 只需瓦片高；宽度是整页宽（含左右留白）。
+- 命中仍用 `Reader::hit(0, x, y)`（`inset.top == 0` 时 `y` 就是流坐标）；
+  `Reader::progress` 按行计算，滚动模式不需要新公式。
+- `ebook-reader` 对应入口：`Engine::layout_scroll`、`content_height`、
+  `bitmap_window`；C ABI：`eb_plain_layout_scroll`、`eb_plain_content_height`、
+  `eb_plain_page_slice_raw`。
+- 并发与分页相同：一个 `Engine` 是 `&mut`，多个引擎可以同时排版/取瓦片；
+  没有全局状态。
+
+### 4.8 `LayoutCache`（`ebook-cache`）
 
 ```rust
 pub struct LayoutCache { /* private */ }
@@ -387,7 +418,7 @@ impl LayoutCache {
   `fingerprint(...)` + 自己持有结果。
 - 缓存是 caller-owned：没有全局单例、没有 `thread_local`。
 
-### 4.8 `Reader` / `Selection` / `SelectionRect`
+### 4.9 `Reader` / `Selection` / `SelectionRect`
 
 ```rust
 pub struct Reader<'a> { /* &LayoutResult */ }
@@ -429,7 +460,7 @@ impl<'a> Reader<'a> {
 `progress` 用“行号 + 行内字节占比”，不用像素：同一内容在任意页面尺寸下进度相同，
 页边界连续且单调不减。
 
-### 4.9 `Hyphenator`
+### 4.10 `Hyphenator`
 
 ```rust
 pub trait Hyphenator {
@@ -454,7 +485,7 @@ pub struct English; // ushyphmax（hyph-utf8）的 Liang 算法实现
   `ebook-font` 需要时用 `ebook-font/hyphen-en` 打开。
 - `name()` 用于缓存键与诊断；改词典必须改这个名字，否则缓存的旧分页会继续命中。
 
-### 4.10 `Op::Link` 与 `Location` 的分工
+### 4.11 `Op::Link` 与 `Location` 的分工
 
 | 问题 | 用什么 | 产出方 |
 |---|---|---|
@@ -557,7 +588,8 @@ trait Renderer {
 ```
 
 入参是不可变引用，类型上禁止改坐标。`paint()` 是共同实现：它只在这里把
-**排版流坐标**平移成页面坐标。
+**排版流坐标**平移成页面坐标。`paint_window(ir, page, top, surface, res)` 是它的
+窗口版：把流坐标 `top` 画到 surface 的 y=0，surface 只占瓦片高，供滚动模式用。
 
 | `Surface` 方法 | 调用方保证 |
 |---|---|

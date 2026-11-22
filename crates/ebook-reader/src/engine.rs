@@ -16,7 +16,9 @@ use ebook_ir::{
     EdgesF, FontId, GlyphBitmap, ImageData, ImageId, LayoutResult, Location, PointF, Resources,
     Rgba8, StyledDoc,
 };
-use ebook_layout::{Layout, LayoutEnv, NoImageSizes, PageConstraint, Reader, StubMeasurer};
+use ebook_layout::{
+    Layout, LayoutEnv, LayoutOptions, Mode, NoImageSizes, PageConstraint, Reader, StubMeasurer,
+};
 use ebook_raster::{RgbaSurface, Tone};
 use ebook_render::ScaledSurface;
 
@@ -25,6 +27,11 @@ use crate::types::{Bitmap, EngineError, Limits, PageBox, SelectionResult, Style,
 /// 最近一次排版的产物。交互查询（命中/选区/进度/锚点）只认这一份。
 struct LastLayout {
     spine: usize,
+    mode: Mode,
+    viewport: Viewport,
+    style: Style,
+    font_rev: u32,
+    limits: Limits,
     ir: LayoutResult,
     doc: StyledDoc,
     anchors: Vec<ChapterAnchor>,
@@ -93,6 +100,8 @@ pub struct Engine {
     font_error: Option<String>,
     images: ImageCache,
     limits: Limits,
+    /// 每次成功注册字体就加一；排版缓存靠它失效。
+    font_rev: u32,
 }
 
 impl Engine {
@@ -123,6 +132,7 @@ impl Engine {
             font_error: None,
             images: ImageCache::default(),
             limits: Limits::default(),
+            font_rev: 0,
         })
     }
 
@@ -172,6 +182,41 @@ impl Engine {
         viewport: Viewport,
         style: Style,
     ) -> Result<(), EngineError> {
+        self.layout_mode(spine, viewport, style, Mode::Paged)
+    }
+
+    /// 把一章排成**一整页滚动流**：`Page.origin` 为 0，`Page.size.h` 是内容
+    /// 实际高度。`viewport.height` 不参与切页（它只决定视口宽高比，宿主取
+    /// 窗口用 `bitmap_window`）；上下留白应由调用方传 0，左右留白保留。
+    pub fn layout_scroll(
+        &mut self,
+        spine: usize,
+        viewport: Viewport,
+        style: Style,
+    ) -> Result<(), EngineError> {
+        self.layout_mode(spine, viewport, style, Mode::Scroll)
+    }
+
+    fn layout_mode(
+        &mut self,
+        spine: usize,
+        viewport: Viewport,
+        style: Style,
+        mode: Mode,
+    ) -> Result<(), EngineError> {
+        // 同一章、同一视口、同一样式、同一字体：排版是纯函数，直接复用。
+        // 滚动模式一屏要取多个瓦片，这一条让一章只排一次。
+        if let Some(last) = &self.last {
+            if last.spine == spine
+                && last.mode == mode
+                && last.viewport == viewport
+                && last.style == style
+                && last.font_rev == self.font_rev
+                && last.limits == self.limits
+            {
+                return Ok(());
+            }
+        }
         let (mut doc, anchors) = self.backend.chapter(spine).map_err(|error| {
             let message = format!("{error:?}");
             self.last_error = Some(message.clone());
@@ -197,11 +242,20 @@ impl Engine {
             };
             let constraint =
                 PageConstraint::new(viewport.width, viewport.height).with_margin(viewport.insets);
-            Layout::new().layout(&doc, &env, &constraint)
+            let options = LayoutOptions {
+                mode,
+                ..LayoutOptions::default()
+            };
+            Layout::new().layout_with(&doc, &env, &constraint, &options)
         };
 
         self.last = Some(LastLayout {
             spine,
+            mode,
+            viewport,
+            style,
+            font_rev: self.font_rev,
+            limits: self.limits,
             ir,
             doc,
             anchors,
@@ -250,11 +304,67 @@ impl Engine {
             .collect()
     }
 
+    /// 滚动模式的内容高度（本章流坐标总长）；分页模式/没排版时 0。
+    /// 分页模式请用 `pages()`——每页高度是视口内容盒，不是全书高度。
+    pub fn content_height(&self) -> f32 {
+        let Some(last) = self.last.as_ref() else {
+            return 0.0;
+        };
+        if last.mode != Mode::Scroll {
+            return 0.0;
+        }
+        last.ir.pages.first().map_or(0.0, |page| page.size.h)
+    }
+
+    /// 最近一次排版是不是滚动模式。
+    pub fn is_scroll(&self) -> bool {
+        self.last
+            .as_ref()
+            .is_some_and(|last| last.mode == Mode::Scroll)
+    }
+
     /// 光栅化一页。`scale` 是设备像素比（1..4），`ink`/`paper` 是
     /// `0xRRGGBBAA`：`ink` 为 0 表示不做墨色修正，`paper` 为 0 表示白纸。
     pub fn bitmap(
         &mut self,
         page: u32,
+        scale: f32,
+        ink: u32,
+        paper: u32,
+        bold: bool,
+    ) -> Result<Bitmap, EngineError> {
+        self.render_bitmap(page, None, scale, ink, paper, bold)
+    }
+
+    /// 光栅化**流坐标窗口**：从 `top` 起、`height` 点高的一片。
+    ///
+    /// 滚动模式的一枚瓦片就是它：`top` 是瓦片在本章流坐标里的起点，
+    /// surface 只有瓦片高，不会分配整章位图。宽度仍是整页宽。
+    /// `height` 不要求是视口高；同一个函数也可画分页页面的一段（分页页的
+    /// 内容 y 从 `page.origin` 起，宿主可先取 `pages()` 再换算）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn bitmap_window(
+        &mut self,
+        page: u32,
+        top: f32,
+        height: f32,
+        scale: f32,
+        ink: u32,
+        paper: u32,
+        bold: bool,
+    ) -> Result<Bitmap, EngineError> {
+        if !top.is_finite() || !height.is_finite() || height <= 0.0 {
+            return Err(EngineError::Render(format!(
+                "window {top}+{height} is not a box"
+            )));
+        }
+        self.render_bitmap(page, Some((top.max(0.0), height)), scale, ink, paper, bold)
+    }
+
+    fn render_bitmap(
+        &mut self,
+        page: u32,
+        window: Option<(f32, f32)>,
         scale: f32,
         ink: u32,
         paper: u32,
@@ -282,7 +392,10 @@ impl Engine {
         };
         let box_size = info.box_size();
         let width = (box_size.w * scale).round().max(1.0) as u32;
-        let height = (box_size.h * scale).round().max(1.0) as u32;
+        let height = match window {
+            Some((_, h)) => (h * scale).round().max(1.0) as u32,
+            None => (box_size.h * scale).round().max(1.0) as u32,
+        };
         if (width as u64) * (height as u64) > limits.max_page_pixels {
             return Err(EngineError::TooLarge { width, height });
         }
@@ -309,7 +422,13 @@ impl Engine {
                 budget: limits.image_cache_bytes,
             };
             let mut scaled = ScaledSurface::new(&mut surface, scale);
-            if ebook_render::paint(&last.ir, page, &mut scaled, &mut res).is_err() {
+            let painted = match window {
+                Some((top, _)) => {
+                    ebook_render::paint_window(&last.ir, page, top, &mut scaled, &mut res)
+                }
+                None => ebook_render::paint(&last.ir, page, &mut scaled, &mut res),
+            };
+            if painted.is_err() {
                 return Err(EngineError::Render(format!("page {page}")));
             }
         }
@@ -397,6 +516,7 @@ impl Engine {
         match font.try_add(bytes) {
             Ok(id) => {
                 self.font_error = None;
+                self.font_rev = self.font_rev.wrapping_add(1);
                 Ok(id)
             }
             Err(error) => {
@@ -417,6 +537,7 @@ impl Engine {
         match font.try_add_styled(&face.family, face.weight, face.style, face.bytes) {
             Ok(id) => {
                 self.font_error = None;
+                self.font_rev = self.font_rev.wrapping_add(1);
                 Ok(id)
             }
             Err(error) => {

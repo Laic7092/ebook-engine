@@ -6,7 +6,7 @@ pub mod scale;
 pub mod stats;
 pub mod svg;
 
-pub use paint::paint;
+pub use paint::{paint, paint_window};
 pub use scale::ScaledSurface;
 pub use stats::{stats, Stats};
 pub use svg::{SvgRenderer, SvgSurface};

@@ -89,6 +89,72 @@ fn lays_out_and_writes_a_raw_page() {
 }
 
 #[test]
+fn lays_out_scroll_and_writes_a_slice() {
+    let (engine, has_font) = open_book();
+    // 滚动：上下留白 0，左右 24；height 只是视口高，不参与切页。
+    let rc = eb_plain_layout_scroll(
+        engine, 0, 400.0, 700.0, 0.0, 24.0, 0.0, 24.0, 1.0, 1.0, 0.0, 0.0, 0,
+    );
+    assert_eq!(rc, 0, "滚动排版失败");
+    assert_eq!(eb_plain_page_count(engine), 1, "整章一页");
+
+    let height = eb_plain_content_height(engine);
+    assert!(height > 0.0, "content height {height}");
+    let info = eb_plain_page_info(engine, 0);
+    assert_eq!(info.ok, 1);
+    assert!((info.height - height).abs() < 0.01);
+    assert_eq!(info.width, 352.0);
+
+    let path = std::env::temp_dir().join("eb-plain-scroll-slice.raw");
+    let c_path = CString::new(path.to_str().unwrap()).unwrap();
+    let rc = eb_plain_page_slice_raw(engine, 0, 0.0, 300.0, 2.0, 0, 0, false, c_path.as_ptr());
+    assert_eq!(rc, 0, "瓦片光栅化失败");
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(&bytes[..4], b"EQP1");
+    let width = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+    let slice_height = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+    assert_eq!(width, 800);
+    assert_eq!(slice_height, 600);
+    assert_eq!(bytes.len(), 12 + (width * slice_height * 4) as usize);
+
+    // 同一 y 再来一次逐字节相同；不同 y 是不同的一片。
+    let again = std::env::temp_dir().join("eb-plain-scroll-slice-again.raw");
+    let c_again = CString::new(again.to_str().unwrap()).unwrap();
+    assert_eq!(
+        eb_plain_page_slice_raw(engine, 0, 0.0, 300.0, 2.0, 0, 0, false, c_again.as_ptr(),),
+        0
+    );
+    assert_eq!(std::fs::read(&again).unwrap(), bytes);
+
+    let lower = std::env::temp_dir().join("eb-plain-scroll-lower.raw");
+    let c_lower = CString::new(lower.to_str().unwrap()).unwrap();
+    assert_eq!(
+        eb_plain_page_slice_raw(
+            engine,
+            0,
+            height / 2.0,
+            300.0,
+            2.0,
+            0,
+            0,
+            false,
+            c_lower.as_ptr(),
+        ),
+        0
+    );
+    assert_ne!(std::fs::read(&lower).unwrap(), bytes);
+
+    let hit = eb_plain_hit(engine, 0, 40.0, 40.0);
+    assert!(hit.page >= 0, "滚动页上应该有位置");
+    assert!((0.0..=1.0).contains(&hit.progress));
+
+    if !has_font {
+        eprintln!("no font on this machine: slices are paper, as they should be");
+    }
+    eb_plain_close(engine);
+}
+
+#[test]
 fn no_font_makes_blank_pages() {
     // 没有注册字体时排版仍然出页（StubMeasurer），但位图上一个字也没有：
     // 这正是 iOS 上「有页码、无正文」的样子。

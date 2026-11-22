@@ -3,7 +3,7 @@
 //! 用 `fixtures/demo.txt`：文本格式和 EPUB 走同一套 spine/TOC/IR 路径，
 //! 但没有字体也能跑（字形缺失时 `paint` 画空白页，几何仍然完整）。
 
-use ebook_reader::{Engine, Location, Style, Viewport};
+use ebook_reader::{EdgesF, Engine, Location, Style, Viewport};
 
 fn demo() -> Vec<u8> {
     std::fs::read(concat!(
@@ -114,6 +114,83 @@ fn style_changes_repaginate_without_touching_geometry() {
     for page in engine.pages() {
         assert!((page.width - (400.0 - 48.0)).abs() < 0.5);
         assert_eq!(page.inset.left, 24.0);
+    }
+}
+
+#[test]
+fn scroll_mode_is_one_tall_page() {
+    let mut engine = Engine::open(demo(), "demo.txt").unwrap();
+    let mut viewport = Viewport::new(400.0, 700.0);
+    // 滚动模式：上下留白交给宿主，左右留白留给页。
+    viewport.insets = EdgesF {
+        top: 0.0,
+        right: 24.0,
+        bottom: 0.0,
+        left: 24.0,
+    };
+    engine.layout_scroll(0, viewport, Style::default()).unwrap();
+    assert!(engine.is_scroll());
+    assert_eq!(engine.page_count(), 1);
+    let height = engine.content_height();
+    assert!(height > 0.0, "content height {height}");
+
+    let top = engine
+        .bitmap_window(0, 0.0, 120.0, 1.0, 0, 0, false)
+        .unwrap();
+    assert_eq!(top.width, 400);
+    assert_eq!(top.height, 120);
+    assert_eq!(top.rgba.len(), 400 * 120 * 4);
+    let bottom = engine
+        .bitmap_window(0, (height - 120.0).max(0.0), 120.0, 1.0, 0, 0, false)
+        .unwrap();
+    assert_eq!(bottom.width, 400);
+    assert_eq!(bottom.height, 120);
+
+    // 窗口必须是正的；越界页号仍然是错误。
+    assert!(engine.bitmap_window(0, 0.0, 0.0, 1.0, 0, 0, false).is_err());
+    assert!(engine
+        .bitmap_window(9, 0.0, 100.0, 1.0, 0, 0, false)
+        .is_err());
+
+    // 命中仍是页内坐标：滚动页的 inset.top 是 0，所以 y 就是流坐标。
+    let hit = engine.hit(0, 60.0, 40.0).expect("第一行");
+    assert_eq!(hit.page, 0);
+    let progress = engine.progress(hit).unwrap();
+    assert!((0.0..=1.0).contains(&progress));
+    let later = engine.hit(0, 60.0, height / 2.0).expect("中间一行");
+    assert!(engine.progress(later).unwrap() >= progress);
+}
+
+#[test]
+fn scroll_tiles_render_on_independent_engines() {
+    // 一个 `Engine` 是 `&mut`，但书和排版没有全局状态：多个引擎可以同时
+    // 各自排一章、各自取瓦片。
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            std::thread::spawn(|| {
+                let mut engine = Engine::open(demo(), "demo.txt").unwrap();
+                let mut viewport = Viewport::new(400.0, 700.0);
+                viewport.insets = EdgesF {
+                    top: 0.0,
+                    right: 24.0,
+                    bottom: 0.0,
+                    left: 24.0,
+                };
+                engine.layout_scroll(0, viewport, Style::default()).unwrap();
+                let height = engine.content_height();
+                let tile = engine
+                    .bitmap_window(0, height / 3.0, 240.0, 1.0, 0, 0, false)
+                    .unwrap();
+                (height, tile.width, tile.height, tile.rgba.len())
+            })
+        })
+        .collect();
+    for handle in handles {
+        let (height, width, tile_height, bytes) = handle.join().unwrap();
+        assert!(height > 0.0);
+        assert_eq!(width, 400);
+        assert_eq!(tile_height, 240);
+        assert_eq!(bytes, 400 * 240 * 4);
     }
 }
 

@@ -105,16 +105,40 @@ impl Default for PageConstraint {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Mode {
+    /// 分页：`pages` 覆盖整章，宿主一页一页地翻。
+    #[default]
+    Paged,
+    /// 滚动：整章排成**一页**，`Page.origin` 为 0，`Page.size.h` 是内容高度。
+    /// 宿主按任意 `y` 取窗口（`ebook_render::paint_window`）画成瓦片。
+    Scroll,
+}
+
 /// 一次排版的选项。零值表示“全部走默认”：`Limits` 里为 0 的字段由
 /// [`Limits::resolved`] 换成默认上限。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LayoutOptions {
     pub limits: Limits,
+    pub mode: Mode,
 }
 
 impl LayoutOptions {
     pub fn with_limits(limits: Limits) -> Self {
-        Self { limits }
+        Self {
+            limits,
+            mode: Mode::Paged,
+        }
+    }
+
+    /// 滚动模式：整章一页，页高是实际内容高度。上下留白应由调用方传 0，
+    /// 左右留白仍留在页里；宿主在滚动容器上自己加顶部/底部留白，瓦片之间
+    /// 才不会出现空白带。
+    pub fn scroll() -> Self {
+        Self {
+            limits: Limits::default(),
+            mode: Mode::Scroll,
+        }
     }
 }
 
@@ -196,9 +220,19 @@ impl Layout {
             Some(workers) => units_of_parallel(&built.items, workers),
             None => units_of(&built.items),
         };
-        let plan = paginate::plan(&units, content.h, limits.max_pages as usize);
+        // 滚动模式的页高：整章内容实际占的高度（最后一行的底边），
+        // 不是视口高度。它只由断行结果决定，和窗口多大无关。
+        let flow_height = units.iter().map(|unit| unit.y + unit.h).fold(0.0, f32::max);
+        let plan = match opts.mode {
+            Mode::Paged => paginate::plan(&units, content.h, limits.max_pages as usize),
+            Mode::Scroll => paginate::plan_scroll(),
+        };
 
-        let mut builder = paginate::PageBuilder::new(content, c.margin);
+        let page_size = match opts.mode {
+            Mode::Paged => content,
+            Mode::Scroll => SizeF::new(content.w, flow_height),
+        };
+        let mut builder = paginate::PageBuilder::new(page_size, c.margin);
         let mut ops: Vec<Op> = Vec::new();
         let mut lines: Vec<LineBox> = Vec::new();
         let mut issues: Vec<Issue> = Vec::new();
@@ -312,6 +346,17 @@ impl Layout {
             }
         }
         builder.close(ops.len() as u32, lines.len() as u32);
+
+        // 滚动模式被 `max_lines` 截断时，页高只算真正产出的行，不把没排的
+        // 内容也算进去：宿主拿到的是一个可滚动的真实高度。
+        if opts.mode == Mode::Scroll && truncated {
+            if let Some(page) = builder.pages.first_mut() {
+                page.size.h = lines
+                    .iter()
+                    .map(|line| line.rect.bottom())
+                    .fold(0.0, f32::max);
+            }
+        }
 
         // 截断后丢弃尾部不再被行引用的字形，保证 IR 里没有悬空的字形区间。
         if truncated {

@@ -105,6 +105,18 @@ pub(crate) fn plan(units: &[Unit], page_h: f32, max_pages: usize) -> Plan {
     }
 }
 
+/// 滚动模式的计划：整章只有一页，从 unit 0、y 0 开始。
+///
+/// 断行结果和分页模式完全一样，这里只是不切页；`Page.size.h` 由调用方
+/// 换成内容实际高度。
+pub(crate) fn plan_scroll() -> Plan {
+    Plan {
+        starts: alloc::vec![PageStart { unit: 0, y: 0.0 }],
+        truncated: false,
+        cut: None,
+    }
+}
+
 fn resolve(units: &[Unit], s: usize, greedy: usize) -> usize {
     let mut cut = greedy;
     while cut > s + 1 {

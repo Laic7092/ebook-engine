@@ -15,6 +15,29 @@ pub fn paint(
     Ok(())
 }
 
+/// 把排版流里从 `top` 开始的一段画到 surface：流坐标 `top` 落在 surface 的 y=0。
+///
+/// 滚动模式用：surface 是一个瓦片（瓦片高度由宿主决定），`top` 是瓦片在
+/// 本章流坐标里的起点。左右留白仍画进 surface（和分页模式一致）；上下留白
+/// 不参与平移——宿主在滚动容器上自己留，瓦片之间才没有空白带。
+///
+/// surface 不会被清空：调用方先清成纸色（`Engine::bitmap_window` 已经做了）。
+///
+/// `top` 是流坐标。分页模式下要原样画一页，传 `page.origin.y - page.inset.top`；
+/// 滚动模式下 `page.origin.y` 就是 0，传瓦片的内容 y 即可。
+pub fn paint_window(
+    ir: &LayoutResult,
+    page: u32,
+    top: f32,
+    surface: &mut dyn Surface,
+    res: &mut dyn Resources,
+) -> Result<(), RenderError> {
+    let page = ir.page(page).ok_or(RenderError::NoSuchPage(page))?;
+    let origin = PointF::new(page.origin.x - page.inset.left, top);
+    paint_ops(ir, ir.display.op_slice(page.ops), surface, res, origin);
+    Ok(())
+}
+
 fn paint_ops(
     ir: &LayoutResult,
     ops: &[Op],

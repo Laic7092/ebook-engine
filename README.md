@@ -97,6 +97,7 @@ op 坐标是**排版流坐标**，不是页面内坐标。`Page.origin` 表示�
 |---|---|
 | 格式 | TXT / EPUB（ZIP stored+deflate、container/OPF/spine、XHTML、CSS 级联、命名实体、锚点）；TOC（EPUB3 nav / EPUB2 NCX）、链接、资源清单、字体声明、书目元数据、格式层诊断（`EpubIssueCode`） |
 | 排版 | 盒树、margin collapsing、UAX #14 断行、两端对齐、孤行寡行、强制分页、增量重排入口；`layout` 是全函数 |
+| 滚动 | `Mode::Scroll`：整章排成一页，`content_height` 给流长度，`paint_window` 按内容 y 取瓦片；与分页共用同一份断行，`Page.origin` 契约不变 |
 | 文本 | `TextMeasurer::shape`（默认逐字，`FontBook` 用 harfrust）、按簇双向重排（UAX #9）、字距/词距、可选断字词典、`TextRules` 三个中文政策开关 |
 | 替换元素 | 块级/行内图片（固有尺寸未知时占位）、ruby 注音 |
 | 契约 | IR 1.4：`Glyph.ch`、`Op::Link`、`GlyphRun.weight/style/underline`、`Issue`/`IssueCode`、`LayoutResult.truncated`、`LayoutStats` |
@@ -165,9 +166,11 @@ IR 是 wasm 与 JS 之间唯一的接口，而 JS 侧的解码器是手写的，
 
 ## 不做
 
-PDF；DRM；flex / grid；浏览器级 CSS 兼容；把 HTML 直接塞进 DOM 当渲染方案；滚动 / 瓦片模式（scroll / tile）。
+PDF；DRM；flex / grid；浏览器级 CSS 兼容；把 HTML 直接塞进 DOM 当渲染方案。
 
-DOM 方案尤其不能做：排版由浏览器决定，跨端一致、分页控制、增量重排全部不受控，也拿不到可测试的中间表示。滚动 / 瓦片模式会把分页从唯一模型降级成可选视图，`Page.origin` 与页切片契约随之失效，所以本轮明确不做。
+DOM 方案尤其不能做：排版由浏览器决定，跨端一致、分页控制、增量重排全部不受控，也拿不到可测试的中间表示。
+滚动不是第二套排版：`Mode::Scroll` 仍然走同一份断行与块布局，只是整章排成一页，
+宿主用 `paint_window` 按 y 取窗口画成瓦片；`Page.origin` 与页切片契约因此不失效。
 
 ---
 

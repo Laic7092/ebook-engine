@@ -350,6 +350,7 @@ IR 是位置编码，字段顺序就是字节布局。1.2–1.4 的新字段都�
 - 只实现成对可判定的 UAX #14 规则；需要上下文的规则明确不装。
 - 不做 flex / grid、浏览器级 CSS 兼容、DOM 直渲。
 - 不做 PDF、DRM。
-- 不做滚动/瓦片模式（scroll / tile）；分页是唯一的分页模型。
+- 滚动与分页共用同一份断行/块布局：`Mode::Scroll` 把整章排成一页，
+  宿主按内容 y 用 `paint_window` 取瓦片；分页仍是默认模型。
 - 不引 criterion；bench 用 `std::time::Instant`，输出可 diff 的
   `name<TAB>ns`，见 [scripts/bench.sh](../scripts/bench.sh)。

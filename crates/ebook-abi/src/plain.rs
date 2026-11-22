@@ -15,6 +15,10 @@
 //! ```
 //!
 //! 平台侧只读它：iOS 包成 `CGImage`，GTK 包成 `GdkMemoryTexture`。
+//!
+//! 滚动模式（`eb_plain_layout_scroll`）：整章排成一页，`eb_plain_content_height`
+//! 给出内容高度，`eb_plain_page_slice_raw` 按 `y`/`height` 把一片写成同格式的
+//! EQP1。宿主只分配瓦片大小的位图，不分配整章。
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{c_char, CStr, CString};
@@ -322,6 +326,55 @@ pub extern "C" fn eb_plain_layout(
     word_px: f32,
     align: u32,
 ) -> i32 {
+    layout_impl(
+        id, spine, width, height, top, right, bottom, left, font_scale, line_scale, letter_px,
+        word_px, align, false,
+    )
+}
+
+/// 把一章排成整页滚动流。参数同 `eb_plain_layout`；`height` 只作为视口高
+/// 度传入，不参与切页。`top`/`bottom` 应传 0（宿主自己留），`left`/`right`
+/// 仍留在页里。排完后 `eb_plain_page_info(id, 0).height` 是内容高度，
+/// `eb_plain_page_slice_raw` 按 `y` 取瓦片。
+#[no_mangle]
+pub extern "C" fn eb_plain_layout_scroll(
+    id: i32,
+    spine: u32,
+    width: f32,
+    height: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    left: f32,
+    font_scale: f32,
+    line_scale: f32,
+    letter_px: f32,
+    word_px: f32,
+    align: u32,
+) -> i32 {
+    layout_impl(
+        id, spine, width, height, top, right, bottom, left, font_scale, line_scale, letter_px,
+        word_px, align, true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_impl(
+    id: i32,
+    spine: u32,
+    width: f32,
+    height: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    left: f32,
+    font_scale: f32,
+    line_scale: f32,
+    letter_px: f32,
+    word_px: f32,
+    align: u32,
+    scroll: bool,
+) -> i32 {
     guard(|| {
         let mut viewport = Viewport::new(width, height);
         viewport.insets = ebook_reader::EdgesF {
@@ -337,7 +390,14 @@ pub extern "C" fn eb_plain_layout(
             word_px,
             align,
         };
-        match with_engine(id, |engine| engine.layout(spine as usize, viewport, style)) {
+        let result = with_engine(id, |engine| {
+            if scroll {
+                engine.layout_scroll(spine as usize, viewport, style)
+            } else {
+                engine.layout(spine as usize, viewport, style)
+            }
+        });
+        match result {
             Some(Ok(())) => 0,
             Some(Err(error)) => {
                 crate::set_last_error(format!("{error:?}"));
@@ -354,10 +414,18 @@ pub extern "C" fn eb_plain_spine(id: i32) -> i32 {
     with_engine(id, |engine| engine.spine().map_or(-1, |spine| spine as i32)).unwrap_or(-1)
 }
 
-/// 排出来的页数。
+/// 排出来的页数。滚动模式下是 1（整章一页）。
 #[no_mangle]
 pub extern "C" fn eb_plain_page_count(id: i32) -> u32 {
     with_engine(id, |engine| engine.page_count()).unwrap_or(0)
+}
+
+/// 滚动模式的内容高度（本章流坐标总长）；分页模式/没排版时 0。
+///
+/// 宿主用它决定滚动容器的 contentSize；瓦片 y 就在 `[0, height)` 里。
+#[no_mangle]
+pub extern "C" fn eb_plain_content_height(id: i32) -> f32 {
+    with_engine(id, |engine| engine.content_height()).unwrap_or(0.0)
 }
 
 /// 一页的逻辑尺寸与本章进度。
@@ -408,26 +476,65 @@ pub extern "C" fn eb_plain_page_raw(
             }
             None => return -1,
         };
-        let mut file = match File::create(&path) {
-            Ok(file) => file,
-            Err(error) => {
-                crate::set_last_error(format!("{path}: {error}"));
-                return -3;
-            }
+        write_raw(&path, &bitmap)
+    })
+}
+
+/// 光栅化滚动流的一个窗口，写成 `EQP1`：`y`/`height` 是点，`scale` 是设备
+/// 像素比。滚动模式的瓦片就是它；同一个 y 再来一次会得到逐字节相同的文件。
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn eb_plain_page_slice_raw(
+    id: i32,
+    page: u32,
+    y: f32,
+    height: f32,
+    scale: f32,
+    ink: u32,
+    paper: u32,
+    bold: bool,
+    path: *const c_char,
+) -> i32 {
+    guard(|| {
+        let Some(path) = c_path(path) else {
+            crate::set_last_error("位图路径为空");
+            return -1;
         };
-        let mut header = [0u8; 12];
-        header[..4].copy_from_slice(RAW_MAGIC);
-        header[4..8].copy_from_slice(&bitmap.width.to_le_bytes());
-        header[8..12].copy_from_slice(&bitmap.height.to_le_bytes());
-        if let Err(error) = file
-            .write_all(&header)
-            .and_then(|()| file.write_all(&bitmap.rgba))
-        {
+        let bitmap = match with_engine(id, |engine| {
+            engine.bitmap_window(page, y, height, scale, ink, paper, bold)
+        }) {
+            Some(Ok(bitmap)) => bitmap,
+            Some(Err(error)) => {
+                crate::set_last_error(format!("{error:?}"));
+                return -2;
+            }
+            None => return -1,
+        };
+        write_raw(&path, &bitmap)
+    })
+}
+
+/// 把位图写成 `EQP1`：`"EQP1" | u32 width | u32 height | RGBA8`。
+fn write_raw(path: &str, bitmap: &ebook_reader::Bitmap) -> i32 {
+    let mut file = match File::create(path) {
+        Ok(file) => file,
+        Err(error) => {
             crate::set_last_error(format!("{path}: {error}"));
             return -3;
         }
-        0
-    })
+    };
+    let mut header = [0u8; 12];
+    header[..4].copy_from_slice(RAW_MAGIC);
+    header[4..8].copy_from_slice(&bitmap.width.to_le_bytes());
+    header[8..12].copy_from_slice(&bitmap.height.to_le_bytes());
+    if let Err(error) = file
+        .write_all(&header)
+        .and_then(|()| file.write_all(&bitmap.rgba))
+    {
+        crate::set_last_error(format!("{path}: {error}"));
+        return -3;
+    }
+    0
 }
 
 // ---------------------------------------------------------------- 位置

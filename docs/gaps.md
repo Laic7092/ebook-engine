@@ -20,7 +20,7 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 3. **宿主/架构**：Web 打开书泄漏字节，没有增量重排，`max_lines` 拦截偏晚；
    翻页动画与跟手滑动仍在 JS 且基本不可用（G-19）。
 
-另有一批是**明确不做**的（竖排、flex/grid、PDF、DRM、scroll/tile），见第 5 节。
+另有一批是**明确不做**的（竖排、flex/grid、PDF、DRM），见第 5 节。
 
 ## 1. 严重度
 
@@ -275,7 +275,6 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 | flex / grid / 绝对定位 / float | 不追求浏览器级 CSS 兼容 |
 | PDF 输出 | 当前只有 SVG / RGBA / Canvas |
 | DRM 解密 | 只考虑 `encryption.xml` 的字体混淆，不做内容解密 |
-| scroll / tile 模式 | 分页是唯一模型，`Page.origin` 依赖它 |
 | 完整的 UAX #14 上下文规则 | 只实现成对可判定部分，已写在 `docs/design.md` |
 | 非英文断字词典 | `English` 已是 `hyphen-en` 可选 feature；其他语言由宿主注入 |
 

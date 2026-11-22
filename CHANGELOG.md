@@ -7,6 +7,12 @@
 
 ### Added
 
+- 滚动模式：`Mode::Scroll` 把整章排成一页（`Page.origin == (0, 0)`，
+  `Page.size.h` 是内容高度），`paint_window` 按内容 `y` 取瓦片。与分页共用同一份
+  断行/块布局，`Page.origin` 与页切片契约不变。`Engine::layout_scroll` /
+  `content_height` / `bitmap_window`，C ABI `eb_plain_layout_scroll` /
+  `eb_plain_content_height` / `eb_plain_page_slice_raw`。
+
 - 内嵌字体支持 WOFF / WOFF2：`FontBook` 在加载入口用纯 Rust 的 `wuff` 解包成
   sfnt，再复用现有 harfrust 整形、read-fonts 度量与光栅链路；Web 端「加载本地字体」
   也接受 `.woff` / `.woff2`。解包失败通过 `FontBook` 诊断与 `eb_font_error` 暴露，

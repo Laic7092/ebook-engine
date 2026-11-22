@@ -10,7 +10,7 @@ use ebook_layout::SelectionRect;
 ///
 /// 内边距是"正文避开工具栏"用的，与页边距叠加；它不改变页面几何，
 /// 所以工具栏显隐不需要重新排版。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Viewport {
     pub width: f32,
     pub height: f32,
@@ -38,7 +38,7 @@ impl Viewport {
 }
 
 /// 阅读设置。`font_scale` 只缩放文档字号/行高/间距，页面几何不变。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Style {
     pub font_scale: f32,
     /// 行距倍数（1.5 = 1.5em），覆盖书里写的 `line-height`。
@@ -152,7 +152,7 @@ pub struct SelectionResult {
 }
 
 /// 宿主的资源上限。native 与 wasm 的预算不同，所以是每个 `Engine` 的配置。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Limits {
     /// 单页像素上限，拦得住"把 scale 传成 1000"的调用。
     pub max_page_pixels: u64,
