@@ -25,7 +25,11 @@ impl Span {
     }
 
     pub fn end(&self) -> u32 {
-        self.start + self.len
+        // 饱和而不是回绕：`Span` 可以被外部输入（解码后的 IR）携带，
+        // `start + len` 溢出在 debug 下会 panic、release 下会回绕成一个
+        // 更小的 end，然后切片仍然越界。饱和之后所有 `get(range)` 都
+        // 只是返回 `None` / 空切片。
+        self.start.saturating_add(self.len)
     }
 
     pub fn as_range(&self) -> core::ops::Range<usize> {

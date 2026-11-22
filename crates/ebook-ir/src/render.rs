@@ -2,7 +2,7 @@ use alloc::vec::Vec;
 
 use crate::doc::ImageId;
 use crate::font::FontId;
-use crate::geom::{RectF, Rgba8, SizeF};
+use crate::geom::{PointF, RectF, Rgba8, SizeF};
 use crate::layout::{BorderBox, Fit, Glyph, GlyphRun, LayoutResult, Unresolved};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -53,6 +53,23 @@ impl Resources for NoResources {
 pub trait Surface {
     fn size(&self) -> SizeF;
     fn glyph_run(&mut self, run: &GlyphRun, glyphs: &[Glyph], res: &mut dyn Resources);
+
+    /// 与 [`Surface::glyph_run`] 相同，但先把 `run.origin` 平移 `shift`。
+    ///
+    /// 默认实现会 clone `GlyphRun`（含 `text`），只是兼容性兑底；热路径上的
+    /// 后端应该覆盖它，直接在绘制时加上平移，避免每帧为每个 run 复制字符串。
+    fn glyph_run_shifted(
+        &mut self,
+        run: &GlyphRun,
+        glyphs: &[Glyph],
+        shift: PointF,
+        res: &mut dyn Resources,
+    ) {
+        let mut moved = run.clone();
+        moved.origin = run.origin.shifted(shift.x, shift.y);
+        self.glyph_run(&moved, glyphs, res);
+    }
+
     fn rect(&mut self, rect: RectF, color: Rgba8);
     fn border(&mut self, border: &BorderBox);
     fn image(&mut self, id: ImageId, rect: RectF, fit: Fit, res: &mut dyn Resources);

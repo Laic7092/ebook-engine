@@ -578,7 +578,9 @@ fn selection_gap_and_rtl_visual_order() {
     );
     assert_eq!(reader.selection_text(&doc, &sel), "axax");
 
-    // 同一份文本换 RTL：矩形按视觉从右到左返回，Location.byte 仍是逻辑序。
+    // 同一份文本换 RTL：`text-align: start` 在 RTL 下是右边，整行推到
+    // 内容区右缘（90 - 行宽 20.8 = 69.2），矩形按视觉从右到左返回，
+    // Location.byte 仍是逻辑序。
     let doc = doc_one("axax", Dir::Rtl, None);
     let ir = build_with(&doc, &Holey, 0.0);
     let reader = Reader::new(&ir);
@@ -587,15 +589,15 @@ fn selection_gap_and_rtl_visual_order() {
     assert_rects(
         &reader.selection_rects(&sel),
         &[
-            (0, RectF::new(10.4, 0.0, 5.2, 20.0)),
-            (0, RectF::new(0.0, 0.0, 5.2, 20.0)),
+            (0, RectF::new(79.6, 0.0, 5.2, 20.0)),
+            (0, RectF::new(69.2, 0.0, 5.2, 20.0)),
         ],
     );
     // 字节 2 是逻辑序的第三个字符（第二个 'a'），落在右侧那段。
     let tail = reader.selection(loc(0, 0, 2), loc(0, 0, 3));
     assert_rects(
         &reader.selection_rects(&tail),
-        &[(0, RectF::new(10.4, 0.0, 5.2, 20.0))],
+        &[(0, RectF::new(79.6, 0.0, 5.2, 20.0))],
     );
     assert_eq!(reader.selection_text(&doc, &tail), "a");
 }

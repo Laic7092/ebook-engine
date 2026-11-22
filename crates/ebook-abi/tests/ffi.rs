@@ -3,6 +3,14 @@
 use ebook_abi::protocol::{Insets, Request, Response, Style, Viewport};
 use ebook_abi::*;
 
+/// `eb_last_error` / `eb_plain_last_error` 是进程级缓冲：成功开书会清空它。
+/// 测试默认并行，任何一次成功的 `open` 都能把另一个测试刚设的错误擦掉。
+/// 这个互斥把每个 ABI 测试串起来；整套只有几百毫秒，稳定性比并行更值钱。
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
 fn demo() -> Vec<u8> {
     std::fs::read(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -58,6 +66,7 @@ fn style() -> Style {
 
 #[test]
 fn pings() {
+    let _guard = serial();
     let engine = open();
     assert!(matches!(call(engine, &Request::Ping), Response::Pong));
     unsafe { eb_close(engine) };
@@ -65,6 +74,7 @@ fn pings() {
 
 #[test]
 fn opens_and_reports_the_book() {
+    let _guard = serial();
     let engine = open();
     match call(engine, &Request::Book) {
         Response::Book(book) => {
@@ -85,6 +95,7 @@ fn opens_and_reports_the_book() {
 
 #[test]
 fn layout_then_bitmap() {
+    let _guard = serial();
     let engine = open();
     let pages = match call(
         engine,
@@ -128,6 +139,7 @@ fn layout_then_bitmap() {
 
 #[test]
 fn hit_progress_and_selection() {
+    let _guard = serial();
     let engine = open();
     let _ = call(
         engine,
@@ -164,6 +176,7 @@ fn hit_progress_and_selection() {
 
 #[test]
 fn bad_request_returns_an_error_response() {
+    let _guard = serial();
     let engine = open();
     let mut out_len = 0usize;
     let garbage = [0xffu8; 12];
@@ -179,6 +192,7 @@ fn bad_request_returns_an_error_response() {
 
 #[test]
 fn opening_garbage_returns_null() {
+    let _guard = serial();
     let bytes = b"not a book at all";
     unsafe {
         let engine = eb_open(bytes.as_ptr(), bytes.len(), std::ptr::null());
@@ -197,6 +211,7 @@ fn opening_garbage_returns_null() {
 
 #[test]
 fn version_and_the_error_buffer_contract() {
+    let _guard = serial();
     // 版本不再手写：跟 CARGO_PKG_VERSION 一致，结构布局版本与头文件对齐。
     let version = unsafe { std::ffi::CStr::from_ptr(eb_version()) };
     assert_eq!(

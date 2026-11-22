@@ -113,3 +113,46 @@ fn limits_zero_fields_fall_back_to_default() {
     };
     assert_eq!(zero.resolved(), Limits::default());
 }
+
+/// 解码后的 IR 可能来自缓存/跨线程字节，span 不再是排版层亲手写的。
+/// 越界 span 必须退化成空切片，而不是 `debug` panic / `release` 回绕后
+/// 仍然切到边界外。`release` 用的是 `panic = "abort"`，这里 panic 就是进程级。
+#[test]
+fn corrupt_spans_degrade_to_empty_instead_of_panicking() {
+    let mut ir = ir();
+    ir.pages[0].ops = Span::new(u32::MAX, 2);
+    ir.pages[0].lines = Span::new(u32::MAX, 1);
+    ir.runs.lines[0].glyphs = Span::new(u32::MAX, 1);
+    ir.display.ops[0] = Op::GlyphRun(GlyphRun {
+        font: FontId(0),
+        size: 12.0,
+        color: Rgba8::BLACK,
+        origin: PointF::new(0.0, 0.0),
+        glyphs: Span::new(u32::MAX, 1),
+        text: String::from("x"),
+        dir: Dir::Ltr,
+        rotate: Rotate::None,
+        weight: 400,
+        style: FontStyle::Normal,
+        underline: false,
+    });
+
+    // 先过一遍编解码，确认坏 span 本身也编得进去、解得出来。
+    let bytes = codec::to_bytes(&ir).expect("encode");
+    let back: ebook_ir::LayoutResult = codec::decode(&bytes).expect("decode");
+
+    assert_eq!(Span::new(u32::MAX, 2).end(), u32::MAX, "end 必须饱和");
+    assert!(back.display.op_slice(back.pages[0].ops).is_empty());
+    assert!(back.display.glyph_slice(Span::new(u32::MAX, 1)).is_empty());
+    // 查询路径（页/行/命中）也不能因为坏 span panic。
+    assert!(back.page_lines(0).is_empty());
+    assert!(back.page_of_line(0).is_none());
+    assert!(back.hit_test(0, PointF::new(1.0, 1.0)).is_none());
+    assert!(back
+        .location_of(&Anchor {
+            spine: 0,
+            path: vec![1],
+            offset: 0
+        })
+        .is_none());
+}

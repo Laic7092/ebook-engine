@@ -49,9 +49,8 @@ fn paint_ops(
         match op {
             Op::GlyphRun(run) => {
                 let glyphs = ir.display.glyph_slice(run.glyphs);
-                let mut moved = run.clone();
-                moved.origin = run.origin.shifted(-origin.x, -origin.y);
-                surface.glyph_run(&moved, glyphs, res);
+                // 平移交给后端，不再 clone 整个 `GlyphRun`（里面有一份 `text`）。
+                surface.glyph_run_shifted(run, glyphs, PointF::new(-origin.x, -origin.y), res);
             }
             Op::Rect { rect, color } => surface.rect(rect.shifted(-origin.x, -origin.y), *color),
             Op::Border(border) => {

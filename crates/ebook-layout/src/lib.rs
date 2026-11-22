@@ -28,9 +28,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use ebook_ir::{
-    DisplayList, EdgesF, FontId, FontSpec, GlyphRun, ImageId, Issue, IssueCode, LayoutResult,
-    Limits, LineBox, NodeId, NodeKind, Op, RectF, RunMap, SizeF, StyledDoc, Unresolved,
-    UnresolvedReason, WritingMode, IR_VERSION,
+    BorderBox, DisplayList, EdgesF, FontId, FontSpec, GlyphRun, ImageId, Issue, IssueCode,
+    LayoutResult, Limits, LineBox, NodeId, NodeKind, Op, RectF, RunMap, SidesF, SizeF, StyledDoc,
+    Unresolved, UnresolvedReason, WritingMode, IR_VERSION,
 };
 
 pub use hit::Reader;
@@ -211,7 +211,8 @@ impl Layout {
             return limited_result(doc, "max_text_bytes");
         }
 
-        let mut built = flow::flow(doc, env, c);
+        let mut built = flow::flow(doc, env, c, limits.max_lines);
+        let flow_truncated = built.truncated;
         let content = c.content_size();
 
         // 分页本身按行串行（页起点依赖上一页终点），但把每个 item 换成分页
@@ -220,9 +221,14 @@ impl Layout {
             Some(workers) => units_of_parallel(&built.items, workers),
             None => units_of(&built.items),
         };
-        // 滚动模式的页高：整章内容实际占的高度（最后一行的底边），
-        // 不是视口高度。它只由断行结果决定，和窗口多大无关。
-        let flow_height = units.iter().map(|unit| unit.y + unit.h).fold(0.0, f32::max);
+        // 滚动模式的页高：整章内容实际占的高度（最后一行/图片/块边框的底边），
+        // 不是视口高度。块级 padding/border 不在行单元里，所以这里把装饰也
+        // 算进去，否则滚动到底部时容器的下边框会被裁掉。
+        let mut flow_height = units.iter().map(|unit| unit.y + unit.h).fold(0.0, f32::max);
+        for op in &built.decorations {
+            let (y, h) = paginate::op_bounds(op);
+            flow_height = flow_height.max(y + h);
+        }
         let plan = match opts.mode {
             Mode::Paged => paginate::plan(&units, content.h, limits.max_pages as usize),
             Mode::Scroll => paginate::plan_scroll(),
@@ -236,12 +242,19 @@ impl Layout {
         let mut ops: Vec<Op> = Vec::new();
         let mut lines: Vec<LineBox> = Vec::new();
         let mut issues: Vec<Issue> = Vec::new();
-        let mut truncated = plan.truncated;
+        let mut truncated = plan.truncated || flow_truncated;
         if plan.truncated {
             issues.push(Issue {
                 node: doc.root,
                 code: IssueCode::LimitExceeded,
                 detail: Some(String::from("max_pages")),
+            });
+        }
+        if flow_truncated {
+            issues.push(Issue {
+                node: doc.root,
+                code: IssueCode::LimitExceeded,
+                detail: Some(String::from("max_lines")),
             });
         }
 
@@ -250,35 +263,55 @@ impl Layout {
         let mut image_pixels = 0u64;
         let mut image_nodes: Option<Vec<NodeId>> = None;
 
+        // 背景/边框按页切段。`plan.starts` 已经定好页边界，装饰 op 又不参与
+        // 分页，所以这里可以纯函数地算出每一页该画哪一段；等该页的第一条
+        // 内容打开页时，再把段塞到内容之前。
+        let mut decorations: Vec<Vec<Op>> = (0..plan.starts.len()).map(|_| Vec::new()).collect();
+        for op in &built.decorations {
+            split_decoration(op, &plan.starts, content.h, opts.mode, &mut decorations);
+        }
+
+        let mut open_page: Option<u32> = None;
         for (index, item) in built.items.drain(..).enumerate() {
             if plan.cut.is_some_and(|cut| index >= cut) {
                 truncated = true;
                 break;
             }
             // 断行在 flow 里已经发生；这里在组装侧“停止再产”，已产出的行保留。
+            // `flow_truncated` 已经在上面记过诊断，这里不重复报同一个超限。
             if lines.len() >= max_lines {
                 truncated = true;
-                issues.push(Issue {
-                    node: doc.root,
-                    code: IssueCode::LimitExceeded,
-                    detail: Some(String::from("max_lines")),
-                });
+                if !flow_truncated {
+                    issues.push(Issue {
+                        node: doc.root,
+                        code: IssueCode::LimitExceeded,
+                        detail: Some(String::from("max_lines")),
+                    });
+                }
                 break;
             }
             let page = paginate::page_of(&plan.starts, index);
-            let top = plan.starts[page as usize].y;
-            builder.sync(page, top, ops.len() as u32, lines.len() as u32);
+            if open_page != Some(page) {
+                let top = plan.starts[page as usize].y;
+                builder.sync(page, top, ops.len() as u32, lines.len() as u32);
+                if let Some(list) = decorations.get_mut(page as usize) {
+                    ops.append(list);
+                }
+                open_page = Some(page);
+            }
             match item {
                 flow::Item::Line(line) => {
                     builder.set_anchor(line.anchor.as_ref());
-                    for run in &line.runs {
+                    // `item` 已经是 owned（`drain` 出来的），run 文本直接 move，
+                    // 不再 `clone` 一份；大章节上少一半字符串分配。
+                    for run in line.runs {
                         ops.push(Op::GlyphRun(GlyphRun {
                             font: run.font,
                             size: run.size,
                             color: run.color,
                             origin: run.origin,
                             glyphs: run.glyphs,
-                            text: run.text.clone(),
+                            text: run.text,
                             dir: run.dir,
                             rotate: run.rotate,
                             weight: run.weight,
@@ -484,6 +517,80 @@ fn image_node(doc: &StyledDoc, cache: &mut Option<Vec<NodeId>>, id: ImageId) -> 
         owners
     });
     map.get(id as usize).copied().unwrap_or(doc.root)
+}
+
+/// 把块级背景/边框切成每页一段。
+///
+/// 分页单元只看真实内容，所以一个跨页的边框盒不会自己撑开一页；它只是
+/// 在每一页出现自己落在该页内的那一段。首/尾段保留上下边框，中间段只留
+/// 左右边框，这样跨页时不会在页顶/页底多出横线。
+fn split_decoration(
+    op: &Op,
+    starts: &[paginate::PageStart],
+    page_h: f32,
+    mode: Mode,
+    out: &mut [Vec<Op>],
+) {
+    let rect = match op {
+        Op::Rect { rect, .. } => *rect,
+        Op::Border(border) => border.rect,
+        _ => return,
+    };
+    if mode == Mode::Scroll || starts.len() <= 1 {
+        if let Some(first) = out.first_mut() {
+            first.push(op.clone());
+        }
+        return;
+    }
+    if rect.w <= 0.0 || rect.h < 0.0 {
+        return;
+    }
+
+    let mut page = starts
+        .iter()
+        .rposition(|start| start.y <= rect.y + 0.001)
+        .unwrap_or(0);
+    while page < starts.len() {
+        let top = starts[page].y;
+        // 分页为了孤行/寡行会把“下一页起点”拉回到上一页页高以内；
+        // 此时两页在流坐标上有重叠区，后一页不画上一页已经画过的部分。
+        let page_bottom = top + page_h;
+        let bottom = starts
+            .get(page + 1)
+            .map_or(page_bottom, |next| next.y.min(page_bottom).max(top));
+        let seg_top = rect.y.max(top);
+        let seg_bottom = rect.bottom().min(bottom);
+        if seg_bottom > seg_top {
+            let segment = RectF::new(rect.x, seg_top, rect.w, seg_bottom - seg_top);
+            let piece = match op {
+                Op::Rect { color, .. } => Op::Rect {
+                    rect: segment,
+                    color: *color,
+                },
+                Op::Border(border) => {
+                    // 第一段才有上边框，最后一段才有下边框。
+                    let first = segment.y <= border.rect.y + 0.001;
+                    let last = segment.bottom() >= border.rect.bottom() - 0.001;
+                    Op::Border(BorderBox {
+                        rect: segment,
+                        width: SidesF {
+                            top: if first { border.width.top } else { 0.0 },
+                            bottom: if last { border.width.bottom } else { 0.0 },
+                            left: border.width.left,
+                            right: border.width.right,
+                        },
+                        color: border.color,
+                    })
+                }
+                _ => return,
+            };
+            out[page].push(piece);
+        }
+        if rect.bottom() <= bottom + 0.001 {
+            break;
+        }
+        page += 1;
+    }
 }
 
 fn unit_of(item: &flow::Item) -> paginate::Unit {

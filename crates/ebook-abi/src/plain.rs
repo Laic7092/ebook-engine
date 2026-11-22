@@ -34,7 +34,7 @@ use std::fs::File;
 use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use ebook_reader::{SelectionResult, Style, Viewport};
 
@@ -100,10 +100,13 @@ pub struct EbLink {
     pub external: i32,
 }
 
-/// 引擎指针：`*mut` 不是 `Send`，句柄表要它。
-struct Handle(*mut EbEngine);
-unsafe impl Send for Handle {}
-unsafe impl Sync for Handle {}
+/// 句柄表里的所有权。
+///
+/// 必须是 `Arc` 而不是裸指针：`with_engine` 会在释放句柄表锁之后才去锁
+/// `EbEngine::inner`，如果那里拿的是裸指针，并发 `eb_plain_close` 就能在
+/// 两次加锁之间把对象释放掉（use-after-free）。`Arc` 让“查表”和“用完”
+/// 之间持有一次强引用，close 只负责从表里摘掉，最后一个使用者走完才析构。
+struct Handle(Arc<EbEngine>);
 
 /// 句柄之外的状态：最近一次选区与最近一次链接解析。
 ///
@@ -153,13 +156,15 @@ fn scratch(text: &str) -> *const c_char {
 
 /// 上手柄：没这个 id、panic，都在这里变成 none / 负数。
 fn with_engine<T>(id: i32, f: impl FnOnce(&mut ebook_reader::Engine) -> T) -> Option<T> {
-    let pointer = {
+    // 先在表锁内克隆一份强引用，出锁后对象至少活到本次调用结束。
+    let engine = {
         let engines = ENGINES.lock().unwrap_or_else(|poison| poison.into_inner());
-        engines.get(&id).map(|handle| handle.0)
-    };
-    let pointer = pointer?;
-    let eb = unsafe { &*pointer };
-    let mut guard = eb.inner.lock().unwrap_or_else(|poison| poison.into_inner());
+        engines.get(&id).map(|handle| Arc::clone(&handle.0))
+    }?;
+    let mut guard = engine
+        .inner
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     Some(f(&mut guard))
 }
 
@@ -217,9 +222,9 @@ pub unsafe extern "C" fn eb_plain_open(data: *const u8, len: usize, name: *const
         let name = c_path(name).unwrap_or_default();
         match ebook_reader::Engine::open(bytes, &name) {
             Ok(engine) => {
-                let eb = Box::into_raw(Box::new(EbEngine {
+                let eb = Arc::new(EbEngine {
                     inner: Mutex::new(engine),
-                }));
+                });
                 let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
                 let mut engines = ENGINES.lock().unwrap_or_else(|poison| poison.into_inner());
                 engines.insert(id, Handle(eb));
@@ -243,8 +248,10 @@ pub extern "C" fn eb_plain_close(id: i32) -> i32 {
             engines.remove(&id)
         };
         match handle {
-            Some(Handle(pointer)) => {
-                drop(unsafe { Box::from_raw(pointer) });
+            Some(Handle(engine)) => {
+                // 只摘表；并发中的调用仍持有自己的 `Arc`，这里 drop 不会
+                // 提前释放它们正在用的 `EbEngine`。
+                drop(engine);
                 EXTRAS
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner())

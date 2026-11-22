@@ -15,10 +15,9 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 
 缺口集中在三层：
 
-1. **格式/样式语义**：选择器、`white-space` 之外的 CSS 细节、表格/列表、背景/边框。
-2. **资源层**：native 图片只解 PNG（JPEG 缺）；可变字体/彩色字体/子集化缺。
-3. **宿主/架构**：Web 打开书泄漏字节，没有增量重排，`max_lines` 拦截偏晚；
-   翻页动画与跟手滑动仍在 JS 且基本不可用（G-19）。
+1. **格式/样式语义**：选择器、`white-space` 之外的 CSS 细节、表格/列表、行内背景/边框。
+2. **资源层**：native 图片解码只有 PNG/JPEG（GIF/WebP 缺）；可变字体/彩色字体/子集化缺。
+3. **宿主/架构**：没有增量重排；翻页动画与跟手滑动仍在 JS 且基本不可用（G-19）。
 
 另有一批是**明确不做**的（竖排、flex/grid、PDF、DRM），见第 5 节。
 
@@ -62,16 +61,19 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 
 ### G-04 背景、边框只解析不输出
 
-- **状态**：未修复
-- **现象**：`ComputedStyle.background` / `border` 会从 CSS 读进来，但
-  `ebook-layout` 从不生成 `Op::Rect` / `Op::Border`。
-- **影响**：背景色、边框、分隔线不显示；`border-radius` 被跳过；
-  `line-through` / `overline` 没有字段（`underline` 已支持，IR/光栅/Canvas 侧的
-  `Rect`/`Border` 也已具备，缺的只是布局层的生产者）。
-- **证据**：`crates/ebook-ir/src/layout.rs`（`Op::Rect` / `Op::Border`）；
-  `crates/ebook-layout/src/lib.rs` 的组装阶段只 push `GlyphRun` / `Image` /
-  `Unresolved` / `Link` / `Clip`。
-- **修复**：在块级盒完成后发射背景/边框 op；`line-through` 需扩展 IR。
+- **状态**：部分
+- **已修复**：块级盒的 `background` / `border` 现在会产出 `Op::Rect` /
+  `Op::Border`。背景按 `background-clip: border-box` 铺满边框盒，边框在背景之上；
+  跨页的边框盒按页切段，首段保留上边框、末段保留下边框、中间段只留左右。
+  折叠外边距后的盒顶也按实际内容位置计算，不会把外边距涂进背景。
+- **仍未修复**：
+  - 行内元素（`span` / `em`）的背景与边框：它们跨行，需要按行盒切段。
+  - 根/`body` 背景没有按 CSS 的 canvas 传播规则铺满页边距；目前只铺内容盒。
+  - `border-radius`、`border-style`、逐边颜色；IR 的 `BorderBox` 只有宽度和单色。
+  - `line-through` / `overline` 没有字段（`underline` 已支持）。
+- **证据**：`crates/ebook-layout/src/flow.rs` 的 `block` 末尾发装饰，
+  `crates/ebook-layout/src/lib.rs` 的 `split_decoration` 按页切段；
+  `crates/ebook-layout/tests/decorations.rs` 覆盖单页与跨页。
 - **验收**：golden 里出现 `rect`/`border` op；pixel 基线覆盖有边框的块。
 
 ### G-05 表格和列表没有真正的排版语义
@@ -127,15 +129,15 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 ### G-09 RTL、`unicode-bidi` 与逐元素语言
 
 - **状态**：部分
-- **现象**：
-  - `text-align: start/end` 直接映射成左/右，没有按 `direction: rtl` 翻转。
+- **仍未修复**：
   - CSS `unicode-bidi`（`bidi-override` / `isolate`）不解析；`<bdi>` / `<bdo>` 只是普通 `Span`。
   - 只有 `doc.meta.lang` 取第一个 `lang`，后续元素的 `lang` 不影响 `locl`、断字或字体选择。
-- **影响**：阿拉伯语/希伯来语书的对齐和嵌套方向可能错；多语言书的逐段语言特性不生效。
+- **已修复**：`text-align: start/end` 按 `direction: rtl` 翻转（`emit_line` 读
+  `base_style.dir`）；`tests/robustness.rs` 的 `rtl_start_and_end_are_mirrored` 覆盖。
+- **影响**：阿拉伯语/希伯来语的嵌套方向可能错；多语言书的逐段语言特性不生效。
 - **证据**：`crates/ebook-layout/src/flow.rs` 的 `emit_line`；`css.rs` 的属性表；
   `xhtml.rs` 的 `lang` 处理。
-- **修复**：先修 `start/end` 的 direction 感知；其余需要把语言/方向放进
-  `ComputedStyle` / `TextStyle`。
+- **修复**：其余需要把语言/方向放进 `ComputedStyle` / `TextStyle`。
 
 ### G-10 fixed-layout、SVG/MathML、`@page`
 
@@ -156,25 +158,20 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
   `crates/ebook-cache/src/lib.rs` 的 `LayoutCache::layout`。
 - **修复**：先把 flow 的「计划/断行/回填」拆成可独立重算的块，再让 cache 按块失效。
 
-### G-12 `max_lines` 在 flow 之后才拦截
+### G-13 Web 宿主的内存拷贝与预算
 
-- **状态**：未修复
-- **现象**：`Layout::run` 先完整执行 `flow::flow`，之后才检查 `max_lines`；
-  `max_pages` 也不减少前面的断行工作。
-- **影响**：异常大的文档可以先用排版把 CPU/内存吃满，再返回截断结果。
-- **证据**：`crates/ebook-layout/src/lib.rs` 的 `run`。
-- **修复**：把行数/字形数预算传进 `flow`，在断行循环内提前停止，并保证截断后的
-  行/字形区间仍连续。
-
-### G-13 Web 打开书会泄漏整本书字节
-
-- **状态**：未修复
-- **现象**：`open_book` 用 `Box::leak(bytes.to_vec())` 把书变成 `'static`；
-  换书时旧字节不释放。字体、资产、IR 也有多处 `to_vec` / `clone`。
-- **影响**：长时间使用、频繁换书时 wasm 线性内存只涨不降，最终 OOM。
-- **证据**：`crates/ebook-web/src/lib.rs` 的 `open_book`、`register_font`、
-  `asset_bytes`、`layout_cached`。
-- **修复**：让 `EpubReader` 拥有 `Vec<u8>`，或至少提供 `close_book()` 释放旧书。
+- **状态**：部分
+- **已修复**：`open_book` 不再 `Box::leak`。书字节的所有权登记在 `BOOK_BYTES`，
+  换书/`close_book()` 时先丢掉借用者再按原样回收；`eb_close_book` 已导出。
+  回归用例见 `crates/ebook-web/src/lib.rs` 的 `interaction_json_shapes`。
+- **仍未修复**：`register_font` / `asset_bytes` / `layout_cached` 仍有多处
+  `to_vec` / `clone`（字体会整份复制，`layout_cached` 同时持有 `doc` 与 `ir`）；
+  宿主没有显式内存总预算。
+- **影响**：频繁换字体/图片或同时保留多章 IR 时，wasm 线性内存峰值偏高。
+- **证据**：`crates/ebook-web/src/lib.rs` 的 `register_font`、`asset_bytes`、
+  `layout_cached`。
+- **修复**：`FontBook` 接受 `Vec<u8>` 所有权；`layout_cached` 用 `move` 而不是
+  clone；宿主层加总预算（见 G-16）。
 
 ### G-14 SVG 后端不是精确参考渲染
 
@@ -285,11 +282,11 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 1. **G-19**：先让跟手滑动可用（起手不拒绝、预取、`transitionend`、rAF、主题
    一致性、`ImageBitmap` + 降 DPR）。唯一「用户已经能感觉到坏掉」的项，成本低。
 2. **G-03 / G-02**：剩余选择器、`hsl()`、`capitalize`。成本低，直接改善真实书样式。
-3. **G-04 / G-05**：背景/边框 op、列表 marker、单层表格。IR 已有 `Rect`/`Border`。
+3. **G-05**：列表 marker、单层表格。
 4. **G-06 JPEG / G-07 字体混淆**：决定「图片和字体能不能显示」。
-5. **G-12 / G-11**：`max_lines` 前移、真正的增量重排。内核改动，放在语义修复之后。
-6. **G-09 / G-10 / G-08 / G-14**：RTL、fixed-layout、可变/彩色字体、精确 SVG。
-   工作量大，单独排期。
+5. **G-11**：真正的增量重排。内核改动，放在语义修复之后。
+6. **G-09 / G-10 / G-08 / G-14**：剩余 RTL 语义、fixed-layout、可变/彩色字体、
+   精确 SVG。工作量大，单独排期。
 
 ---
 
@@ -297,12 +294,16 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 
 这些不是「没问题」，而是当前审计没有发现底层缺陷：
 
-- 全仓库无 `unsafe`。
+- 排版 / IR / 光栅 / 字体 / 渲染层无 `unsafe`；仅 `ebook-reader` 的
+  `Engine`（自引用书字节）与 C ABI / wasm 边界有 `unsafe`，两处都注明安全前提。
+- `LayoutResult` 的 `op_slice` / `glyph_slice` 对坏 span 退化为空切片，
+  `Span::end` 饱和；解码后的 IR 不会因为越界索引 panic（`release` 是 abort）。
 - `DisplayList` 禁止 `HashMap` / `HashSet`，遍历顺序固定。
 - 排版层不碰 I/O、不取时钟/随机、不持全局可变状态。
 - native / wasm 有 `xtask parity` 逐字节比对。
 - 坏 ZIP / 坏 XHTML / 坏字体有 fuzz 和越界保护；ZIP 路径穿越与单条目解压有上限。
-- `Limits` 超限仍返回合法 IR，行/字形/页切片保持连续。
+- `Limits` 超限仍返回合法 IR，行/字形/页切片保持连续；`max_lines` 在断行阶段
+  就提前停止，不再先排完整章。
 - `hyphen-en` 已改成 opt-in，不再默认把 `en.pat` 打进 wasm。
 - 页 → 像素只有一套实现：`paint()` + `RgbaSurface`，native（`--ppm`）与 wasm
   （`eb_page_bitmap`）同源，`ScaledSurface` 负责 DPR。

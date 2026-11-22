@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 
 use ebook_ir::{
-    BorderBox, Fit, Glyph, GlyphBitmap, GlyphRun, ImageData, ImageId, LayoutResult, RectF,
+    BorderBox, Fit, Glyph, GlyphBitmap, GlyphRun, ImageData, ImageId, LayoutResult, PointF, RectF,
     RenderError, Renderer, Resources, Rgba8, SizeF, Surface, Unresolved,
 };
 
@@ -613,14 +613,18 @@ impl RgbaSurface {
     }
 }
 
-impl Surface for RgbaSurface {
-    fn size(&self) -> SizeF {
-        SizeF::new(self.width as f32, self.height as f32)
-    }
-
-    fn glyph_run(&mut self, run: &GlyphRun, glyphs: &[Glyph], res: &mut dyn Resources) {
-        let mut pen_x = run.origin.x;
-        let baseline = run.origin.y;
+impl RgbaSurface {
+    /// 以 `origin` 为起点画一个 run。`glyph_run` / `glyph_run_shifted` 共用，
+    /// 后者因此不需要为每个 run 复制 `GlyphRun`（含 `text`）。
+    fn glyph_run_at(
+        &mut self,
+        run: &GlyphRun,
+        glyphs: &[Glyph],
+        origin: PointF,
+        res: &mut dyn Resources,
+    ) {
+        let mut pen_x = origin.x;
+        let baseline = origin.y;
         for glyph in glyphs {
             let advance = glyph.dx;
             let pen_y = baseline + glyph.dy;
@@ -639,14 +643,37 @@ impl Surface for RgbaSurface {
         if run.underline {
             // 下划线是 `GlyphRun` 的属性：宽度按已经结算好的 advance 求和，
             // 所以两端对齐撑开的字距也会跟着变长。
-            let width = pen_x - run.origin.x;
+            let width = pen_x - origin.x;
             if width > 0.0 {
                 let y = baseline + (run.size * 0.08).max(1.0);
                 let height = (run.size * 0.055).max(1.0);
                 let color = self.ink.unwrap_or(run.color);
-                self.rect(RectF::new(run.origin.x, y, width, height), color);
+                self.fill_rect(RectF::new(origin.x, y, width, height), color);
             }
         }
+    }
+}
+
+impl Surface for RgbaSurface {
+    fn size(&self) -> SizeF {
+        SizeF::new(self.width as f32, self.height as f32)
+    }
+
+    fn glyph_run(&mut self, run: &GlyphRun, glyphs: &[Glyph], res: &mut dyn Resources) {
+        let origin = run.origin;
+        self.glyph_run_at(run, glyphs, origin, res);
+    }
+
+    fn glyph_run_shifted(
+        &mut self,
+        run: &GlyphRun,
+        glyphs: &[Glyph],
+        shift: PointF,
+        res: &mut dyn Resources,
+    ) {
+        // 热路径：直接加平移，不 clone `GlyphRun`。
+        let origin = run.origin.shifted(shift.x, shift.y);
+        self.glyph_run_at(run, glyphs, origin, res);
     }
 
     fn rect(&mut self, rect: RectF, color: Rgba8) {

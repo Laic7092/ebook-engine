@@ -19,6 +19,10 @@ use ebook_raster::{RgbaSurface, Tone};
 use ebook_render::ScaledSurface;
 
 static BOOK: Mutex<Option<Backend>> = Mutex::new(None);
+/// `open_book` 把字节借给 `EpubReader<'static>` 之后，这里记下同一块分配的
+/// `(ptr, len)`。换书/关书时先丢掉借用者（`BOOK` / `LAST`），再按原样回收，
+/// 避免 `Box::leak` 变成“每开一本泄漏一本”。
+static BOOK_BYTES: Mutex<Option<(usize, usize)>> = Mutex::new(None);
 static FONT: Mutex<Option<FontBook>> = Mutex::new(None);
 /// 最近一次排版的 IR 与原文。交互查询（命中/选区/进度）只认这一份，
 /// 与 JS 侧当前显示的章节保持同步；排版层本身仍然无状态。
@@ -105,16 +109,69 @@ pub fn layout_text(text: &str, width: f32, height: f32, margin: f32) -> Vec<u8> 
 }
 
 pub fn open_book(bytes: &[u8]) -> String {
-    let leaked: &'static [u8] = Box::leak(bytes.to_vec().into_boxed_slice());
+    // 先把上一本书的借用者与字节都放掉，再开新的。
+    close_book();
+    let boxed = bytes.to_vec().into_boxed_slice();
+    let len = boxed.len();
+    let leaked: &'static [u8] = Box::leak(boxed);
     match EpubReader::open(leaked) {
-        Ok(reader) => install(Backend::Epub(reader)),
-        Err(error) => error_json(&format!("open: {error:?}")),
+        Ok(reader) => {
+            // 只在开书成功后才登记所有权；失败路径在下面直接回收。
+            if len > 0 {
+                *BOOK_BYTES.lock().unwrap() = Some((leaked.as_ptr() as usize, len));
+            }
+            install(Backend::Epub(reader))
+        }
+        Err(error) => {
+            free_book_bytes(leaked.as_ptr() as *mut u8, len);
+            error_json(&format!("open: {error:?}"))
+        }
+    }
+}
+
+/// 关掉当前书：丢掉它的排版结果与借用者，再回收 `open_book` 交出去的字节。
+///
+/// 宿主换书时可以直接调；`open_book` / `open_text` 也会在开头自动调一次，
+/// 所以不调也不会因为翻书而泄漏，只是旧书会活到下一次打开。
+pub fn close_book() {
+    reset_session();
+    release_book_bytes();
+    *LAST_ERROR.lock().unwrap() = None;
+}
+
+/// 丢掉当前书与它的排版结果。必须在释放书字节之前调用：`BOOK` / `LAST`
+/// 里的 `EpubReader<'static>` 借用的正是那块字节。
+fn reset_session() {
+    // 与 `page_bitmap` 的取锁顺序保持一致：先 BOOK，再 LAST（FONT 不在这里动）。
+    *BOOK.lock().unwrap() = None;
+    *LAST.lock().unwrap() = None;
+    IMAGES.lock().unwrap().clear();
+}
+
+fn release_book_bytes() {
+    let Some((ptr, len)) = BOOK_BYTES.lock().unwrap().take() else {
+        return;
+    };
+    free_book_bytes(ptr as *mut u8, len);
+}
+
+/// 回收 `Box::leak` 出去的那块 `[u8]`。调用方必须保证没有存活借用。
+fn free_book_bytes(ptr: *mut u8, len: usize) {
+    if len == 0 || ptr.is_null() {
+        return;
+    }
+    // SAFETY: `ptr` / `len` 来自 `Box::leak(bytes.to_vec().into_boxed_slice())`；
+    // 调用点要么已经 drop 掉 `Backend::Epub`（它持有唯一的 `&'static [u8]`），
+    // 要么 `EpubReader::open` 已经失败返回、借用已结束。
+    unsafe {
+        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
     }
 }
 
 /// 打开已经由宿主解码好的纯文本。章节在格式层按标题行切分，
 /// TOC / spine / 交互查询因此和 EPUB 完全同构。
 pub fn open_text(text: &str, name: &str) -> String {
+    close_book();
     install(Backend::Txt(TxtReader::from_text(text, Some(name))))
 }
 
@@ -1077,5 +1134,29 @@ mod tests {
         let page = &ir.pages[0];
         assert_eq!(page.box_size().w, 520.0);
         assert_eq!(page.box_size().h, 300.0);
+
+        // 换书必须回收上一本借给 `EpubReader<'static>` 的字节：
+        // `open_book` 以前是 `Box::leak`，每开一本泄漏一本。
+        let demo =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/demo.epub");
+        if let Ok(bytes) = std::fs::read(&demo) {
+            let opened = open_book(&bytes);
+            assert!(!opened.contains("\"error\""), "{opened}");
+            assert!(
+                BOOK_BYTES.lock().unwrap().is_some(),
+                "成功开书后必须登记字节所有权"
+            );
+            // 再开一次：旧块被回收，新块重新登记，不叠加。
+            let _ = open_book(&bytes);
+            assert!(BOOK_BYTES.lock().unwrap().is_some());
+            // 换成 txt：epub 字节必须立刻释放。
+            let _ = open_text("hello", "a.txt");
+            assert!(
+                BOOK_BYTES.lock().unwrap().is_none(),
+                "打开 txt 后仍持有 epub 字节"
+            );
+            close_book();
+            assert!(BOOK.lock().unwrap().is_none());
+        }
     }
 }

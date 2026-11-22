@@ -1,8 +1,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use ebook_ir::{
-    Anchor, Break, ComputedStyle, Dir, DirtyBlock, Display, Fit, FontId, Glyph, ImageId, NodeId,
-    NodeKind, Op, PointF, RectF, Rotate, Span, TextAlign, TextTransform, Unresolved,
+    Anchor, BorderBox, Break, ComputedStyle, Dir, DirtyBlock, Display, Fit, FontId, Glyph, ImageId,
+    NodeId, NodeKind, Op, PointF, RectF, Rotate, Span, TextAlign, TextTransform, Unresolved,
     UnresolvedReason, VerticalAlign, WhiteSpace,
 };
 
@@ -62,6 +62,17 @@ pub(crate) struct Flow {
     pub(crate) items: Vec<Item>,
     pub(crate) glyphs: Vec<Glyph>,
     pub(crate) dirty: Vec<DirtyBlock>,
+    /// 块级背景/边框，按流顺序排（父块在前、子块在后）。
+    ///
+    /// 它们单独放，不混进 `items`：分页单元只应该由真实内容（行、图片）
+    /// 组成，否则一个跨页的背景会被当成“超高的一行”，既左右分页，又只能
+    /// 落在起始页。组装侧再按页把它们切成段，放到每页内容之前。
+    pub(crate) decorations: Vec<Op>,
+    /// 已经产出的行数。`max_lines` 预算靠它提前停，而不是排完整章再截断。
+    pub(crate) lines: u32,
+    /// 是否因为 `max_lines` 在断行阶段就停了。组装侧据此只记一条诊断，
+    /// 不重复报同一个超限。
+    pub(crate) truncated: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -91,7 +102,9 @@ struct Piece {
 struct Ch {
     c: char,
     off: u32,
-    piece: u16,
+    /// 所属内联片段下标。必须是 `u32`：一个块可以有任意多个内联子节点，
+    /// `u16` 会在 65536 个片段处回绕，把样式/链接指到错误的片段上。
+    piece: u32,
     /// 所属整形簇；换行符没有簇，用 [`NO_CLUSTER`] 标记。
     cluster: u32,
     /// 簇首字符：只有它贡献行宽，也只有它产字形。
@@ -155,6 +168,9 @@ impl CollapsedMargin {
 struct BlockFlow {
     margin: CollapsedMargin,
     empty: bool,
+    /// 非空块的边框盒上边（流坐标）。父块在 `deferred_top` 时用它校准
+    /// 自己的背景/边框起点，避免用尚未应用的折叠外边距。
+    top: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -173,9 +189,20 @@ struct FlowCtx<'a> {
     flow: Flow,
     depth: u32,
     next_block: u32,
+    /// 本次排版最多产多少行。0 视为不限（默认 `Limits` 已把 0 换成默认值，
+    /// 这里再兜一层，防止直接调用 `flow` 的测试传 0）。
+    line_limit: u32,
+    /// 文档里是否存在任何链接。没有链接时 `line_link` 直接返回，
+    /// 不必为每行、每个字符走一遍祖先链。
+    has_links: bool,
 }
 
-pub(crate) fn flow(doc: &ebook_ir::StyledDoc, env: &LayoutEnv<'_>, c: &PageConstraint) -> Flow {
+pub(crate) fn flow(
+    doc: &ebook_ir::StyledDoc,
+    env: &LayoutEnv<'_>,
+    c: &PageConstraint,
+    max_lines: u32,
+) -> Flow {
     let content = c.content_size();
     let mut ctx = FlowCtx {
         doc,
@@ -184,6 +211,8 @@ pub(crate) fn flow(doc: &ebook_ir::StyledDoc, env: &LayoutEnv<'_>, c: &PageConst
         flow: Flow::default(),
         depth: 0,
         next_block: 0,
+        line_limit: if max_lines == 0 { u32::MAX } else { max_lines },
+        has_links: doc.nodes.iter().any(|node| node.link.is_some()),
     };
     let mut y = 0.0;
     let root_w = ctx.content_w;
@@ -282,6 +311,17 @@ impl<'a> FlowCtx<'a> {
             return BlockFlow {
                 margin: CollapsedMargin::ZERO,
                 empty: true,
+                top: *y,
+            };
+        }
+        // 行数预算用尽：不再往下排，也不改动 `y`；返回空块让上层收尾。
+        // 先减回 depth，保持 `block` 的增减配对。
+        if self.flow.truncated {
+            self.depth -= 1;
+            return BlockFlow {
+                margin: CollapsedMargin::ZERO,
+                empty: true,
+                top: *y,
             };
         }
 
@@ -314,9 +354,31 @@ impl<'a> FlowCtx<'a> {
                 .max(0.0),
         };
         let mut content_empty = true;
+        let mut box_top = *y;
+        // 先把装饰占位放进 `decorations`，保持父块在前、子块在后；块结束后
+        // 才知道边框盒的实际高度，再回填同一批下标。
+        let decoration_start = self.flow.decorations.len();
+        if let Some(color) = style.background {
+            self.flow.decorations.push(Op::Rect {
+                rect: RectF::ZERO,
+                color,
+            });
+        }
+        let has_border =
+            border.top > 0.0 || border.right > 0.0 || border.bottom > 0.0 || border.left > 0.0;
+        if has_border {
+            self.flow.decorations.push(Op::Border(BorderBox {
+                rect: RectF::ZERO,
+                width: border,
+                color: style.border.color,
+            }));
+        }
 
         match kind {
             NodeKind::Text(_) => {
+                if content_empty && deferred_top {
+                    box_top = cy;
+                }
                 let before = self.flow.items.len();
                 self.inline_from(&[id], inner_x, &mut cy, inner_w, style);
                 if self.flow.items.len() > before {
@@ -325,10 +387,16 @@ impl<'a> FlowCtx<'a> {
             }
             NodeKind::LineBreak => {}
             NodeKind::Image(img) => {
+                if content_empty && deferred_top {
+                    box_top = cy;
+                }
                 self.image(id, img, style, inner_x, &mut cy, inner_w);
                 content_empty = false;
             }
             NodeKind::Ruby { base, rt } => {
+                if content_empty && deferred_top {
+                    box_top = cy;
+                }
                 let mut pieces = Vec::new();
                 pieces.push(Piece {
                     style,
@@ -347,6 +415,9 @@ impl<'a> FlowCtx<'a> {
                 let first_child = node.first_child;
                 let mut buf: Vec<NodeId> = Vec::new();
                 for index in 0..child_len {
+                    if self.flow.truncated {
+                        break;
+                    }
                     let kid = self.doc.children[(first_child + index) as usize];
                     let kid_style = self.doc.node(kid).style;
                     if kid_style.display == Display::None {
@@ -360,6 +431,9 @@ impl<'a> FlowCtx<'a> {
                         let pending = last_mb;
                         cy += pending.value();
                         last_mb = CollapsedMargin::ZERO;
+                        if content_empty && deferred_top {
+                            box_top = cy;
+                        }
                         let before = self.flow.items.len();
                         self.inline_from(&buf, inner_x, &mut cy, inner_w, style);
                         if self.flow.items.len() > before {
@@ -373,13 +447,19 @@ impl<'a> FlowCtx<'a> {
                     let child = self.block(kid, inner_x, &mut cy, inner_w, last_mb);
                     last_mb = child.margin;
                     if !child.empty {
+                        if content_empty {
+                            box_top = child.top;
+                        }
                         content_empty = false;
                     }
                 }
-                if !buf.is_empty() {
+                if !buf.is_empty() && !self.flow.truncated {
                     let pending = last_mb;
                     cy += pending.value();
                     last_mb = CollapsedMargin::ZERO;
+                    if content_empty && deferred_top {
+                        box_top = cy;
+                    }
                     let before = self.flow.items.len();
                     self.inline_from(&buf, inner_x, &mut cy, inner_w, style);
                     if self.flow.items.len() > before {
@@ -398,6 +478,7 @@ impl<'a> FlowCtx<'a> {
             if !deferred_top {
                 *y -= applied_top.value();
             }
+            self.flow.decorations.truncate(decoration_start);
             let carried = if deferred_top {
                 last_mb
             } else {
@@ -407,6 +488,7 @@ impl<'a> FlowCtx<'a> {
             return BlockFlow {
                 margin: carried.add(margin.bottom),
                 empty: true,
+                top: box_top,
             };
         }
 
@@ -417,10 +499,33 @@ impl<'a> FlowCtx<'a> {
             CollapsedMargin::new(margin.bottom)
         };
         *y = cy + border.bottom + padding.bottom;
+
+        // 边框盒 = 内容区 + padding + border；背景按 CSS 默认的
+        // `background-clip: border-box` 铺满整个边框盒。
+        let border_rect = RectF::new(
+            x + margin.left,
+            box_top,
+            (inner_w + padding.horizontal() + border.horizontal()).max(0.0),
+            (*y - box_top).max(0.0),
+        );
+        let mut next = decoration_start;
+        if style.background.is_some() {
+            if let Some(Op::Rect { rect, .. }) = self.flow.decorations.get_mut(next) {
+                *rect = border_rect;
+            }
+            next += 1;
+        }
+        if has_border {
+            if let Some(Op::Border(border_box)) = self.flow.decorations.get_mut(next) {
+                border_box.rect = border_rect;
+            }
+        }
+
         self.depth -= 1;
         BlockFlow {
             margin: margin_bottom,
             empty: false,
+            top: box_top,
         }
     }
 
@@ -569,7 +674,7 @@ impl<'a> FlowCtx<'a> {
             out.push(Ch {
                 c,
                 off,
-                piece: pi as u16,
+                piece: pi as u32,
                 cluster: NO_CLUSTER,
                 head: true,
                 level: 0,
@@ -604,7 +709,7 @@ impl<'a> FlowCtx<'a> {
                     out.push(Ch {
                         c: '\n',
                         off: 0,
-                        piece: pi as u16,
+                        piece: pi as u32,
                         cluster: NO_CLUSTER,
                         head: true,
                         level: 0,
@@ -617,7 +722,7 @@ impl<'a> FlowCtx<'a> {
                     out.push(Ch {
                         c: '\u{FFFC}',
                         off: 0,
-                        piece: pi as u16,
+                        piece: pi as u32,
                         cluster: NO_CLUSTER,
                         head: true,
                         level: 0,
@@ -955,6 +1060,19 @@ impl<'a> FlowCtx<'a> {
         want: usize,
         w: f32,
     ) -> Option<usize> {
+        // 候选包括“最靠后的可断点” `want` 本身，以及它前面的词内断字点。
+        // 宽度按 [line_start, want) 建一次前缀和：原来每个候选都从
+        // `line_start` 重新加一遍，最坏是 O(候选数 × 行长)。
+        let mut prefix: Vec<f32> = Vec::with_capacity(want - line_start + 1);
+        prefix.push(0.0);
+        let mut acc = 0.0f32;
+        for ch in &chars[line_start..want] {
+            if ch.head {
+                acc += shaped.clusters[ch.cluster as usize].advance;
+            }
+            prefix.push(acc);
+        }
+
         let mut candidates: Vec<usize> = Vec::new();
         candidates.push(want);
         for &point in points.iter().rev() {
@@ -963,12 +1081,7 @@ impl<'a> FlowCtx<'a> {
             }
         }
         for at in candidates {
-            let mut width = 0.0f32;
-            for ch in &chars[line_start..at] {
-                if ch.head {
-                    width += shaped.clusters[ch.cluster as usize].advance;
-                }
-            }
+            let width = prefix[at - line_start];
             let dash = reserve.get(at.saturating_sub(1)).copied().unwrap_or(0.0);
             if width + dash <= w + 0.001 {
                 return Some(at);
@@ -1081,6 +1194,11 @@ impl<'a> FlowCtx<'a> {
         let mut first = true;
 
         while i < chars.len() {
+            // `emit_line` 用尽行数预算后会置位；在这里收手，
+            // 后面的 `count` / `avoid_after` / 两端对齐仍对已产出的行收尾。
+            if self.flow.truncated {
+                break;
+            }
             if chars[i].c == '\n' {
                 let pad = if first { indent } else { 0.0 };
                 self.emit_line(
@@ -1227,18 +1345,27 @@ impl<'a> FlowCtx<'a> {
                 line.len = count;
             }
         }
-        if let Some(Item::Line(line)) = self.flow.items[item_start..]
-            .iter_mut()
-            .rev()
-            .find(|item| matches!(item, Item::Line(_)))
-        {
-            line.avoid_after = container.brk.after == Break::Avoid;
+        if !self.flow.truncated {
+            if let Some(Item::Line(line)) = self.flow.items[item_start..]
+                .iter_mut()
+                .rev()
+                .find(|item| matches!(item, Item::Line(_)))
+            {
+                line.avoid_after = container.brk.after == Break::Avoid;
+            }
         }
         if base_style.text.align == TextAlign::Justify {
             let lines: Vec<usize> = (item_start..self.flow.items.len())
                 .filter(|&index| matches!(self.flow.items[index], Item::Line(_)))
                 .collect();
-            let last = lines.last().copied();
+            // 被 `max_lines` 截断时，最后一条只是“本块内最后一条”，
+            // 原文后面还有内容；它仍然要按两端对齐撑开，否则同一前缀
+            // 在截断/不截断两次排版里字节不一致。
+            let last = if self.flow.truncated {
+                None
+            } else {
+                lines.last().copied()
+            };
             for index in lines {
                 if Some(index) != last {
                     self.justify_line(index, x0, w);
@@ -1363,11 +1490,20 @@ impl<'a> FlowCtx<'a> {
     /// 行内容本身，所以同一份输入必然得到同样的 op。本轮**不合并**相邻行：
     /// 一行一个 `Op::Link`，便于逐行命中。
     fn line_link(&self, pieces: &[Piece], line: &[Ch]) -> Option<String> {
+        if !self.has_links {
+            return None;
+        }
+        // 同一个内联 owner 之后的所有字符都走同一条祖先链，只查一次。
+        let mut seen: Vec<NodeId> = Vec::new();
         for ch in line {
             let node = pieces[ch.piece as usize].node;
             let Some(owner) = self.owner_id(node) else {
                 continue;
             };
+            if seen.contains(&owner) {
+                continue;
+            }
+            seen.push(owner);
             for id in self.owner_chain(owner).into_iter().rev() {
                 if let Some(link) = self.doc.node(id).link.as_ref() {
                     return Some(link.clone());
@@ -1393,13 +1529,21 @@ impl<'a> FlowCtx<'a> {
             bottom_dist,
         });
 
-        let mut owners: Vec<NodeId> = Vec::new();
+        // 先按首字母顺序收集最内层 owner（每个字符都调 `owner_chain` 会分配
+        // 一个 Vec），再把它们的祖先链合并成去重列表。
+        let mut innermost: Vec<NodeId> = Vec::new();
         for ch in line {
             if let Some(owner) = self.owner_id(pieces[ch.piece as usize].node) {
-                for id in self.owner_chain(owner) {
-                    if !owners.contains(&id) {
-                        owners.push(id);
-                    }
+                if !innermost.contains(&owner) {
+                    innermost.push(owner);
+                }
+            }
+        }
+        let mut owners: Vec<NodeId> = Vec::new();
+        for owner in innermost {
+            for id in self.owner_chain(owner) {
+                if !owners.contains(&id) {
+                    owners.push(id);
                 }
             }
         }
@@ -1587,6 +1731,12 @@ impl<'a> FlowCtx<'a> {
         if line.is_empty() {
             return;
         }
+        // 行数预算：在断行阶段就停，而不是排完整章再在组装侧截断。
+        if self.flow.lines >= self.line_limit {
+            self.flow.truncated = true;
+            return;
+        }
+        self.flow.lines += 1;
         let index = *order;
         *order = index.saturating_add(1);
         let brk = base_style.brk;
@@ -1652,10 +1802,15 @@ impl<'a> FlowCtx<'a> {
             };
         }
 
+        // `start` / `end` 是逻辑值：RTL 段落的 start 在右边，end 在左边。
+        // 不能直接映射成左/右，否则阿拉伯语/希伯来语正文的段落对齐是反的。
+        let rtl = base_style.dir == Dir::Rtl;
         let align_pad = match base_style.text.align {
             TextAlign::Center => (w - line_w) * 0.5,
-            TextAlign::End => w - line_w,
-            _ => 0.0,
+            TextAlign::Start if rtl => w - line_w,
+            TextAlign::End if !rtl => w - line_w,
+            TextAlign::Start | TextAlign::End => 0.0,
+            TextAlign::Justify => 0.0,
         }
         .max(0.0);
 
@@ -1674,7 +1829,24 @@ impl<'a> FlowCtx<'a> {
         let first_piece = &pieces[first.piece as usize];
         let last_piece = &pieces[last.piece as usize];
         let src_start = first_piece.span.start + first.off;
-        let src_end = last_piece.span.start + last.off + last.c.len_utf8() as u32;
+        // 行尾字节长度取**原文**字符，不能取 `text-transform` 之后的字符：
+        // `ß` 转大写会变成两个 `S`，`last.c.len_utf8()` 是 1，而原文占 2 字节，
+        // 直接用它会让 `LineBox.src` 少算最后一个字符的尾巴。
+        let src_end = if last.image.is_some() {
+            // 行内图片的占位字符不在原文里；保留旧行为，选区侧会跳过这类行。
+            last_piece.span.start + last.off + last.c.len_utf8() as u32
+        } else {
+            let tail = self
+                .doc
+                .text_of(last_piece.span)
+                .get(last.off as usize..)
+                .unwrap_or("");
+            let len = tail
+                .chars()
+                .next()
+                .map_or(last.c.len_utf8(), char::len_utf8);
+            last_piece.span.start + last.off + len as u32
+        };
         let glyph_start_all = self.flow.glyphs.len() as u32;
 
         let visual = self.visual_order(line);

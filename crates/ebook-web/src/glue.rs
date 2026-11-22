@@ -31,6 +31,14 @@ pub fn eb_open_file(bytes: &[u8], name: &str) -> String {
     crate::open_file(bytes, name)
 }
 
+/// 关掉当前书并回收它占用的字节。换书前可以由宿主显式调一次；
+/// `eb_open*` 自己也会在开头释放上一本。
+#[cfg(feature = "epub")]
+#[wasm_bindgen]
+pub fn eb_close_book() {
+    crate::close_book()
+}
+
 #[cfg(feature = "epub")]
 #[wasm_bindgen]
 pub fn eb_font(bytes: &[u8]) -> u32 {

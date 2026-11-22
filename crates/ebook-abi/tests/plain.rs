@@ -4,6 +4,14 @@ use std::ffi::CString;
 
 use ebook_abi::plain::*;
 
+/// `eb_last_error` / `eb_plain_last_error` 是进程级缓冲：成功开书会清空它。
+/// 测试默认并行，任何一次成功的 `open` 都能把另一个测试刚设的错误擦掉。
+/// 这个互斥把每个 ABI 测试串起来；整套只有几百毫秒，稳定性比并行更值钱。
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
 fn demo() -> Vec<u8> {
     std::fs::read(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -44,6 +52,7 @@ fn open_book() -> (i32, bool) {
 
 #[test]
 fn lays_out_and_writes_a_raw_page() {
+    let _guard = serial();
     let (engine, has_font) = open_book();
     assert!(eb_plain_spine_count(engine) > 0);
     assert!(eb_plain_page_count(engine) == 0, "排版前没有页");
@@ -90,6 +99,7 @@ fn lays_out_and_writes_a_raw_page() {
 
 #[test]
 fn lays_out_scroll_and_writes_a_slice() {
+    let _guard = serial();
     let (engine, has_font) = open_book();
     // 滚动：上下留白 0，左右 24；height 只是视口高，不参与切页。
     let rc = eb_plain_layout_scroll(
@@ -163,6 +173,7 @@ fn lays_out_scroll_and_writes_a_slice() {
 
 #[test]
 fn no_font_makes_blank_pages() {
+    let _guard = serial();
     // 没有注册字体时排版仍然出页（StubMeasurer），但位图上一个字也没有：
     // 这正是 iOS 上「有页码、无正文」的样子。
     let bytes = demo();
@@ -189,6 +200,7 @@ fn no_font_makes_blank_pages() {
 
 #[test]
 fn the_ink_colors_the_glyphs() {
+    let _guard = serial();
     // 夜纸：黑底浅字。排版时写进 IR 的是黑色，墨色在这一层覆盖它——不然
     // 夜里就是黑字画在黑纸上。
     let (engine, has_font) = open_book();
@@ -232,6 +244,7 @@ fn the_ink_colors_the_glyphs() {
 
 #[test]
 fn word_spacing_reaches_the_layout() {
+    let _guard = serial();
     // 词距是西文的事：同样的字，词与词之间放宽一点，一行就装不下了。
     // 它走的是 `Style::word_px` → 节点的 `word-spacing`，不经过任何 UI。
     let text = "the quick brown fox jumps over the lazy dog. ".repeat(400);
@@ -254,6 +267,7 @@ fn word_spacing_reaches_the_layout() {
 
 #[test]
 fn reports_book_and_toc() {
+    let _guard = serial();
     let (engine, _) = open_book();
     let title = eb_plain_title(engine);
     assert!(!title.is_null());
@@ -308,6 +322,7 @@ fn reports_book_and_toc() {
 
 #[test]
 fn selection_round_trip() {
+    let _guard = serial();
     let (engine, _) = open_book();
     // 没排版时选不出来，但不干预。
     assert!(eb_plain_select(engine, 0, 0, 0, 0, 1, 0) < 0);
@@ -349,6 +364,7 @@ fn selection_round_trip() {
 
 #[test]
 fn resolves_links_and_fragments() {
+    let _guard = serial();
     // 用真 EPUB：书内链接是相对当前章解析的，TXT 没有这套路径语义。
     let Ok(bytes) = std::fs::read(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -418,6 +434,7 @@ fn resolves_links_and_fragments() {
 
 #[test]
 fn limits_are_enforced() {
+    let _guard = serial();
     let (engine, _) = open_book();
     let rc = eb_plain_layout(
         engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0.0, 0,
@@ -444,6 +461,7 @@ fn limits_are_enforced() {
 
 #[test]
 fn the_error_string_is_a_pointer_not_a_leak() {
+    let _guard = serial();
     // 失败一次：错误串就在库内的缓冲里，指针不归调用方、也不该每次漏一份。
     let engine = unsafe { eb_plain_open(std::ptr::null(), 0, std::ptr::null()) };
     assert_eq!(engine, -1);
@@ -475,6 +493,7 @@ fn the_error_string_is_a_pointer_not_a_leak() {
 
 #[test]
 fn version_is_not_hard_coded_to_an_old_release() {
+    let _guard = serial();
     let version = unsafe { std::ffi::CStr::from_ptr(eb_plain_version()) }
         .to_string_lossy()
         .into_owned();
@@ -484,6 +503,7 @@ fn version_is_not_hard_coded_to_an_old_release() {
 
 #[test]
 fn timings() {
+    let _guard = serial();
     let (engine, _) = open_book();
     let _ = eb_plain_layout(
         engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0.0, 0,

@@ -68,10 +68,24 @@ impl Surface for ScaledSurface<'_> {
     }
 
     fn glyph_run(&mut self, run: &GlyphRun, glyphs: &[Glyph], res: &mut dyn Resources) {
+        self.glyph_run_shifted(run, glyphs, PointF::new(0.0, 0.0), res);
+    }
+
+    fn glyph_run_shifted(
+        &mut self,
+        run: &GlyphRun,
+        glyphs: &[Glyph],
+        shift: PointF,
+        res: &mut dyn Resources,
+    ) {
         // 字号是光栅化入参，必须按设备像素给；advance 与偏移同步缩放，
-        // 否则字形会在缩放后重叠或拉开。
+        // 否则字形会在缩放后重叠或拉开。平移与缩放一起算，内层后端
+        // 就不需要再为每个 run 复制一次 `GlyphRun`。
         let mut moved = run.clone();
-        moved.origin = PointF::new(self.scaled_len(run.origin.x), self.scaled_len(run.origin.y));
+        moved.origin = PointF::new(
+            self.scaled_len(run.origin.x + shift.x),
+            self.scaled_len(run.origin.y + shift.y),
+        );
         moved.size = self.scaled_len(run.size);
         let scaled: Vec<Glyph> = glyphs
             .iter()

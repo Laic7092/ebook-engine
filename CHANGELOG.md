@@ -32,6 +32,9 @@
   `content_height` / `bitmap_window`，C ABI `eb_plain_layout_scroll` /
   `eb_plain_content_height` / `eb_plain_page_slice_raw`。
 
+- 块级背景/边框：布局层现在会为 `background` / `border` 产出 `Op::Rect` /
+  `Op::Border`。背景铺满边框盒、边框在背景之上；跨页盒按页切段，首段保留上边框、
+  末段保留下边框、中间段只留左右。折叠外边距后的盒顶按实际内容位置计算。
 - 内嵌字体支持 WOFF / WOFF2：`FontBook` 在加载入口用纯 Rust 的 `wuff` 解包成
   sfnt，再复用现有 harfrust 整形、read-fonts 度量与光栅链路；Web 端「加载本地字体」
   也接受 `.woff` / `.woff2`。解包失败通过 `FontBook` 诊断与 `eb_font_error` 暴露，
@@ -70,6 +73,13 @@
 
 ### Changed
 
+- 渲染热路径不再为每个 `GlyphRun` 复制 `text`：`Surface` 新增
+  `glyph_run_shifted`（默认实现兼容旧后端），`paint` 把平移交给后端，
+  `RgbaSurface` 直接按平移后的 origin 绘制；`ScaledSurface` 只保留一次
+  size/origin 复制。
+- 排版侧少几次分配：flow → 组装直接 `move` run 文本；`line_link` 在文档无链接
+  时短路、同一内联 owner 只查一次祖先链；`line_entries` 不再按字符分配
+  `owner_chain`；`fit_hyphen` 用前缀和代替逐候选重算行宽。
 - 仓库只保留源码：字体、EPUB 夹具、PWA 图标、iOS 启动图移出 git，由
   `scripts/setup.sh` / `scripts/generate.sh` 重建。新增 `fixtures/make_misc_epubs.py`
   与 `scripts/gen-icons.py`，所有生成物写进 `.gitignore`；CI 在测试前跑
@@ -88,6 +98,21 @@
 
 ### Fixed
 
+- C ABI 标量句柄表的 use-after-free：`with_engine` 原来在释放句柄表锁后才解引用
+  裸指针，并发 `eb_plain_close` 可以在两步之间释放对象。现在表里存 `Arc<EbEngine>`，
+  查表即克隆强引用，close 只摘表。
+- Web 打开书泄漏整本字节：`open_book` 不再 `Box::leak`，书字节所有权登记在
+  `BOOK_BYTES`，换书 / 新增的 `close_book()` / `eb_close_book` 会先丢掉借用者再
+  按原分配回收。
+- 解码后的 IR 遇到越界 span 会 panic（`release` 是 `panic = "abort"`，等于杀进程）：
+  `Span::end` 改为饱和，`DisplayList::op_slice` / `glyph_slice` 越界返回空切片。
+- 单个块的内联片段超过 65535 时 `Ch.piece` 的 `u16` 回绕，样式/链接会指到错误
+  片段：片段下标改为 `u32`，并加 65537 片段的回归用例。
+- `text-align: start/end` 没有按 `direction: rtl` 翻转，RTL 正文对齐是反的。
+- `max_lines` 在 flow 之后才拦截，20MB 文本仍会排完整章：预算现在传进断行循环，
+  超限立即收手（`truncated` + 单条 `LimitExceeded("max_lines")`）。
+- `text-transform` 改变字符个数时（`ß` → `SS`）`LineBox.src` 末尾少算原文字节，
+  选区会缺字符。
 - `eb_last_error` 每次失败都 `mem::forget` 一条 `Vec<u8>`：现在错误串是原地
   复用的缓冲，连续失败不换指针、也不泄漏。
 - `eb_version` 写死 `ebook-abi 0.1.0`，与 workspace 的 `0.2.1` 脱节：现在由

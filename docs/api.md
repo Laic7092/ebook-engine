@@ -146,6 +146,10 @@ IR 里有两个互补的枚举：
 | 5 | `Clip { rect, ops }` | 裁剪矩形 + 嵌套 op |
 | 6 | `Link { rect, href }` | 链接热区，与行盒同形，排版流坐标 |
 
+`Rect` / `Border` 由布局层为**块级** `background` / `border` 生成；跨页的盒会在
+每一页出现一段（首段带上边框、末段带下边框），不会因为页边界被截断成一条边。
+行内元素的背景/边框仍未产 op。
+
 `Link` 的语义：
 
 - 排版层只在带 `Node.link` 的行上发射，一行一个（换行就把链接切成多个热区）。
@@ -594,6 +598,7 @@ trait Renderer {
 | `Surface` 方法 | 调用方保证 |
 |---|---|
 | `glyph_run(run, glyphs, res)` | `glyphs` 已按 `run.glyphs` 切好 |
+| `glyph_run_shifted(run, glyphs, shift, res)` | 同上，且 `shift` 是加在 `run.origin` 上的平移；热路径后端应覆盖以避免复制 `GlyphRun.text` |
 | `rect(rect, color)` | 坐标已平移到页面内 |
 | `border(border)` | 同上 |
 | `image(id, rect, fit, res)` | 同上；尺寸未知时 IR 已给占位盒 |
@@ -641,6 +646,7 @@ advance 与**字号**一起乘 `scale`，因此字形按设备像素光栅化，
 | `eb_open(bytes)` | `epub` | 打开 EPUB，返回书目 JSON 或 `{"error":...}` |
 | `eb_open_text(text, name)` | `epub` | 打开已解码的 TXT；按标题行分章，`name` 用于书名 |
 | `eb_open_file(bytes, name)` | `epub` | 按 ZIP 魔数自动选择 EPUB / TXT |
+| `eb_close_book()` | `epub` | 关掉当前书并回收它的字节；`eb_open*` 也会在开头自动释放上一本 |
 | `eb_layout_chapter(bytes, name, spine, w, h, margin)` | `epub` | 无缓存地排版一章 |
 | `eb_layout(spine, w, h, margin)` | `epub` | 排版已打开书籍的指定章 |
 | `eb_layout_insets(spine, w, h, left, right, top, bottom, font_scale)` | `epub` | 四边独立页边距 + 只缩放字号/行高；页面容器不变 |

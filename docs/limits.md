@@ -14,7 +14,7 @@
 | `max_depth` | `256` | 空结果 + `LimitExceeded("max_depth")`，`truncated` |
 | `max_text_bytes` | `20_000_000` | 空结果 + `LimitExceeded("max_text_bytes")`，`truncated` |
 | `max_pages` | `100_000` | 保留已计划的页，丢尾部；`truncated` |
-| `max_lines` | `2_000_000` | 保留已产出的行前缀；`truncated` |
+| `max_lines` | `2_000_000` | 断行阶段提前停止，保留已产出的行前缀；`truncated` |
 | `max_image_pixels` | `67_108_864` | 超预算的图降为 `SizeFromContent`；`truncated` |
 
 零值统一由 `Limits::resolved()` 换成默认值；`Limits::default()` 就是上表。
@@ -29,6 +29,7 @@
 | 内容区最小尺寸 | `1.0 px` / 轴 | 夹到 1.0，不会出现 0 或负尺寸 | `PageConstraint::content_size` |
 | 块嵌套深度 | `128` | 更深的块直接当空块，不报错、不产生内容 | `flow.rs` |
 | 单块行序号/行数 | `u16::MAX = 65535` | 超过后行数统计截断；分页仍继续 | `flow.rs` |
+| 单块内联片段 | 无独立上限（受 `max_nodes` 约束） | 片段下标是 `u32`，不会回绕 | `flow.rs` |
 | `NodeId` | `u32` | arena 下标，越界 panic（调用方违约） | `ebook-ir::doc` |
 | `ImageId` | `u16 = 65535` | 超出无法编码；格式层应控制 | `ebook-ir::doc` |
 | `Span.start/len` | `u32` | 文本/op 索引；越界切片 panic | `ebook-ir::layout` |

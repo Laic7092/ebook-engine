@@ -118,12 +118,16 @@ pub struct DisplayList {
 }
 
 impl DisplayList {
+    /// 页的 op 切片。越界/溢出的 span 返回空切片，而不是 panic：
+    /// `LayoutResult` 可以来自 `codec::decode`（缓存、跨线程字节），那里的
+    /// span 不是排版层亲手写的，坏数据不能变成进程级 abort。
     pub fn op_slice(&self, span: Span) -> &[Op] {
-        &self.ops[span.as_range()]
+        self.ops.get(span.as_range()).unwrap_or(&[])
     }
 
+    /// 行/run 的字形切片。越界时返回空切片，理由同 [`Self::op_slice`]。
     pub fn glyph_slice(&self, span: Span) -> &[Glyph] {
-        &self.glyphs[span.as_range()]
+        self.glyphs.get(span.as_range()).unwrap_or(&[])
     }
 }
 
