@@ -5,8 +5,10 @@
 #   scripts/check.sh
 #
 # 内容：cargo fmt --all --check、cargo clippy -- -D warnings、
-#       cargo test --workspace、xtask all（golden / contract / app /
-#       pixel / size / parity）。
+#       cargo test --workspace、optional hyphen-en、xtask all（golden /
+#       contract / app / pixel / size / parity）。
+#
+# CI 直接跑这个脚本（不是再抄一遍命令），所以本地过 = CI 过。
 #
 # 环境变量：
 #   CARGO_TARGET_DIR   构建目录；CI 与并行 worktree 应各自指定
@@ -72,20 +74,6 @@ fi
 if ! cargo test -p ebook-font --features hyphen-en --test embedded; then
 	echo "FAIL: cargo test (ebook-font, hyphen-en)" >&2
 	status=1
-fi
-
-# tests/golden/*.ir 已入库（.gitignore 的 `!tests/golden/*.ir` 放行）。
-# 这里只为“本地刚 checkout、快照被误删”兜底：缺失时生成，已有快照仍然
-# 逐字节比较；不要用 bless 覆盖回归。
-section "prepare golden IR"
-if [[ ! -f tests/golden/demo.ir || ! -f tests/golden/epub.ir ]]; then
-	echo "tests/golden/*.ir 未入库，先生成本地快照"
-	if ! cargo run -p xtask -- bless; then
-		echo "FAIL: xtask bless" >&2
-		status=1
-	fi
-else
-	echo "ok"
 fi
 
 section "cargo run -p xtask -- all"

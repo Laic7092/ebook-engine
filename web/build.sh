@@ -9,6 +9,13 @@ cd "$(dirname "$0")/.."
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 # 默认只带 epub；需要内置英文断字时用 FEATURES=epub,hyphen-en。
 FEATURES="${FEATURES:-epub}"
+# CLI 必须与 `wasm-bindgen` crate 的精确 pin 同版本（crates/ebook-web/Cargo.toml）。
+want="$(scripts/versions.sh wasm-bindgen)"
+got="$(wasm-bindgen --version | awk '{print $NF}')"
+if [ "$got" != "$want" ]; then
+	echo "wasm-bindgen $got ≠ $want：先 cargo install wasm-bindgen-cli --version $want --locked" >&2
+	exit 1
+fi
 cargo build -p ebook-web --release --target wasm32-unknown-unknown --features "$FEATURES"
 rm -rf web/pkg
 wasm-bindgen --target web --out-dir web/pkg "$TARGET_DIR/wasm32-unknown-unknown/release/ebook_web.wasm"

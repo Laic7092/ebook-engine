@@ -38,6 +38,12 @@
   `resolved_fragment`）、`fragment_line`、`set_limits`。
 - `Engine::page(index)`：单页元数据按下标直取，不再为了第一页把整章页表
   拉出来（`eb_plain_page_info` 因此从 O(页数) 变成 O(1)）。
+- 发版/CI 去重：`1.100.0` 之前抄在三个 workflow 里，还配了一个“检查抄得对不对”
+  的步骤。现在 `.github/actions/rust/action.yml` 一份，版本从
+  `rust-toolchain.toml` / `crates/ebook-web/Cargo.toml` 经 `scripts/versions.sh`
+  读；CI 直接跑 `scripts/check.sh`（本地与 CI 同一份闸门），不再各写一遍
+  fmt/clippy/test/xtask。`scripts/check.sh` 里“golden 缺失就自动 bless”的兜底
+  删掉了（快照已入库，自动覆盖只会掩盖回归）。
 - release 矩阵扩到 Android（`arm64` / `armv7` / `x64`，用 runner 自带的 NDK
   clang）与 Windows（`x64`，MSVC 的 `ebook_abi.lib`）；每个 tar 里多带一份
   `ebook_abi.h`。

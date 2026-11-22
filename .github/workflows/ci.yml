@@ -13,11 +13,11 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # 与 pages.yml 一致：runner 在境外，直连比走国内镜像快也更稳。gh-proxy 对
-  # 数据中心 IP 回 403，v0.2.1 / v0.2.2 的 CI 都是卡在 hyph-en-us.tex 这一步。
+  # runner 在境外，直连比走国内镜像快也更稳。gh-proxy 对数据中心 IP 回 403。
   GH_PROXY: ""
 
 jobs:
+  # 名字被 release.yml 的 gate 按 check-run 名字查找；改这里要同步改那边。
   check:
     name: fmt / clippy / test / xtask
     runs-on: ubuntu-latest
@@ -25,86 +25,44 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 版本与 rust-toolchain.toml 一致：clippy/rustfmt 随 minor 变化，
-      # 浮动 stable 会让本地过、CI 红。下面有一道漂移检查兜底。
-      - name: install Rust (pinned + wasm32)
-        uses: dtolnay/rust-toolchain@master
+      # 工具链版本来自 rust-toolchain.toml（这个 action 里读），这里不再写死。
+      - uses: ./.github/actions/rust
         with:
-          toolchain: "1.100.0"
-          targets: wasm32-unknown-unknown
-          # action 只装 minimal profile，fmt/clippy 必须显式点名。
           components: rustfmt, clippy
 
-      - name: verify toolchain pin
+      - id: versions
         run: |
-          pinned="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)"
-          rustc --version
-          case "$(rustc --version)" in
-            "rustc ${pinned} "*) ;;
-            *) echo "rust-toolchain.toml 是 ${pinned}，CI 装的不是它" >&2; exit 1 ;;
-          esac
-
-      - name: cache cargo and target
-        uses: actions/cache@v4
-        with:
-          # 不收 ~/.cargo/bin：缓存里的二进制会让 `cargo install` 报
-          # "binary already exists in destination"。二进制交给各自的
-          # install action/命令，registry 缓存已经足够省时间。
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          {
+            echo "wasm_bindgen=$(scripts/versions.sh wasm-bindgen)"
+            echo "woff=$(scripts/versions.sh woff)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: install bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
-      # ebook-web 把 wasm-bindgen 精确锁在 0.2.129，CLI 必须同版本。
+      # ebook-web 把 wasm-bindgen 精确锁在 Cargo.toml 里，CLI 必须同版本。
       - name: install wasm-bindgen-cli
         uses: taiki-e/install-action@v2
         with:
-          tool: wasm-bindgen-cli@0.2.129
+          tool: wasm-bindgen-cli@${{ steps.versions.outputs.wasm_bindgen }}
 
-      # woff 只在 generate.sh 里把夹具字体转成 woff/woff2。它是纯 Rust 编译，
-      # 每次现编约 1 分钟；按版本单独缓存一个二进制最省。
+      # woff 只在 generate.sh 里转夹具字体，纯 Rust 编译约 1 分钟；按版本缓存二进制。
       - name: cache woff
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/woff
-          key: ${{ runner.os }}-woff-0.6.4
+          key: ${{ runner.os }}-woff-${{ steps.versions.outputs.woff }}
 
-      # 字体/EPUB 夹具不再入库，测试前按需重建（跳过图标与 5 MB 中文字体）。
       - name: install woff
-        run: command -v woff >/dev/null || cargo install woff --version 0.6.4 --features binary --locked
+        run: command -v woff >/dev/null || cargo install woff --version "${{ steps.versions.outputs.woff }}" --features binary --locked
 
+      # 字体/EPUB 夹具不入库，测试前按需重建（跳过图标与 5 MB 中文字体）。
       - name: generate fixtures
         run: scripts/generate.sh --skip-web
 
-      - name: cargo fmt --all --check
-        run: cargo fmt --all --check
-
-      # clippy 与本地 scripts/check.sh 一致：warning 也阻断。
-      # 少数属于其他并行分支路径的风格 warning 在源码/清单里用带理由的
-      # allow 收口，不在 CI 上放宽。
-      - name: cargo clippy --workspace --all-targets -- -D warnings
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: cargo test --workspace
-        run: cargo test --workspace
-
-      # 可选的英文断字词典不在默认 feature 里，单独跑一遍它的代码与测试。
-      - name: optional hyphen-en feature (clippy + test)
-        run: |
-          cargo clippy -p ebook-layout --all-targets --features hyphen-en -- -D warnings
-          cargo clippy -p ebook-font --all-targets --features hyphen-en -- -D warnings
-          cargo test -p ebook-layout --features hyphen-en --test hyphen
-          cargo test -p ebook-font --features hyphen-en --test embedded
-
-      # tests/golden/*.ir 与 tests/golden/pixels.txt 已入库，干净 checkout
-      # 上直接逐字节比较；这里不跑 bless，否则回归会被覆盖成“通过”。
-      - name: xtask all (golden / contract / app / pixel / size / parity)
-        run: cargo run -p xtask -- all
+      # 闸门只有这一份：本地 `scripts/check.sh` 与 CI 跑的是同一个脚本，
+      # 不再出现“CI 里改了、脚本忘了改”的漂移。
+      - name: scripts/check.sh
+        run: scripts/check.sh

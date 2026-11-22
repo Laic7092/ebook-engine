@@ -23,6 +23,7 @@ permissions:
 
 jobs:
   # 发版前先等这次提交的 CI 变绿：v0.2.1 / v0.2.2 都是 CI 红着发的版。
+  # 按 check-run 名字找，名字要跟 ci.yml 里 `check` job 的 `name:` 一致。
   # 手动 dispatch（没有 tag）时直接放过，只用于试跑产物。
   gate:
     name: CI must be green
@@ -91,17 +92,17 @@ jobs:
             triple: x86_64-pc-windows-msvc
             os: windows-latest
     runs-on: ${{ matrix.os }}
+    env:
+      # 产物名只写一处：打包与上传 artifact 都用它。
+      ARCHIVE: libebook_abi-${{ matrix.target }}.tar.gz
     steps:
       - uses: actions/checkout@v4
 
-      # The toolchain rust-toolchain.toml pins, with this target's std: a
-      # floating `stable` isn't it, and a missing `core` is how that shows.
-      - uses: dtolnay/rust-toolchain@master
+      # 工具链版本来自 rust-toolchain.toml（共享 action 里读），target 用矩阵的。
+      - uses: ./.github/actions/rust
         with:
-          toolchain: "1.100.0"
           targets: ${{ matrix.triple }}
-
-      - uses: Swatinem/rust-cache@v2
+          cache-key: release-${{ matrix.target }}
 
       # The `native` profile: panic = unwind (the ABI's catch_unwind needs it)
       # and no LTO (an external linker embeds it).
@@ -109,7 +110,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rustup target add "${{ matrix.triple }}"
           if [ -n "${{ matrix.linker }}" ]; then
             ndk="${ANDROID_NDK_LATEST_HOME:?this runner has no Android NDK}"
             toolchain="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
@@ -126,15 +126,15 @@ jobs:
             if [ -f "$candidate" ]; then lib="$candidate"; break; fi
           done
           test -n "$lib" || { echo "no static library in $out" >&2; exit 1; }
-          tar -czf "$out/libebook_abi-${{ matrix.target }}.tar.gz" \
+          tar -czf "$out/$ARCHIVE" \
             -C "$out" "$(basename "$lib")" \
             -C "$GITHUB_WORKSPACE/crates/ebook-abi/include" ebook_abi.h
-          ls -la "$out/libebook_abi-${{ matrix.target }}.tar.gz"
+          ls -la "$out/$ARCHIVE"
 
       - uses: actions/upload-artifact@v4
         with:
           name: lib-${{ matrix.target }}
-          path: target/${{ matrix.triple }}/native/libebook_abi-${{ matrix.target }}.tar.gz
+          path: target/${{ matrix.triple }}/native/${{ env.ARCHIVE }}
           retention-days: 7
 
   release:

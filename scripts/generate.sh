@@ -147,7 +147,7 @@ if [ "$WEB_ONLY" = 0 ]; then
 
 	if [ "$WOFF" = "missing" ]; then
 		say "跳过 WOFF/WOFF2 测试字体：没有 woff CLI，也没有 fontTools"
-		say "  （ebook-font 的 woff 测试会 skip；要跑它们：cargo install woff --version 0.6.4 --features binary --locked）"
+		say "  （ebook-font 的 woff 测试会 skip；要跑它们：cargo install woff --version $("$ROOT/scripts/versions.sh" woff) --features binary --locked）"
 	else
 		say "生成 WOFF / WOFF2 测试字体"
 		make_woff "$FONT_DIR/test.woff"

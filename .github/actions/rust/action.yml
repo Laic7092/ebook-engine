@@ -1,0 +1,49 @@
+name: rust
+description: |
+  按 rust-toolchain.toml 装工具链（版本不在这里写死），并缓存 cargo/target。
+  三个 workflow 共用这一份，省掉“toolchain 抄三遍 + 再写一步检查抄得对不对”。
+
+inputs:
+  targets:
+    description: 额外的 rustup target（空格分隔）；留空就用 rust-toolchain.toml 里的
+    required: false
+    default: ""
+  components:
+    description: 额外的 rustup 组件（如 "rustfmt, clippy"）
+    required: false
+    default: ""
+  cache-key:
+    description: cargo/target 缓存的命名空间（不同构建配置用不同值）
+    required: false
+    default: cargo
+
+runs:
+  using: composite
+  steps:
+    - id: versions
+      shell: bash
+      run: |
+        set -euo pipefail
+        {
+          echo "toolchain=$(scripts/versions.sh toolchain)"
+          echo "targets=$(scripts/versions.sh targets)"
+        } >> "$GITHUB_OUTPUT"
+
+    # 版本从 rust-toolchain.toml 读：升级只改那一个文件。
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ steps.versions.outputs.toolchain }}
+        targets: ${{ inputs.targets || steps.versions.outputs.targets }}
+        components: ${{ inputs.components }}
+
+    # 不收 ~/.cargo/bin：缓存里的二进制会让 `cargo install` 报
+    # "binary already exists in destination"。二进制交给各自的 install 步骤。
+    - uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-${{ inputs.cache-key }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ inputs.cache-key }}-

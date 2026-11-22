@@ -20,8 +20,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-WASM_BINDGEN_VERSION="0.2.129"
-WOFF_VERSION="0.6.4"
+# 版本只有一个出处：rust-toolchain.toml / crates/ebook-web/Cargo.toml /
+# scripts/versions.sh。这里不再抄一遍。
+WASM_BINDGEN_VERSION="$(scripts/versions.sh wasm-bindgen)"
+WOFF_VERSION="$(scripts/versions.sh woff)"
 
 say() { printf '\n==> %s\n' "$*"; }
 need() {
@@ -37,9 +39,14 @@ need curl
 
 if ! command -v rustup >/dev/null 2>&1; then
 	echo "建议安装 rustup：https://rustup.rs" >&2
-elif ! rustup target list --installed 2>/dev/null | grep -qx wasm32-unknown-unknown; then
-	say "安装 wasm32-unknown-unknown"
-	rustup target add wasm32-unknown-unknown
+else
+	# target 列表来自 rust-toolchain.toml，这里不再写死。
+	for target in $(scripts/versions.sh targets); do
+		if ! rustup target list --installed 2>/dev/null | grep -qx "$target"; then
+			say "安装 $target"
+			rustup target add "$target"
+		fi
+	done
 fi
 
 BINDGEN=""
