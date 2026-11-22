@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 const HEADER: &str = include_str!("../include/ebook_abi.h");
 
 /// 头文件里声明可以出现的返回类型（声明行以它们开头）。
-const RETURN_TYPES: [&str; 14] = [
+const RETURN_TYPES: [&str; 16] = [
     "const char",
     "const uint8_t",
     "uint8_t",
@@ -27,6 +27,8 @@ const RETURN_TYPES: [&str; 14] = [
     "EbLoc",
     "EbSelectionRect",
     "EbLink",
+    "EbScrollChapter",
+    "EbScrollLoc",
 ];
 
 fn rust_symbols() -> BTreeSet<String> {
@@ -151,6 +153,14 @@ fn struct_sizes_match_the_header_kinds() {
         ebook_abi::eb_struct_size(ebook_abi::plain::EB_STRUCT_LINK),
         size_of::<ebook_abi::plain::EbLink>()
     );
+    assert_eq!(
+        ebook_abi::eb_struct_size(ebook_abi::plain::EB_STRUCT_SCROLL_CHAPTER),
+        size_of::<ebook_abi::plain::EbScrollChapter>()
+    );
+    assert_eq!(
+        ebook_abi::eb_struct_size(ebook_abi::plain::EB_STRUCT_SCROLL_LOC),
+        size_of::<ebook_abi::plain::EbScrollLoc>()
+    );
     assert_eq!(ebook_abi::eb_struct_size(0), 0, "未知 kind 应为 0");
 }
 
@@ -174,11 +184,15 @@ _Static_assert(EB_STRUCT_PAGE_INFO == 1, "kind 1");
 _Static_assert(EB_STRUCT_LOC == 2, "kind 2");
 _Static_assert(EB_STRUCT_SELECTION_RECT == 3, "kind 3");
 _Static_assert(EB_STRUCT_LINK == 4, "kind 4");
+_Static_assert(EB_STRUCT_SCROLL_CHAPTER == 5, "kind 5");
+_Static_assert(EB_STRUCT_SCROLL_LOC == 6, "kind 6");
 
 _Static_assert(sizeof(EbPageInfo) == {page_info}, "EbPageInfo");
 _Static_assert(sizeof(EbLoc) == {loc}, "EbLoc");
 _Static_assert(sizeof(EbSelectionRect) == {rect}, "EbSelectionRect");
 _Static_assert(sizeof(EbLink) == {link}, "EbLink");
+_Static_assert(sizeof(EbScrollChapter) == {scroll_chapter}, "EbScrollChapter");
+_Static_assert(sizeof(EbScrollLoc) == {scroll_loc}, "EbScrollLoc");
 
 _Static_assert(sizeof(float) == 4, "f32");
 _Static_assert(sizeof(uint64_t) == 8, "u64");
@@ -190,7 +204,11 @@ void probe_types(void) {{
   EbLoc loc = eb_plain_hit(-1, 0, 0.0f, 0.0f);
   EbSelectionRect box = eb_plain_selection_rect(-1, 0);
   EbLink link = eb_plain_resolve_link(-1, (const char *)0);
-  (void)info; (void)loc; (void)box; (void)link;
+  EbScrollChapter chapter = eb_plain_scroll_chapter(-1, 0);
+  EbScrollLoc hit = eb_plain_scroll_hit(-1, 0.0f, 0.0f);
+  size_t len = 0;
+  uint8_t *bytes = eb_plain_scroll_band_bytes(-1, 0.0f, 1.0f, 1.0f, 0, 0, false, &len);
+  (void)info; (void)loc; (void)box; (void)link; (void)chapter; (void)hit; (void)bytes;
 }}
 "#,
         version = version,
@@ -198,6 +216,8 @@ void probe_types(void) {{
         loc = size_of::<ebook_abi::plain::EbLoc>(),
         rect = size_of::<ebook_abi::plain::EbSelectionRect>(),
         link = size_of::<ebook_abi::plain::EbLink>(),
+        scroll_chapter = size_of::<ebook_abi::plain::EbScrollChapter>(),
+        scroll_loc = size_of::<ebook_abi::plain::EbScrollLoc>(),
     );
     std::fs::write(&probe, source).expect("写 probe.c");
 

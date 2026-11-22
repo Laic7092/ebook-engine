@@ -561,3 +561,121 @@ fn timings() {
     eprintln!("one chapter layout: {:?}", start.elapsed());
     eb_plain_close(engine);
 }
+
+#[test]
+fn scroll_session_is_cross_chapter_and_band_rendering_works() {
+    let _guard = serial();
+    // 跨章需要真 EPUB（两章）；夹具不在就跳过。
+    let Ok(bytes) = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/demo.epub"
+    )) else {
+        eprintln!("fixtures/demo.epub 不在，跳过滚动会话测试");
+        return;
+    };
+    let engine = unsafe { eb_plain_open(bytes.as_ptr(), bytes.len(), c"demo.epub".as_ptr()) };
+    assert!(engine >= 0);
+
+    // 没开始会话：滚动入口给明确错误，而不是看起来像 0 的值。
+    assert_eq!(eb_plain_scroll_total_height(engine), -1.0);
+    assert_eq!(eb_plain_scroll_spine_at(engine, 0.0), -1);
+    assert_eq!(eb_plain_scroll_hit(engine, 0.0, 0.0).spine, -1);
+
+    assert_eq!(
+        eb_plain_scroll_begin(engine, 400.0, 700.0, 0.0, 24.0, 0.0, 24.0, 1.0, 1.0, 0.0, 0.0, 0,),
+        2,
+        "demo.epub 应有两章"
+    );
+    assert_eq!(eb_plain_scroll_chapter_count(engine), 2);
+
+    let first = eb_plain_scroll_chapter(engine, 0);
+    assert_eq!(first.ok, 1);
+    assert_eq!(first.spine, 0);
+    assert_eq!(first.top, 0.0);
+    assert!(first.height > 0.0, "第 0 章没有高度");
+    let second = eb_plain_scroll_chapter(engine, 1);
+    assert_eq!(second.ok, 1);
+    assert_eq!(second.spine, 1);
+    assert!((second.top - first.height).abs() < 0.01);
+
+    // 越界下标：ok == 0，不是崩溃。
+    let beyond = eb_plain_scroll_chapter(engine, 7);
+    assert_eq!(beyond.ok, 0);
+    assert_eq!(beyond.spine, u32::MAX);
+
+    let total = eb_plain_scroll_total_height(engine);
+    assert!(total > 0.0);
+    assert!((total - (first.height + second.height)).abs() < 0.01);
+    assert_eq!(eb_plain_scroll_spine_at(engine, 0.0), 0);
+    assert_eq!(eb_plain_scroll_spine_at(engine, second.top + 1.0), 1);
+    assert_eq!(eb_plain_scroll_spine_at(engine, total + 10.0), -1);
+    assert!((eb_plain_scroll_chapter_top(engine, 1) - second.top).abs() < 0.01);
+
+    // 一段跨章的可见带：文件与内存两条路给同样的字节。
+    let y = second.top.floor() - 40.0;
+    let path = std::env::temp_dir().join("eb-plain-scroll-band.eqp");
+    let c_path = CString::new(path.to_str().unwrap()).unwrap();
+    assert_eq!(
+        eb_plain_scroll_band_raw(engine, y, 120.0, 1.0, 0, 0, false, c_path.as_ptr()),
+        0,
+        "跨章带写文件失败"
+    );
+    let on_disk = std::fs::read(&path).unwrap();
+    let mut len = 0usize;
+    let ptr = eb_plain_scroll_band_bytes(engine, y, 120.0, 1.0, 0, 0, false, &mut len);
+    assert!(!ptr.is_null(), "内存瓦片返回空指针");
+    let in_memory = unsafe { std::slice::from_raw_parts(ptr, len).to_vec() };
+    unsafe { ebook_abi::eb_free(ptr, len) };
+    assert_eq!(on_disk, in_memory, "两条路应给逐字节相同的 EQP1");
+    assert_eq!(&on_disk[..4], b"EQP1");
+    assert_eq!(u32::from_le_bytes(on_disk[4..8].try_into().unwrap()), 400);
+    assert_eq!(u32::from_le_bytes(on_disk[8..12].try_into().unwrap()), 120);
+
+    // 命中带章号；行号换算回同一个流坐标。
+    let hit = eb_plain_scroll_hit(engine, 60.0, second.top + 30.0);
+    assert_eq!(hit.spine, 1);
+    assert!(hit.y >= second.top && hit.y < second.top + second.height);
+    let line_y = eb_plain_scroll_line_y(engine, 1, hit.line);
+    assert!((line_y - hit.y).abs() < 0.01, "{line_y} vs {}", hit.y);
+
+    // 目录/链接跳转：锚点 → 全书流坐标。
+    let anchor = eb_plain_scroll_anchor_y(engine, 0, c"note".as_ptr());
+    assert!(anchor >= 0.0 && anchor < first.height, "anchor {anchor}");
+    assert_eq!(eb_plain_scroll_anchor_y(engine, 0, c"nope".as_ptr()), -1.0);
+    assert_eq!(eb_plain_scroll_anchor_y(engine, 99, c"note".as_ptr()), -1.0);
+
+    // 进度：书首 0，书尾 1。
+    assert!(eb_plain_scroll_progress(engine, 0.0).abs() < 1.0e-6);
+    assert!((eb_plain_scroll_progress(engine, total) - 1.0).abs() < 1.0e-6);
+
+    eb_plain_close(engine);
+}
+
+#[test]
+fn scroll_session_requires_a_handle_and_a_book() {
+    let _guard = serial();
+    // -1 句柄：不 panic，给错误码。
+    assert_eq!(
+        eb_plain_scroll_begin(-1, 400.0, 700.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0),
+        -1
+    );
+    assert_eq!(eb_plain_scroll_chapter_count(-1), 0);
+    assert_eq!(eb_plain_scroll_chapter(-1, 0).ok, 0);
+    assert_eq!(eb_plain_scroll_total_height(-1), -1.0);
+    assert_eq!(eb_plain_scroll_spine_at(-1, 0.0), -1);
+    assert_eq!(eb_plain_scroll_chapter_top(-1, 0), -1.0);
+    assert_eq!(eb_plain_scroll_hit(-1, 0.0, 0.0).spine, -1);
+    assert_eq!(eb_plain_scroll_line_y(-1, 0, 0), -1.0);
+    assert_eq!(eb_plain_scroll_anchor_y(-1, 0, c"x".as_ptr()), -1.0);
+    assert_eq!(eb_plain_scroll_progress(-1, 0.0), -1.0);
+    let mut len = 123usize;
+    assert!(eb_plain_scroll_band_bytes(-1, 0.0, 10.0, 1.0, 0, 0, false, &mut len).is_null());
+    assert_eq!(len, 0, "失败时 out_len 要清 0");
+
+    let path = std::env::temp_dir().join("eb-plain-scroll-none.eqp");
+    let c_path = CString::new(path.to_str().unwrap()).unwrap();
+    assert_eq!(
+        eb_plain_scroll_band_raw(-1, 0.0, 10.0, 1.0, 0, 0, false, c_path.as_ptr()),
+        -1
+    );
+}

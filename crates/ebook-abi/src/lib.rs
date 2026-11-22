@@ -102,7 +102,7 @@ pub unsafe extern "C" fn eb_free(ptr: *mut u8, len: usize) {
     drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
 }
 
-fn into_raw(bytes: Vec<u8>) -> (*mut u8, usize) {
+pub(crate) fn into_raw(bytes: Vec<u8>) -> (*mut u8, usize) {
     if bytes.is_empty() {
         return (std::ptr::null_mut(), 0);
     }
@@ -135,6 +135,8 @@ pub extern "C" fn eb_struct_size(kind: u32) -> usize {
         plain::EB_STRUCT_LOC => std::mem::size_of::<plain::EbLoc>(),
         plain::EB_STRUCT_SELECTION_RECT => std::mem::size_of::<plain::EbSelectionRect>(),
         plain::EB_STRUCT_LINK => std::mem::size_of::<plain::EbLink>(),
+        plain::EB_STRUCT_SCROLL_CHAPTER => std::mem::size_of::<plain::EbScrollChapter>(),
+        plain::EB_STRUCT_SCROLL_LOC => std::mem::size_of::<plain::EbScrollLoc>(),
         _ => 0,
     }
 }
@@ -260,23 +262,8 @@ fn dispatch(engine: &mut Engine, request: Request) -> Response {
             viewport,
             style,
         } => {
-            let viewport = Viewport {
-                width: viewport.width,
-                height: viewport.height,
-                insets: EdgesF {
-                    top: viewport.insets.top,
-                    right: viewport.insets.right,
-                    bottom: viewport.insets.bottom,
-                    left: viewport.insets.left,
-                },
-            };
-            let style = Style {
-                font_scale: style.font_scale,
-                line_scale: style.line_scale,
-                letter_px: style.letter_px,
-                word_px: style.word_px,
-                align: style.align,
-            };
+            let viewport = viewport_core(viewport);
+            let style = style_core(style);
             match engine.layout(spine as usize, viewport, style) {
                 Ok(()) => Response::Pages(engine.pages().into_iter().map(page_wire).collect()),
                 Err(error) => Response::Error(error.to_string()),
@@ -319,6 +306,71 @@ fn dispatch(engine: &mut Engine, request: Request) -> Response {
                 external: link.external,
             }))
         }
+        Request::Scroll { viewport, style } => {
+            let viewport = viewport_core(viewport);
+            let style = style_core(style);
+            match engine.scroll_begin(viewport, style) {
+                Ok(_) => match engine.scroll_chapters() {
+                    Ok(chapters) => Response::ScrollChapters(
+                        chapters.into_iter().map(scroll_chapter_wire).collect(),
+                    ),
+                    Err(error) => Response::Error(error.to_string()),
+                },
+                Err(error) => Response::Error(error.to_string()),
+            }
+        }
+        Request::ScrollChapters => match engine.scroll_chapters() {
+            Ok(chapters) => {
+                Response::ScrollChapters(chapters.into_iter().map(scroll_chapter_wire).collect())
+            }
+            Err(error) => Response::Error(error.to_string()),
+        },
+        Request::ScrollChapter { index } => match engine.scroll_chapter(index as usize) {
+            Ok(chapter) => Response::ScrollChapter(Some(scroll_chapter_wire(chapter))),
+            Err(ebook_reader::EngineError::ChapterOutOfRange(_)) => Response::ScrollChapter(None),
+            Err(error) => Response::Error(error.to_string()),
+        },
+        Request::ScrollHeight => match engine.scroll_total_height() {
+            Ok(height) => Response::Number(height),
+            Err(error) => Response::Error(error.to_string()),
+        },
+        Request::ScrollSpineAt { y } => match engine.scroll_spine_at(y) {
+            Ok(found) => Response::ScrollSpine(found.map(|(spine, _)| spine as u32)),
+            Err(error) => Response::Error(error.to_string()),
+        },
+        Request::ScrollBand {
+            y,
+            height,
+            scale,
+            ink,
+            paper,
+            bold,
+        } => match engine.scroll_slice(y, height, scale, ink, paper, bold) {
+            Ok(bitmap) => Response::Bitmap {
+                width: bitmap.width,
+                height: bitmap.height,
+                rgba: bitmap.rgba,
+            },
+            Err(error) => Response::Error(error.to_string()),
+        },
+        Request::ScrollHit { x, y } => match engine.scroll_hit(x, y) {
+            Ok(hit) => Response::ScrollHit(hit.map(scroll_loc_wire)),
+            Err(error) => Response::Error(error.to_string()),
+        },
+        Request::ScrollLineY { spine, line } => match engine.scroll_line_y(spine as usize, line) {
+            Ok(y) => Response::Position(y),
+            Err(error) => Response::Error(error.to_string()),
+        },
+        Request::ScrollAnchorY { spine, fragment } => {
+            match engine.scroll_anchor_y(spine as usize, &fragment) {
+                Ok(y) => Response::Position(y),
+                Err(error) => Response::Error(error.to_string()),
+            }
+        }
+        Request::ScrollProgress { y } => match engine.scroll_progress(y) {
+            Ok(progress) => Response::Number(progress),
+            Err(error) => Response::Error(error.to_string()),
+        },
         Request::RegisterFont { bytes } => match engine.register_font(bytes) {
             Ok(id) => Response::Font(id.0 as u32),
             Err(message) => Response::Error(message),
@@ -345,6 +397,47 @@ fn dispatch(engine: &mut Engine, request: Request) -> Response {
             Response::Ok
         }
         Request::Ping => Response::Pong,
+    }
+}
+
+fn viewport_core(viewport: protocol::Viewport) -> Viewport {
+    Viewport {
+        width: viewport.width,
+        height: viewport.height,
+        insets: EdgesF {
+            top: viewport.insets.top,
+            right: viewport.insets.right,
+            bottom: viewport.insets.bottom,
+            left: viewport.insets.left,
+        },
+    }
+}
+
+fn style_core(style: protocol::Style) -> Style {
+    Style {
+        font_scale: style.font_scale,
+        line_scale: style.line_scale,
+        letter_px: style.letter_px,
+        word_px: style.word_px,
+        align: style.align,
+    }
+}
+
+fn scroll_chapter_wire(chapter: ebook_reader::ScrollChapter) -> protocol::ScrollChapter {
+    protocol::ScrollChapter {
+        spine: chapter.spine as u32,
+        top: chapter.top,
+        height: chapter.height,
+        ok: chapter.ok,
+    }
+}
+
+fn scroll_loc_wire(hit: ebook_reader::ScrollLoc) -> protocol::ScrollLoc {
+    protocol::ScrollLoc {
+        spine: hit.spine as i32,
+        line: hit.line,
+        byte: hit.byte,
+        y: hit.y,
     }
 }
 

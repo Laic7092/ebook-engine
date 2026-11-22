@@ -7,6 +7,21 @@
 
 ### Added
 
+- **连续滚动会话（跨章）**：`Engine::scroll_begin` 之后全部用全书流坐标，
+  章节起点（`scroll_chapter` / `scroll_chapters`）、总高（`scroll_total_height`）、
+  y → 章（`scroll_spine_at`）、跨章可见带（`scroll_slice`，章缝不错行）、
+  跨章命中（`scroll_hit`）、行/锚点 → y（`scroll_line_y` / `scroll_anchor_y`）、
+  进度（`scroll_progress`）。高度是懒量的，一章排不出来按 0 高记、不拖累后面的章；
+  章节 IR 有 4 章 LRU。宿主不再维护“章节 top 表 / 切片命名 / 按章调度排版”。
+  C ABI：`eb_plain_scroll_*`（含 `_band_raw` 落盘与 `_band_bytes` 内存瓦片），
+  协议面 `Request::Scroll*`（tag 追加在末尾，老 tag 不变）。新增 `EbScrollChapter` /
+  `EbScrollLoc`（`eb_struct_size` kind 5/6）。
+- **滚动只画窗口里的 op**：`paint_window` 按 `Surface::scale()` 把 surface 高换算
+  成流坐标，窗口外的字形连光栅查询都不做；此前每个瓦片都把整章的字形过一遍，
+  代价只随章高增长（2x 下 9010pt 章：128pt 与 1024pt 切片都是 ~90ms，一整页只要
+  ~6ms）。瓦片起点同时吸到设备像素栅格，滚动时字形亚像素相位不变，光栅缓存能命中。
+  回归测试用计数 `Resources` 断言窗口外不查字形。
+
 - C ABI 有了头文件：`crates/ebook-abi/include/ebook_abi.h`，两个面
   （`eb_open`/`eb_request` 与 `eb_plain_*`）、`repr(C)` 结构体、`EQP1` 位图格式
   与所有权/生命周期都在里面。`cargo test -p ebook-abi --test header` 用

@@ -134,6 +134,32 @@ pub struct PageBox {
     pub progress: f32,
 }
 
+/// 滚动会话里的一章：起点、内容高度、这章排没排成功。
+#[derive(Clone, Copy, Debug)]
+pub struct ScrollChapter {
+    /// 章节在 spine 里的下标。
+    pub spine: usize,
+    /// 全章在全书流坐标里的起点（等于前面所有章的高度之和）。
+    pub top: f32,
+    /// 本章内容高度；排不出来的章是 0。
+    pub height: f32,
+    /// 排版成功为 `true`；失败的章高度按 0 计，不会拖垮后面的章。
+    pub ok: bool,
+}
+
+/// 滚动模式下的命中结果：全书的章 + 章内位置。
+#[derive(Clone, Copy, Debug)]
+pub struct ScrollLoc {
+    /// 落在哪个 spine 下标。
+    pub spine: usize,
+    /// 全章行号（不是页内行号）。
+    pub line: u32,
+    /// 该行内的字节偏移。
+    pub byte: u32,
+    /// 该行行盒顶边在全书流坐标里的位置。
+    pub y: f32,
+}
+
 /// 一张设备像素位图：`rgba` 是 `width * height * 4` 字节，行优先，非预乘。
 #[derive(Clone, Debug)]
 pub struct Bitmap {
@@ -176,8 +202,12 @@ pub enum EngineError {
     NoBook,
     /// 还没有排版，或者排版的章节已经被换掉。
     NoLayout,
+    /// 还没有开始连续滚动会话（或者字体换过、会话已失效）。
+    NoScroll,
     /// 页号越界。
     PageOutOfRange(u32),
+    /// 章节下标越界。
+    ChapterOutOfRange(u32),
     /// 格式层/章节解析失败。
     Chapter(String),
     /// 光栅化失败。
@@ -191,7 +221,9 @@ impl std::fmt::Display for EngineError {
         match self {
             EngineError::NoBook => write!(f, "没有打开的书"),
             EngineError::NoLayout => write!(f, "还没有排版"),
+            EngineError::NoScroll => write!(f, "还没有开始滚动会话"),
             EngineError::PageOutOfRange(page) => write!(f, "页号越界: {page}"),
+            EngineError::ChapterOutOfRange(spine) => write!(f, "章节下标越界: {spine}"),
             EngineError::Chapter(message) => write!(f, "章节解析失败: {message}"),
             EngineError::Render(message) => write!(f, "光栅化失败: {message}"),
             EngineError::TooLarge { width, height } => {

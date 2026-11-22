@@ -67,6 +67,12 @@ impl Surface for ScaledSurface<'_> {
         SizeF::new(self.scaled_len(size.w), self.scaled_len(size.h))
     }
 
+    /// `size()` 是设备像素，排版坐标要除回去：`paint_window` 靠它把瓦片高
+    /// 换算成流坐标，才知道该裁掉哪些 op。
+    fn scale(&self) -> f32 {
+        self.scale
+    }
+
     fn glyph_run(&mut self, run: &GlyphRun, glyphs: &[Glyph], res: &mut dyn Resources) {
         self.glyph_run_shifted(run, glyphs, PointF::new(0.0, 0.0), res);
     }

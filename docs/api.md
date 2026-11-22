@@ -387,14 +387,48 @@ pub fn paint_window(ir: &LayoutResult, page: u32, top: f32,
 - 上下 `PageConstraint.margin` 应传 0，左右保留；宿主在滚动容器上自己留
   上下白，瓦片之间才没有空白带。
 - `paint_window(ir, 0, y, surface, res)` 把流坐标 `y` 画到 surface 的 y=0，
-  surface 只需瓦片高；宽度是整页宽（含左右留白）。
+  surface 只需瓦片高；宽度是整页宽（含左右留白）。**窗口外的 op 直接跳过**
+  （`Surface::scale()` 把 surface 高换算回流坐标）：取一枚 128pt 瓦片的代价
+  只跟 128pt 有关，不跟章高有关。`top` 会吸到设备像素栅格，相邻瓦片的字形
+  亚像素相位相同，滚动时光栅缓存才能命中。
 - 命中仍用 `Reader::hit(0, x, y)`（`inset.top == 0` 时 `y` 就是流坐标）；
   `Reader::progress` 按行计算，滚动模式不需要新公式。
-- `ebook-reader` 对应入口：`Engine::layout_scroll`、`content_height`、
-  `bitmap_window`；C ABI：`eb_plain_layout_scroll`、`eb_plain_content_height`、
+- 单章入口：`Engine::layout_scroll`、`content_height`、`bitmap_window`；
+  C ABI：`eb_plain_layout_scroll`、`eb_plain_content_height`、
   `eb_plain_page_slice_raw`。
+
+#### 4.7.1 连续滚动会话（跨章）
+
+单章 API 只解决了“这一章怎么画”；跨章滚动还要章节起点、全书总高、跨章命中
+和“目录/链接该滚到哪”。这些由引擎算，宿主不再自己维护章节 top 表：
+
+```rust
+// ebook-reader
+engine.scroll_begin(viewport, style)?;      // 上下留白会被置 0
+engine.scroll_chapter(i)?;                  // { spine, top, height, ok }，懒量 0..=i
+engine.scroll_chapters()?;                  // 全书表，首次会排完全书
+engine.scroll_total_height()?;              // 滚动容器 contentSize
+engine.scroll_spine_at(y)?;                 // y → (章, 章首)
+engine.scroll_slice(y, height, scale, ink, paper, bold)?;  // 可跨章的一段
+engine.scroll_hit(x, y)?;                   // → { spine, line, byte, y }
+engine.scroll_line_y(spine, line)?;         // 行 → 全书流坐标
+engine.scroll_anchor_y(spine, "#frag")?;    // 目录/链接 → 全书流坐标
+engine.scroll_progress(y)?;                 // 流坐标 → 0..1
+```
+
+- 高度是**懒**的：`scroll_chapter(i)` 只保证 `0..=i` 量过，可以分摊到多帧；
+  `scroll_total_height()` / `scroll_chapters()` 才量全书。
+- 一章排不出来不会拖垮整本书：该章 `height == 0`、`ok == false`，后面的章照排。
+- `scroll_slice` 自己找出涉及的章、分别光栅化再拼到同一张位图，章缝不会错行；
+  内容之外是纸色。起点会吸到设备像素栅格。
+- 章节 IR 有 LRU（当前章 + 3 章）；字体换了（`register_font`）后旧高度失效，
+  `scroll_*` 会返回 `NoScroll`，宿主重新 `scroll_begin` 即可。
+- C ABI：`eb_plain_scroll_begin` / `_chapter_count` / `_chapter` /
+  `_total_height` / `_spine_at` / `_chapter_top` / `_band_raw` / `_band_bytes` /
+  `_hit` / `_line_y` / `_anchor_y` / `_progress`；协议面是 `Request::Scroll*`
+  （`ScrollBand` 直接回 `Response::Bitmap`，不需要落盘）。
 - 并发与分页相同：一个 `Engine` 是 `&mut`，多个引擎可以同时排版/取瓦片；
-  没有全局状态。
+  没有全局状态。取消一枚瓦片就是丢掉结果——修掉 O(章高) 之后它本来就是毫秒级。
 
 ### 4.8 `LayoutCache`（`ebook-cache`）
 
@@ -593,7 +627,8 @@ trait Renderer {
 
 入参是不可变引用，类型上禁止改坐标。`paint()` 是共同实现：它只在这里把
 **排版流坐标**平移成页面坐标。`paint_window(ir, page, top, surface, res)` 是它的
-窗口版：把流坐标 `top` 画到 surface 的 y=0，surface 只占瓦片高，供滚动模式用。
+窗口版：把流坐标 `top` 画到 surface 的 y=0，surface 只占瓦片高，供滚动模式用；
+它按 `surface.size().h / surface.scale()` 裁掉窗口外的 op（字形连光栅查询都不做）。
 
 | `Surface` 方法 | 调用方保证 |
 |---|---|
@@ -604,6 +639,7 @@ trait Renderer {
 | `image(id, rect, fit, res)` | 同上；尺寸未知时 IR 已给占位盒 |
 | `unresolved(u)` | 同上 |
 | `push_clip(rect)` / `pop_clip()` | 嵌套顺序由 paint 维护 |
+| `scale()` | 默认 1.0；装饰型 surface（先乘比例再转给后端）覆盖它，`paint_window` 靠它把 surface 高换算成流坐标 |
 
 `RenderError`：
 
@@ -731,7 +767,9 @@ JS 侧解码器是手写的，IR 版本、枚举 tag、字段顺序都见本文�
 行优先、直通 alpha（非预乘）。位图覆盖整个视口（含留白），不是内容盒。
 `eb_plain_page_raw` 出一页；`eb_plain_page_slice_raw` 出滚动流的一片
 （`y`/`height` 是点，`y` 在 `[0, eb_plain_content_height)` 里，同一 `y`
-逐字节可复现）。平台侧只读它：iOS 包成 `CGImage`，GTK 包成 `GdkMemoryTexture`。
+逐字节可复现）。`eb_plain_scroll_band_raw` 出**跨章**的一段（`y` 在
+`[0, eb_plain_scroll_total_height)` 里），`eb_plain_scroll_band_bytes` 是它的
+内存版（`eb_free` 释放）——能读内存的宿主不必为瓦片落盘。平台侧只读它：iOS 包成 `CGImage`，GTK 包成 `GdkMemoryTexture`。
 
 ### 9.5 句柄上的两份状态
 

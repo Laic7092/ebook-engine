@@ -97,7 +97,7 @@ op 坐标是**排版流坐标**，不是页面内坐标。`Page.origin` 表示�
 |---|---|
 | 格式 | TXT / EPUB（ZIP stored+deflate、container/OPF/spine、XHTML、CSS 级联、命名实体、锚点）；TOC（EPUB3 nav / EPUB2 NCX）、链接、资源清单、字体声明、书目元数据、格式层诊断（`EpubIssueCode`） |
 | 排版 | 盒树、margin collapsing、UAX #14 断行、两端对齐、孤行寡行、强制分页、增量重排入口；`layout` 是全函数 |
-| 滚动 | `Mode::Scroll`：整章排成一页，`content_height` 给流长度，`paint_window` 按内容 y 取瓦片；与分页共用同一份断行，`Page.origin` 契约不变 |
+| 滚动 | `Mode::Scroll`：整章排成一页，`content_height` 给流长度，`paint_window` 按内容 y 取瓦片（窗口外的 op 直接跳过，代价只跟瓦片高走）；跨章会话 `scroll_begin` / `scroll_slice` / `scroll_hit` / `scroll_anchor_y` 连章节 top 表和全书总高一起给；与分页共用同一份断行，`Page.origin` 契约不变 |
 | 文本 | `TextMeasurer::shape`（默认逐字，`FontBook` 用 harfrust）、按簇双向重排（UAX #9）、字距/词距、可选断字词典、`TextRules` 三个中文政策开关 |
 | 替换元素 | 块级/行内图片（固有尺寸未知时占位）、ruby 注音 |
 | 契约 | IR 1.4：`Glyph.ch`、`Op::Link`、`GlyphRun.weight/style/underline`、`Issue`/`IssueCode`、`LayoutResult.truncated`、`LayoutStats` |
@@ -151,9 +151,10 @@ eb_plain_page_raw(book, 0, 3.0, ink, paper, false, "/tmp/page0.eqp");
 
 两个面：`eb_open` / `eb_request`（postcard 请求响应，适合 cgo / Swift）与
 `eb_plain_*`（标量 + 整数句柄 + 文件出图，适合只能拿 `Pointer` 的宿主）。
-像素是 `EQP1` 文件（`"EQP1" | u32 w | u32 h | RGBA8`）；滚动模式用
-`eb_plain_layout_scroll` + `eb_plain_content_height` + `eb_plain_page_slice_raw`
-按瓦片取。契约与所有权见 [docs/api.md 第 9 节](docs/api.md)，头文件是
+像素是 `EQP1` 文件（`"EQP1" | u32 w | u32 h | RGBA8`）；单章滚动用
+`eb_plain_layout_scroll` + `eb_plain_content_height` + `eb_plain_page_slice_raw`，
+跨章连续滚动用 `eb_plain_scroll_begin` + `eb_plain_scroll_band_raw`（或
+`_band_bytes` 直接拿内存位图，不必落盘）。契约与所有权见 [docs/api.md 第 9 节](docs/api.md)，头文件是
 `crates/ebook-abi/include/ebook_abi.h`，打 tag 时每个 target 一个
 `libebook_abi-<target>.tar.gz`（静态库 + 头文件 + `SHA256SUMS`）。
 
@@ -194,7 +195,8 @@ PDF；DRM；flex / grid；浏览器级 CSS 兼容；把 HTML 直接塞进 DOM �
 
 DOM 方案尤其不能做：排版由浏览器决定，跨端一致、分页控制、增量重排全部不受控，也拿不到可测试的中间表示。
 滚动不是第二套排版：`Mode::Scroll` 仍然走同一份断行与块布局，只是整章排成一页，
-宿主用 `paint_window` 按 y 取窗口画成瓦片；`Page.origin` 与页切片契约因此不失效。
+`paint_window` 按 y 取窗口画成瓦片；跨章由 `scroll_begin` 起的会话统一给章节
+top 表、全书总高与流坐标命中，`Page.origin` 与页切片契约因此不失效。
 
 ---
 

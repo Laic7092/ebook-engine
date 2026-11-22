@@ -37,6 +37,25 @@ pub struct Loc {
     pub byte: u32,
 }
 
+/// 滚动会话里的一章：起点、高度、成没成。
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct ScrollChapter {
+    pub spine: u32,
+    pub top: f32,
+    pub height: f32,
+    pub ok: bool,
+}
+
+/// 滚动模式下的命中：章 + 章内位置 + 该行在全书流坐标里的 y。
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct ScrollLoc {
+    /// `-1` = 没有命中。
+    pub spine: i32,
+    pub line: u32,
+    pub byte: u32,
+    pub y: f32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Page {
     pub index: u32,
@@ -165,6 +184,50 @@ pub enum Request {
     },
     /// 连不通时的探活（也让 ABI 的编码/释放路径有个便宜的测试）。
     Ping,
+    /// 开始（或重设）跨章连续滚动会话。上下留白由引擎置 0。
+    Scroll {
+        viewport: Viewport,
+        style: Style,
+    },
+    /// 全书章节表（会量完全书；想分摊开销就用 `ScrollChapter` 逐章取）。
+    ScrollChapters,
+    ScrollChapter {
+        index: u32,
+    },
+    /// 全书流坐标总长。
+    ScrollHeight,
+    /// 全书流坐标落在哪一章。
+    ScrollSpineAt {
+        y: f32,
+    },
+    /// 全书流坐标的一段（可能跨章）。
+    ScrollBand {
+        y: f32,
+        height: f32,
+        scale: f32,
+        ink: u32,
+        paper: u32,
+        bold: bool,
+    },
+    /// 全书流坐标 → 原文位置。
+    ScrollHit {
+        x: f32,
+        y: f32,
+    },
+    /// 行号 → 全书流坐标。
+    ScrollLineY {
+        spine: u32,
+        line: u32,
+    },
+    /// `#fragment` → 全书流坐标。
+    ScrollAnchorY {
+        spine: u32,
+        fragment: String,
+    },
+    /// 全书流坐标 → 进度 0..=1。
+    ScrollProgress {
+        y: f32,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -189,4 +252,14 @@ pub enum Response {
     Font(u32),
     Number(f32),
     Error(String),
+    /// 章节表（`Scroll` / `ScrollChapters`）。
+    ScrollChapters(Vec<ScrollChapter>),
+    /// 一章；`None` = 下标越界。
+    ScrollChapter(Option<ScrollChapter>),
+    /// 全书流坐标落在哪一章。
+    ScrollSpine(Option<u32>),
+    /// 滚动模式的命中。
+    ScrollHit(Option<ScrollLoc>),
+    /// 位置（行/锚点）换算出的全书流坐标。
+    Position(Option<f32>),
 }

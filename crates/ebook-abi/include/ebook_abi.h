@@ -60,6 +60,8 @@ extern "C" {
 #define EB_STRUCT_LOC 2
 #define EB_STRUCT_SELECTION_RECT 3
 #define EB_STRUCT_LINK 4
+#define EB_STRUCT_SCROLL_CHAPTER 5
+#define EB_STRUCT_SCROLL_LOC 6
 
 /* 库版本串，如 "ebook-abi 0.2.1"。静态内存，永不失效。 */
 const char *eb_version(void);
@@ -101,9 +103,15 @@ const uint8_t *eb_last_error(size_t *len);
  *             Layout / Bitmap / Hit / LinkAt / Selection / Progress /
  *             FragmentLine / ResolveLink / RegisterFont / RegisterFontFace /
  *             BaseFontSize / Book / Toc / Pages / Limits / Ping
+ *             tag 16..25 是连续滚动（Scroll / ScrollChapters / ScrollChapter /
+ *             ScrollHeight / ScrollSpineAt / ScrollBand / ScrollHit /
+ *             ScrollLineY / ScrollAnchorY / ScrollProgress），**追加在末尾**，
+ *             老 tag 不变
  *   Response  tag 0..13 对应
  *             Ok / Pong / Book / Toc / Pages / Bitmap / Hit / Link /
  *             Selection / Progress / Line / Target / Font / Number / Error
+ *             tag 14..18 是滚动的响应（ScrollChapters / ScrollChapter /
+ *             ScrollSpine / ScrollHit / Position），同样追加在末尾
  *
  * 字段类型与顺序见 `crates/ebook-abi/src/protocol.rs`；同一份 schema 也被
  * `tests/ffi.rs` 逐字段走一遍。标量面能做的事这里都能做（还多一个
@@ -145,6 +153,22 @@ typedef struct EbLink {
   int32_t spine;     /* -1：不在阅读顺序里 */
   int32_t external;  /* 1 外部链接，0 书内 */
 } EbLink;
+
+/* 连续滚动会话里的一章。ok == 0 表示这一章排不出来（height 按 0 计）。 */
+typedef struct EbScrollChapter {
+  int32_t ok;
+  uint32_t spine;    /* 越界下标回 UINT32_MAX */
+  float top;         /* 全书流坐标里的起点 */
+  float height;      /* 内容高度 */
+} EbScrollChapter;
+
+/* 滚动模式下的命中。spine == -1 表示没有。 */
+typedef struct EbScrollLoc {
+  int32_t spine;
+  uint32_t line;     /* 全章行号 */
+  uint32_t byte;     /* 行内字节偏移 */
+  float y;           /* 该行行盒顶边的全书流坐标 */
+} EbScrollLoc;
 
 /* 标量面的版本检查（与上面两个同义，只是给不用 postcard 面的宿主）。 */
 const char *eb_plain_version(void);
@@ -259,6 +283,43 @@ int32_t eb_plain_scroll_slice_raw(int32_t id, uint32_t spine, float width, float
                                   float word_px, uint32_t align, float y, float height_slice,
                                   float scale, uint32_t ink, uint32_t paper, bool bold,
                                   const char *path);
+
+/* ---- 连续滚动（跨章）----
+ *
+ * 一次性开始会话，之后全部用**全书流坐标**：章节起点由引擎自己算
+ * （懒量高度），宿主不再维护“章节 top 表”、按章调度排版。上下留白会被
+ * 置 0（滚动容器自己留），左右保留。 */
+int32_t eb_plain_scroll_begin(int32_t id, float width, float height,
+                              float top, float right, float bottom, float left,
+                              float font_scale, float line_scale, float letter_px,
+                              float word_px, uint32_t align);   /* 章节数；-1/-2 错 */
+/* 书的章节数（滚动会话的章下标范围就是它）；0 句柄/空书。 */
+uint32_t eb_plain_scroll_chapter_count(int32_t id);
+/* 一章：起点/高度/成没成。ok == 0 表示下标越界或这一章排不出来。 */
+EbScrollChapter eb_plain_scroll_chapter(int32_t id, uint32_t index);
+/* 全书流坐标总长（滚动容器的 contentSize）；首次调用量完全书，-1 错。 */
+float eb_plain_scroll_total_height(int32_t id);
+/* 全书流坐标落在哪一章（-1 超出内容或没有会话）。 */
+int32_t eb_plain_scroll_spine_at(int32_t id, float y);
+/* 某一章的起点；取不到 -1。 */
+float eb_plain_scroll_chapter_top(int32_t id, uint32_t spine);
+/* 全书流坐标的一段，写成 EQP1；可以跨章，章缝不会错行。 */
+int32_t eb_plain_scroll_band_raw(int32_t id, float y, float height, float scale,
+                                 uint32_t ink, uint32_t paper, bool bold,
+                                 const char *path);
+/* 同上，但把 EQP1 字节交给宿主：用 eb_free(ptr, *out_len) 释放。
+ * 能读内存的宿主用它，瓦片不必先落盘、自己管文件名与磁盘缓存。 */
+uint8_t *eb_plain_scroll_band_bytes(int32_t id, float y, float height, float scale,
+                                    uint32_t ink, uint32_t paper, bool bold,
+                                    size_t *out_len);
+/* 全书流坐标 → 原文位置（跨章）。 */
+EbScrollLoc eb_plain_scroll_hit(int32_t id, float x, float y);
+/* 行号 → 全书流坐标（行盒顶边）；-1 没有。 */
+float eb_plain_scroll_line_y(int32_t id, uint32_t spine, uint32_t line);
+/* "#fragment" → 全书流坐标；这一章没有该锚点或出错回 -1。 */
+float eb_plain_scroll_anchor_y(int32_t id, uint32_t spine, const char *fragment);
+/* 全书流坐标 → 滚动进度 0..1；出错回 -1（首次调用量完全书）。 */
+float eb_plain_scroll_progress(int32_t id, float y);
 
 /* ---- 位置与交互 ---- */
 

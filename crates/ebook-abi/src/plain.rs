@@ -27,6 +27,10 @@
 //! 滚动模式（`eb_plain_layout_scroll`）：整章排成一页，`eb_plain_content_height`
 //! 给出内容高度，`eb_plain_page_slice_raw` 按 `y`/`height` 把一片写成同格式的
 //! EQP1。宿主只分配瓦片大小的位图，不分配整章。
+//!
+//! 跨章滚动（`eb_plain_scroll_begin`）：章节起点、全书总高、跨章瓦片
+//! （`eb_plain_scroll_band_raw` / `_band_bytes`）、命中与锚点换算都由引擎给，
+//! 宿主不用自己维护“章节 top 表”。
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{c_char, CStr, CString};
@@ -48,6 +52,8 @@ pub const EB_STRUCT_PAGE_INFO: u32 = 1;
 pub const EB_STRUCT_LOC: u32 = 2;
 pub const EB_STRUCT_SELECTION_RECT: u32 = 3;
 pub const EB_STRUCT_LINK: u32 = 4;
+pub const EB_STRUCT_SCROLL_CHAPTER: u32 = 5;
+pub const EB_STRUCT_SCROLL_LOC: u32 = 6;
 
 /// 一页的元数据（`extern struct`，按值回传）。
 #[repr(C)]
@@ -98,6 +104,34 @@ pub struct EbLink {
     pub spine: i32,
     /// 1 外部链接，0 书内。
     pub external: i32,
+}
+
+/// 滚动会话里的一章（`extern struct`，按值回传）。
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct EbScrollChapter {
+    /// 1 这一章排好了；0 排不出来（`height` 按 0 计，不影响后面的章）。
+    pub ok: i32,
+    /// 章节下标；越界下标回 `u32::MAX`。
+    pub spine: u32,
+    /// 全书流坐标里的起点（前面所有章的高度之和）。
+    pub top: f32,
+    /// 内容高度。
+    pub height: f32,
+}
+
+/// 滚动模式下的命中（`extern struct`，按值回传）。
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct EbScrollLoc {
+    /// 命中的章；-1 没有。
+    pub spine: i32,
+    /// 全章行号。
+    pub line: u32,
+    /// 行内字节偏移。
+    pub byte: u32,
+    /// 该行行盒顶边在全书流坐标里的位置。
+    pub y: f32,
 }
 
 /// 句柄表里的所有权。
@@ -799,7 +833,248 @@ pub extern "C" fn eb_plain_scroll_slice_raw(
     })
 }
 
-/// 把位图写成 `EQP1`：`"EQP1" | u32 width | u32 height | RGBA8`。
+// ---------------------------------------------------------------- 连续滚动
+
+/// 开始（或重设）一次**跨章连续滚动**会话；返回章节数。
+///
+/// 此后的 `eb_plain_scroll_*` 都用**全书流坐标**：章节起点由引擎自己算，
+/// 宿主不必维护“章节 top 表”。上下留白会被置 0（滚动容器自己留），左右保留。
+/// 高度是懒量的：`eb_plain_scroll_chapter`/`_spine_at` 只排需要的那几章，
+/// `eb_plain_scroll_total_height` 才量全书。`-1` 句柄/参数错，`-2` 引擎错。
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn eb_plain_scroll_begin(
+    id: i32,
+    width: f32,
+    height: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    left: f32,
+    font_scale: f32,
+    line_scale: f32,
+    letter_px: f32,
+    word_px: f32,
+    align: u32,
+) -> i32 {
+    guard(|| {
+        let mut viewport = Viewport::new(width, height);
+        viewport.insets = EdgesF {
+            top,
+            right,
+            bottom,
+            left,
+        };
+        let style = Style {
+            font_scale,
+            line_scale,
+            letter_px,
+            word_px,
+            align,
+        };
+        match with_engine(id, |engine| engine.scroll_begin(viewport, style)) {
+            Some(Ok(count)) => count as i32,
+            Some(Err(error)) => {
+                crate::set_last_error(format!("{error:?}"));
+                -2
+            }
+            None => -1,
+        }
+    })
+}
+
+/// 书的章节数（滚动会话的章下标范围就是它；0 句柄/空书）。
+#[no_mangle]
+pub extern "C" fn eb_plain_scroll_chapter_count(id: i32) -> u32 {
+    with_engine(id, |engine| engine.chapter_count() as u32).unwrap_or(0)
+}
+
+/// 滚动会话里的一章：起点、高度、成没成。越界下标回 `ok == 0`。
+#[no_mangle]
+pub extern "C" fn eb_plain_scroll_chapter(id: i32, index: u32) -> EbScrollChapter {
+    let none = EbScrollChapter {
+        ok: 0,
+        spine: u32::MAX,
+        top: 0.0,
+        height: 0.0,
+    };
+    with_engine(id, |engine| {
+        engine
+            .scroll_chapter(index as usize)
+            .map_or(none, |chapter| EbScrollChapter {
+                ok: i32::from(chapter.ok),
+                spine: chapter.spine as u32,
+                top: chapter.top,
+                height: chapter.height,
+            })
+    })
+    .unwrap_or(none)
+}
+
+/// 全书流坐标总长（滚动容器的 contentSize）。首次调用会量完全书；出错回 `-1`。
+#[no_mangle]
+pub extern "C" fn eb_plain_scroll_total_height(id: i32) -> f32 {
+    with_engine(id, |engine| engine.scroll_total_height())
+        .and_then(Result::ok)
+        .unwrap_or(-1.0)
+}
+
+/// 全书流坐标 `y` 落在哪一章（`-1` 超出内容或没有会话）。
+#[no_mangle]
+pub extern "C" fn eb_plain_scroll_spine_at(id: i32, y: f32) -> i32 {
+    with_engine(id, |engine| engine.scroll_spine_at(y))
+        .and_then(Result::ok)
+        .flatten()
+        .map_or(-1, |(spine, _)| spine as i32)
+}
+
+/// 某一章在全书流坐标里的起点；取不到回 `-1`。
+#[no_mangle]
+pub extern "C" fn eb_plain_scroll_chapter_top(id: i32, spine: u32) -> f32 {
+    with_engine(id, |engine| engine.scroll_chapter(spine as usize))
+        .and_then(Result::ok)
+        .map_or(-1.0, |chapter| chapter.top)
+}
+
+/// 光栅化全书流坐标的一段，写成 `EQP1`。可能跨章，章缝不会错行。
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn eb_plain_scroll_band_raw(
+    id: i32,
+    y: f32,
+    height: f32,
+    scale: f32,
+    ink: u32,
+    paper: u32,
+    bold: bool,
+    path: *const c_char,
+) -> i32 {
+    guard(|| {
+        let Some(path) = c_path(path) else {
+            crate::set_last_error("位图路径为空");
+            return -1;
+        };
+        match with_engine(id, |engine| {
+            engine.scroll_slice(y, height, scale, ink, paper, bold)
+        }) {
+            Some(Ok(bitmap)) => write_raw(&path, &bitmap),
+            Some(Err(error)) => {
+                crate::set_last_error(format!("{error:?}"));
+                -2
+            }
+            None => -1,
+        }
+    })
+}
+
+/// 同上，但把 `EQP1` 字节直接交给宿主（用 `eb_free(ptr, *out_len)` 释放）。
+///
+/// 能读内存的宿主（Swift/cgo）用它，就不必为了取瓦片先落一个文件、再自己做
+/// 文件命名与磁盘缓存。失败回 null 且 `*out_len == 0`。
+///
+/// # Safety
+/// `out_len` 必须指向可写的一个 `size_t`。
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn eb_plain_scroll_band_bytes(
+    id: i32,
+    y: f32,
+    height: f32,
+    scale: f32,
+    ink: u32,
+    paper: u32,
+    bold: bool,
+    out_len: *mut usize,
+) -> *mut u8 {
+    if out_len.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe { *out_len = 0 };
+    catch_unwind(AssertUnwindSafe(|| {
+        match with_engine(id, |engine| {
+            engine.scroll_slice(y, height, scale, ink, paper, bold)
+        }) {
+            Some(Ok(bitmap)) => {
+                let (ptr, len) = crate::into_raw(raw_bytes(&bitmap));
+                unsafe { *out_len = len };
+                ptr
+            }
+            Some(Err(error)) => {
+                crate::set_last_error(format!("{error:?}"));
+                std::ptr::null_mut()
+            }
+            None => std::ptr::null_mut(),
+        }
+    }))
+    .unwrap_or_else(|_| {
+        crate::set_last_error("内部 panic");
+        std::ptr::null_mut()
+    })
+}
+
+/// 全书流坐标 → 原文位置（跨章）。
+#[no_mangle]
+pub extern "C" fn eb_plain_scroll_hit(id: i32, x: f32, y: f32) -> EbScrollLoc {
+    let none = EbScrollLoc {
+        spine: -1,
+        line: 0,
+        byte: 0,
+        y: 0.0,
+    };
+    with_engine(id, |engine| engine.scroll_hit(x, y))
+        .and_then(Result::ok)
+        .flatten()
+        .map_or(none, |hit| EbScrollLoc {
+            spine: hit.spine as i32,
+            line: hit.line,
+            byte: hit.byte,
+            y: hit.y,
+        })
+}
+
+/// 行号 → 全书流坐标（行盒顶边）；取不到回 `-1`。
+#[no_mangle]
+pub extern "C" fn eb_plain_scroll_line_y(id: i32, spine: u32, line: u32) -> f32 {
+    with_engine(id, |engine| engine.scroll_line_y(spine as usize, line))
+        .and_then(Result::ok)
+        .flatten()
+        .unwrap_or(-1.0)
+}
+
+/// `#fragment` 锚点 → 全书流坐标；这一章没有这个锚点时回 `-1`。
+#[no_mangle]
+pub extern "C" fn eb_plain_scroll_anchor_y(id: i32, spine: u32, fragment: *const c_char) -> f32 {
+    let Some(fragment) = c_path(fragment) else {
+        return -1.0;
+    };
+    with_engine(id, |engine| {
+        engine.scroll_anchor_y(spine as usize, &fragment)
+    })
+    .and_then(Result::ok)
+    .flatten()
+    .unwrap_or(-1.0)
+}
+
+/// 全书流坐标 → 滚动进度 0..=1；出错回 `-1`。首次调用会量完全书。
+#[no_mangle]
+pub extern "C" fn eb_plain_scroll_progress(id: i32, y: f32) -> f32 {
+    with_engine(id, |engine| engine.scroll_progress(y))
+        .and_then(Result::ok)
+        .unwrap_or(-1.0)
+}
+
+/// `EQP1` 字节：`"EQP1" | u32 width | u32 height | RGBA8`。
+fn raw_bytes(bitmap: &ebook_reader::Bitmap) -> Vec<u8> {
+    let mut out = Vec::with_capacity(12 + bitmap.rgba.len());
+    out.extend_from_slice(RAW_MAGIC);
+    out.extend_from_slice(&bitmap.width.to_le_bytes());
+    out.extend_from_slice(&bitmap.height.to_le_bytes());
+    out.extend_from_slice(&bitmap.rgba);
+    out
+}
+
+/// 把位图写成 `EQP1`。
 fn write_raw(path: &str, bitmap: &ebook_reader::Bitmap) -> i32 {
     let mut file = match File::create(path) {
         Ok(file) => file,
@@ -808,14 +1083,7 @@ fn write_raw(path: &str, bitmap: &ebook_reader::Bitmap) -> i32 {
             return -3;
         }
     };
-    let mut header = [0u8; 12];
-    header[..4].copy_from_slice(RAW_MAGIC);
-    header[4..8].copy_from_slice(&bitmap.width.to_le_bytes());
-    header[8..12].copy_from_slice(&bitmap.height.to_le_bytes());
-    if let Err(error) = file
-        .write_all(&header)
-        .and_then(|()| file.write_all(&bitmap.rgba))
-    {
+    if let Err(error) = file.write_all(&raw_bytes(bitmap)) {
         crate::set_last_error(format!("{path}: {error}"));
         return -3;
     }

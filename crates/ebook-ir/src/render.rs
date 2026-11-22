@@ -52,6 +52,15 @@ impl Resources for NoResources {
 
 pub trait Surface {
     fn size(&self) -> SizeF;
+
+    /// 设备像素比例：`size()` 是设备像素，`1.0` 表示 `size()` 就是排版坐标。
+    ///
+    /// `paint_window` 用它把 surface 高换算回排版流坐标，从而只画窗口内的 op。
+    /// 装饰型 surface（先乘比例再转给后端）应该覆盖它；光栅后端本身是 1:1。
+    fn scale(&self) -> f32 {
+        1.0
+    }
+
     fn glyph_run(&mut self, run: &GlyphRun, glyphs: &[Glyph], res: &mut dyn Resources);
 
     /// 与 [`Surface::glyph_run`] 相同，但先把 `run.origin` 平移 `shift`。

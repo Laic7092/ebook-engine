@@ -351,6 +351,8 @@ IR 是位置编码，字段顺序就是字节布局。1.2–1.4 的新字段都�
 - 不做 flex / grid、浏览器级 CSS 兼容、DOM 直渲。
 - 不做 PDF、DRM。
 - 滚动与分页共用同一份断行/块布局：`Mode::Scroll` 把整章排成一页，
-  宿主按内容 y 用 `paint_window` 取瓦片；分页仍是默认模型。
+  `paint_window` 按内容 y 取瓦片（窗口外的 op 不画、不查字形）；分页仍是默认模型。
+- 跨章滚动不是宿主的事：`scroll_begin` 起的会话给出章节起点、全书总高、
+  跨章可见带与流坐标命中，宿主只管“滚动容器 + 把位图贴上去”。
 - 不引 criterion；bench 用 `std::time::Instant`，输出可 diff 的
   `name<TAB>ns`，见 [scripts/bench.sh](../scripts/bench.sh)。

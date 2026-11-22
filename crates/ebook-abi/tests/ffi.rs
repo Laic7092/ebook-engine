@@ -240,3 +240,114 @@ fn version_and_the_error_buffer_contract() {
     assert!(std::str::from_utf8(bytes).is_ok(), "错误串应是 UTF-8");
     assert_eq!(unsafe { *first_ptr.add(first) }, 0, "len 不含结尾 0");
 }
+
+#[test]
+fn scroll_requests_round_trip() {
+    let _guard = serial();
+    let engine = open();
+
+    // 开始会话，一次拿到章节表（协议面可以返回数组）。
+    let chapters = match call(
+        engine,
+        &Request::Scroll {
+            viewport: viewport(),
+            style: style(),
+        },
+    ) {
+        Response::ScrollChapters(chapters) => chapters,
+        other => panic!("Scroll 应回章节表，实际 {other:?}"),
+    };
+    assert!(!chapters.is_empty(), "demo.txt 应至少一章");
+    assert_eq!(chapters[0].spine, 0);
+    assert_eq!(chapters[0].top, 0.0);
+    assert!(chapters[0].height > 0.0);
+    for pair in chapters.windows(2) {
+        assert!((pair[1].top - (pair[0].top + pair[0].height)).abs() < 0.01);
+    }
+
+    let total = match call(engine, &Request::ScrollHeight) {
+        Response::Number(total) => total,
+        other => panic!("ScrollHeight 应回数字，实际 {other:?}"),
+    };
+    let last = chapters.last().unwrap();
+    assert!((total - (last.top + last.height)).abs() < 0.01);
+
+    // 流坐标 → 章 → 章首。
+    assert!(matches!(
+        call(engine, &Request::ScrollSpineAt { y: 0.0 }),
+        Response::ScrollSpine(Some(0))
+    ));
+    assert!(matches!(
+        call(engine, &Request::ScrollSpineAt { y: total + 500.0 }),
+        Response::ScrollSpine(None)
+    ));
+    assert!(matches!(
+        call(engine, &Request::ScrollChapter { index: 9999 }),
+        Response::ScrollChapter(None)
+    ));
+
+    // 可见带：直接回像素，不用落盘。
+    match call(
+        engine,
+        &Request::ScrollBand {
+            y: 0.0,
+            height: 100.0,
+            scale: 1.0,
+            ink: 0,
+            paper: 0,
+            bold: false,
+        },
+    ) {
+        Response::Bitmap {
+            width,
+            height,
+            rgba,
+        } => {
+            assert_eq!(width, 400);
+            assert_eq!(height, 100);
+            assert_eq!(rgba.len(), 400 * 100 * 4);
+        }
+        other => panic!("ScrollBand 应回位图，实际 {other:?}"),
+    }
+
+    // 命中带章号，行号能换回同一个流坐标。
+    let hit = match call(engine, &Request::ScrollHit { x: 40.0, y: 20.0 }) {
+        Response::ScrollHit(Some(hit)) => hit,
+        other => panic!("ScrollHit 应有命中，实际 {other:?}"),
+    };
+    assert_eq!(hit.spine, 0);
+    match call(
+        engine,
+        &Request::ScrollLineY {
+            spine: 0,
+            line: hit.line,
+        },
+    ) {
+        Response::Position(Some(y)) => assert!((y - hit.y).abs() < 0.01),
+        other => panic!("ScrollLineY 应回位置，实际 {other:?}"),
+    }
+    // 不存在的锚点：`None`，不是错误。
+    assert!(matches!(
+        call(
+            engine,
+            &Request::ScrollAnchorY {
+                spine: 0,
+                fragment: "not-here".to_string(),
+            },
+        ),
+        Response::Position(None)
+    ));
+
+    // 进度：书尾是 1。会话没开始时是 Error。
+    match call(engine, &Request::ScrollProgress { y: total }) {
+        Response::Number(progress) => assert!((progress - 1.0).abs() < 1.0e-6),
+        other => panic!("ScrollProgress 应回数字，实际 {other:?}"),
+    }
+    unsafe { eb_close(engine) };
+    let bare = open();
+    assert!(matches!(
+        call(bare, &Request::ScrollHeight),
+        Response::Error(_)
+    ));
+    unsafe { eb_close(bare) };
+}
