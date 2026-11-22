@@ -198,6 +198,28 @@ pub extern "C" fn eb_plain_title(id: i32) -> *const c_char {
     .unwrap_or(std::ptr::null())
 }
 
+/// 把封面图片的原始字节写到 `path`（PNG/JPEG，扩展名由宿主定）。
+/// 0 成功；-1 没有封面（或句柄无效）；-3 写文件失败。
+#[no_mangle]
+pub extern "C" fn eb_plain_cover_write(id: i32, path: *const c_char) -> i32 {
+    guard(|| {
+        let Some(path) = c_path(path) else {
+            crate::set_last_error("封面路径为空");
+            return -1;
+        };
+        let bytes = with_engine(id, |engine| engine.cover().map(|(bytes, _)| bytes.to_vec()));
+        let Some(Some(bytes)) = bytes else {
+            crate::set_last_error("这本书没有封面");
+            return -1;
+        };
+        if let Err(error) = std::fs::write(&path, &bytes) {
+            crate::set_last_error(format!("{path}: {error}"));
+            return -3;
+        }
+        0
+    })
+}
+
 /// 阅读顺序（spine）的项数。
 #[no_mangle]
 pub extern "C" fn eb_plain_spine_count(id: i32) -> u32 {

@@ -162,6 +162,13 @@ impl Engine {
         self.backend.book().toc()
     }
 
+    /// 封面图片的字节与媒体类型（EPUB 的 `cover-image`，或 EPUB2 的
+    /// `meta name="cover"`）；没有封面时 `None`。TXT 永远没有。
+    pub fn cover(&self) -> Option<(&[u8], &str)> {
+        let href = self.backend.book().cover_href.as_deref()?;
+        self.backend.asset(href)
+    }
+
     pub fn chapter_count(&self) -> usize {
         self.backend.book().spine.len()
     }
