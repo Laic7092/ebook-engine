@@ -111,7 +111,7 @@ checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
 
 [[package]]
 name = "ebook-abi"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ebook-reader",
  "postcard",
@@ -120,7 +120,7 @@ dependencies = [
 
 [[package]]
 name = "ebook-cache"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ebook-ir",
  "ebook-layout",
@@ -128,7 +128,7 @@ dependencies = [
 
 [[package]]
 name = "ebook-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ebook-font",
  "ebook-format",
@@ -140,7 +140,7 @@ dependencies = [
 
 [[package]]
 name = "ebook-font"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ab_glyph_rasterizer",
  "brotli-decompressor",
@@ -154,7 +154,7 @@ dependencies = [
 
 [[package]]
 name = "ebook-format"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chardetng",
  "ebook-ir",
@@ -166,7 +166,7 @@ dependencies = [
 
 [[package]]
 name = "ebook-ir"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "postcard",
  "serde",
@@ -174,7 +174,7 @@ dependencies = [
 
 [[package]]
 name = "ebook-layout"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ebook-format",
  "ebook-ir",
@@ -183,7 +183,7 @@ dependencies = [
 
 [[package]]
 name = "ebook-raster"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ebook-font",
  "ebook-format",
@@ -195,7 +195,7 @@ dependencies = [
 
 [[package]]
 name = "ebook-reader"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ebook-font",
  "ebook-format",
@@ -207,14 +207,14 @@ dependencies = [
 
 [[package]]
 name = "ebook-render"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ebook-ir",
 ]
 
 [[package]]
 name = "ebook-web"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ebook-font",
  "ebook-format",
@@ -528,7 +528,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ebook-font",
  "ebook-format",
