@@ -7,6 +7,22 @@
 
 ### Added
 
+- **排版前段缓存（`Layout::layout_cached` + `FlowCache`）**：把「盒树 + 断行 +
+  整形」与「分页 + 组装」切成两级。前段的键只含调用方版本号、可用宽度、行数
+  预算，**刻意不含页高与 `Mode`**——分页依赖页高，断行只依赖宽度。`Engine` 已
+  接线（`(spine, style, font_rev)` 递增 `flow_rev`），所以手机地址栏收起、旋屏、
+  分页 ↔ 滚动切模这些「同宽不同高」的重排不再重跑断行：`en.epub` 一章
+  `0.855 ms → 0.132 ms`。硬约束是「缓存只省时间、不改输出」：带缓存的 IR 与不带
+  缓存逐字节相同（`crates/ebook-layout/tests/flow_cache.rs`、
+  `crates/ebook-reader/tests/flow_cache.rs`），换宽度 / 换字号 / 换行数预算 /
+  改 `rev` 都必须不命中。
+- **`Surface::finish()`**：一页或一次 `paint_window` 画完后的收尾点，默认空实现；
+  `paint` / `paint_window` 在返回前调用一次，`ScaledSurface` 会穿到内层后端。
+- **同色字形批处理（`RgbaSurface::set_glyph_batching`，默认关闭）**：同色字形先
+  累积成 1 字节/像素覆盖率，换色或遇非字形 op 时一次合成；重叠取 `max`，因此
+  结果与绘制顺序无关（这是按瓦片/按任务并行光栅、以及以后换 GPU 后端的前提）。
+  默认关闭是测量结论：正文的墨稀疏且几乎不重叠，批处理多一遍目标缓冲往返，
+  `480x640` 整页从 `0.49 ms` 变成 `0.64 ms`。两种模式的语义都有测试锁定。
 - **连续滚动会话（跨章）**：`Engine::scroll_begin` 之后全部用全书流坐标，
   章节起点（`scroll_chapter` / `scroll_chapters`）、总高（`scroll_total_height`）、
   y → 章（`scroll_spine_at`）、跨章可见带（`scroll_slice`，章缝不错行）、
@@ -91,6 +107,12 @@
   优先 gzip + `DecompressionStream`，缺字整段回退系统字体。
 - 阅读设置：字号、粗体、行距、字距、页边距、对齐方式；目录顶部的章节下拉框移除。
 - `eb_layout_style`：行距/字距/对齐作为独立排版入参，不再只能跟着字号等比缩放。
+
+### Fixed
+
+- **README 自相矛盾**：末尾还写着「缺字时该段退回浏览器系统字体」，与「现状与
+  限制」和 `Op::Unresolved{FontMissing}` 的契约相反。回退路径已经删除：平台
+  fallback 链不同会让同一本书在不同端分页不同，书签与跨端同步全部失效。
 
 ### Changed
 

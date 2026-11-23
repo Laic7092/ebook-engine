@@ -96,7 +96,7 @@ op 坐标是**排版流坐标**，不是页面内坐标。`Page.origin` 表示�
 | 领域 | 现状 |
 |---|---|
 | 格式 | TXT / EPUB（ZIP stored+deflate、container/OPF/spine、XHTML、CSS 级联、命名实体、锚点）；TOC（EPUB3 nav / EPUB2 NCX）、链接、资源清单、字体声明、书目元数据、格式层诊断（`EpubIssueCode`） |
-| 排版 | 盒树、margin collapsing、UAX #14 断行、两端对齐、孤行寡行、强制分页、增量重排入口；`layout` 是全函数 |
+| 排版 | 盒树、margin collapsing、UAX #14 断行、两端对齐、孤行寡行、强制分页；`layout` 是全函数。前段（盒树/断行/整形）可经 `Layout::layout_cached` + `FlowCache` 跨调用复用：同宽换页高、切分页/滚动模式不再重跑断行（`en.epub` 一章 0.855 → 0.132 ms），带缓存的 IR 与不带缓存逐字节相同 |
 | 滚动 | `Mode::Scroll`：整章排成一页，`content_height` 给流长度，`paint_window` 按内容 y 取瓦片（窗口外的 op 直接跳过，代价只跟瓦片高走）；跨章会话 `scroll_begin` / `scroll_slice` / `scroll_hit` / `scroll_anchor_y` 连章节 top 表和全书总高一起给；与分页共用同一份断行，`Page.origin` 契约不变 |
 | 文本 | `TextMeasurer::shape`（默认逐字，`FontBook` 用 harfrust）、按簇双向重排（UAX #9）、字距/词距、可选断字词典、`TextRules` 三个中文政策开关 |
 | 替换元素 | 块级/行内图片（固有尺寸未知时占位）、ruby 注音 |
@@ -105,7 +105,7 @@ op 坐标是**排版流坐标**，不是页面内坐标。`Page.origin` 表示�
 | 交互 | `Reader`（命中、锚点、进度、链接、夹取）、`Selection`/`SelectionRect`（分页矩形与原文）、wasm 侧 JSON 查询 |
 | 缓存 | `ebook-cache`：输入指纹为键的有界 LRU，命中/未命中/淘汰统计 |
 | 并发 | `Layout::layout_parallel`：一次调用内的 `thread::scope`，输出与串行逐字节相同；wasm 走串行 |
-| 渲染 | RGBA8 整数光栅（tone/线性光、嵌套裁剪、双线性图片、PNG+JPEG 图片）、SVG 导出（CLI）、Canvas2D 阅读器（只搬位图） |
+| 渲染 | RGBA8 整数光栅（tone/线性光、嵌套裁剪、双线性图片、PNG+JPEG 图片）、同色字形批处理（可选，`Surface::finish` 收尾）、SVG 导出（CLI）、Canvas2D 阅读器（只搬位图） |
 
 ## 现状与限制
 
@@ -227,6 +227,6 @@ npx wrangler pages deploy web/dist --project-name ebook-reader   # 发布到 Clo
 FEATURES=epub,hyphen-en ./web/build.sh   # 需要内置英文断字时
 ```
 
-最后一条打开 `http://localhost:8000/web/` 就是完整阅读器：书架默认从 IndexedDB 读取，支持导入 EPUB 与 TXT（UTF-8 / UTF-16 / GB18030 / Big5 / Shift_JIS），点开进入阅读页，翻页、目录、字号/粗体/行距/字距/边距/对齐/主题设置与阅读进度都会持久化。界面按移动优先设计，阅读页使用真实可视区域排版并铺满，手机用底部面板、桌面用侧边抽屉，移动端工具栏会自动隐藏，轻点屏幕中间显示或收起；左右两侧轻点或横向滑动翻页。`?book=<url>&spine=<n>` 可直接打开指定书与章节，方便截图与回归。`fixtures/en.epub` 只用于测试，不进入部署包。部署包里的拉丁回退字体是 `web/latin.ttf`（DejaVu Sans），中日韩字体是 `web/cjk.woff2`（PingFang SC Regular，约 5 MB 单文件）；woff2 本身已是 Brotli 压缩，不再叠加 gzip。`web/manifest.webmanifest` + `web/sw.js` 让应用可安装，并把 wasm、JS 和第一次读到的字体放进 Cache Storage；导航请求优先读应用壳、后台回源，iOS 从主屏冷启动不必再等网络。`web/splash/*.png` 是对应机型的 `apple-touch-startup-image`（`python3 scripts/gen-splash.py` 重新生成），避免首帧前的白屏。字体首次约 5 MB，之后冷启动直接命中本地缓存。缺字时该段退回浏览器系统字体，不会静默消失。
+最后一条打开 `http://localhost:8000/web/` 就是完整阅读器：书架默认从 IndexedDB 读取，支持导入 EPUB 与 TXT（UTF-8 / UTF-16 / GB18030 / Big5 / Shift_JIS），点开进入阅读页，翻页、目录、字号/粗体/行距/字距/边距/对齐/主题设置与阅读进度都会持久化。界面按移动优先设计，阅读页使用真实可视区域排版并铺满，手机用底部面板、桌面用侧边抽屉，移动端工具栏会自动隐藏，轻点屏幕中间显示或收起；左右两侧轻点或横向滑动翻页。`?book=<url>&spine=<n>` 可直接打开指定书与章节，方便截图与回归。`fixtures/en.epub` 只用于测试，不进入部署包。部署包里的拉丁回退字体是 `web/latin.ttf`（DejaVu Sans），中日韩字体是 `web/cjk.woff2`（PingFang SC Regular，约 5 MB 单文件）；woff2 本身已是 Brotli 压缩，不再叠加 gzip。`web/manifest.webmanifest` + `web/sw.js` 让应用可安装，并把 wasm、JS 和第一次读到的字体放进 Cache Storage；导航请求优先读应用壳、后台回源，iOS 从主屏冷启动不必再等网络。`web/splash/*.png` 是对应机型的 `apple-touch-startup-image`（`python3 scripts/gen-splash.py` 重新生成），避免首帧前的白屏。字体首次约 5 MB，之后冷启动直接命中本地缓存。缺字时该段留白并产出诊断（`Op::Unresolved{FontMissing}`），**不会**退回浏览器系统字体：那条回退路径已删除，因为平台 fallback 链不同会让同一本书在不同端分页不同，书签与跨端同步全部失效。要补字只能由宿主显式 `register_font`。
 
 `golden` 比字节；`size` 卡预算；`parity` 用同一份输入分别跑 native 与 wasm，逐字节比对 IR。`bench` 输出 `name<TAB>median_ns`，可直接 diff；基线文件里写明采集机器与 rustc 版本。CI 跑 fmt、clippy `-D warnings`、test、`xtask all` 与 `xtask size`，并在干净 checkout 上直接用入库的 golden 快照。
