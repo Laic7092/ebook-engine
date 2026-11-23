@@ -108,6 +108,11 @@ impl Surface for ScaledSurface<'_> {
         self.inner.rect(self.scaled_rect(rect), color);
     }
 
+    /// 收尾必须穿过包装层落到真正的后端：覆盖率缓冲在那个后端里。
+    fn finish(&mut self) {
+        self.inner.finish();
+    }
+
     fn border(&mut self, border: &BorderBox) {
         let mut moved = border.clone();
         moved.rect = self.scaled_rect(border.rect);

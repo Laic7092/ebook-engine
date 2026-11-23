@@ -87,6 +87,13 @@ pub trait Surface {
     fn link(&mut self, _rect: RectF, _href: &str) {}
     fn push_clip(&mut self, _rect: RectF) {}
     fn pop_clip(&mut self) {}
+
+    /// 一页（或一次 `paint_window`）画完后的收尾。
+    ///
+    /// 后端可以把一批同色字形先累积成覆盖率、最后一次性合成，这时必须有
+    /// 一个明确的收尾点把缓冲写进像素。`paint` / `paint_window` 在返回前
+    /// 调用一次，所以在返回之后读像素的宿主不需要自己调。默认什么都不做。
+    fn finish(&mut self) {}
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

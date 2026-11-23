@@ -19,6 +19,9 @@ pub fn paint(
         origin,
         None,
     );
+    // 后端可能在 `glyph_run*` 里只累积覆盖率（同色字形批一次合成），
+    // 这一步把它落进像素。返回之后读像素的宿主不必自己收尾。
+    surface.finish();
     Ok(())
 }
 
@@ -67,6 +70,7 @@ pub fn paint_window(
         origin,
         band,
     );
+    surface.finish();
     Ok(())
 }
 

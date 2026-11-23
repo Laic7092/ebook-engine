@@ -509,3 +509,132 @@ fn link_text_is_blue_and_underlined() {
         .count();
     assert!(blue > 0, "下划线用 run.color 画，页面上应该有纯链接蓝像素");
 }
+
+/// 同一个颜色的重叠字形只合成一次。
+///
+/// 测试用的字形是一块 `8x8`、覆盖率全 128 的方块，所以：
+/// 白底 + 一次 → 127；旧实现（逐字形立即混合）叠两次会得到 63。
+/// 新实现按「同色覆盖率取最大值再合成」得到 127：重叠不再叠出双倍墨，
+/// 而且结果与绘制顺序无关（`max` 幂等且交换）。
+fn overlapping_runs(run: &GlyphRun, shifts: &[(f32, Rgba8)]) -> LayoutResult {
+    let mut ir = document_ir("A");
+    for (dx, color) in shifts {
+        let mut copy = run.clone();
+        copy.origin = PointF::new(run.origin.x + dx, run.origin.y);
+        copy.color = *color;
+        copy.underline = false;
+        append_op(&mut ir, Op::GlyphRun(copy));
+    }
+    ir
+}
+
+#[test]
+fn same_color_overlap_composites_once() {
+    let base = document_ir("A");
+    let run = first_run(&base);
+    let ink = run.color;
+    let x = run.origin.x.floor() as u32;
+    let y = run.origin.y.floor() as u32 - 4;
+
+    let ir = overlapping_runs(&run, &[(4.0, ink)]);
+    let mut surface = RgbaSurface::new(200, 200);
+    surface.set_glyph_batching(true);
+    render(&ir, &mut surface);
+    assert_eq!(
+        surface.pixel(x + 6, y),
+        Some(Rgba8::new(127, 127, 127, 255)),
+        "重叠处只混合一次，不是 63"
+    );
+
+    // 默认的逐字形混合下，同一像素被叠两次会变暗（127 -> 63）。
+    let mut immediate = RgbaSurface::new(200, 200);
+    render(&ir, &mut immediate);
+    assert_eq!(
+        immediate.pixel(x + 6, y),
+        Some(Rgba8::new(63, 63, 63, 255)),
+        "默认路径是逐字形混合：重叠会叠两次"
+    );
+
+    // 平移 8 点：两块不相交，各自是 127。
+    let ir = overlapping_runs(&run, &[(8.0, ink)]);
+    let mut surface = RgbaSurface::new(200, 200);
+    surface.set_glyph_batching(true);
+    render(&ir, &mut surface);
+    assert_eq!(
+        surface.pixel(x + 2, y),
+        Some(Rgba8::new(127, 127, 127, 255))
+    );
+    assert_eq!(
+        surface.pixel(x + 10, y),
+        Some(Rgba8::new(127, 127, 127, 255))
+    );
+}
+
+#[test]
+fn same_color_batching_is_order_independent() {
+    let base = document_ir("A");
+    let run = first_run(&base);
+    let ink = run.color;
+
+    // 同样的两个副本，只是 append 顺序相反。同色批处理下必须逐像素相同。
+    let forward = overlapping_runs(&run, &[(4.0, ink), (2.0, ink)]);
+    let backward = overlapping_runs(&run, &[(2.0, ink), (4.0, ink)]);
+
+    let mut a = RgbaSurface::new(200, 200);
+    a.set_glyph_batching(true);
+    render(&forward, &mut a);
+    let mut b = RgbaSurface::new(200, 200);
+    b.set_glyph_batching(true);
+    render(&backward, &mut b);
+    assert_eq!(a.pixels(), b.pixels(), "同色批处理与绘制顺序无关");
+}
+
+#[test]
+fn color_switch_preserves_draw_order() {
+    let base = document_ir("A");
+    let run = first_run(&base);
+    let ink = run.color;
+    let red = Rgba8::new(255, 0, 0, 255);
+    let x = run.origin.x.floor() as u32;
+    let y = run.origin.y.floor() as u32 - 4;
+
+    // 先红后墨：重叠处应当是墨压红。
+    let mut on_top = overlapping_runs(&run, &[(4.0, red), (4.0, ink)]);
+    let mut surface = RgbaSurface::new(200, 200);
+    surface.set_glyph_batching(true);
+    render(&on_top, &mut surface);
+    let ink_on_red = surface.pixel(x + 6, y);
+
+    // 先墨后红：颜色一换就要先合成上一批，所以红压在墨上。
+    on_top = overlapping_runs(&run, &[(4.0, ink), (4.0, red)]);
+    let mut flipped = RgbaSurface::new(200, 200);
+    flipped.set_glyph_batching(true);
+    render(&on_top, &mut flipped);
+    let red_on_ink = flipped.pixel(x + 6, y);
+
+    assert_ne!(ink_on_red, red_on_ink, "换色必须 flush，顺序不能丢");
+    // 后画的那一层带 128 覆盖率，所以它自己的通道占优。
+    let ink_on_red = ink_on_red.expect("pixel");
+    let red_on_ink = red_on_ink.expect("pixel");
+    assert!(ink_on_red.r < red_on_ink.r, "墨压红时红色更少");
+    assert!(ink_on_red.g < red_on_ink.g, "墨压红时红色更少");
+}
+
+#[test]
+fn opaque_rect_after_glyph_covers_it() {
+    let base = document_ir("A");
+    let run = first_run(&base);
+    let x = run.origin.x.floor() as u32;
+    let y = run.origin.y.floor() as u32 - 4;
+    let mut ir = base.clone();
+    append_op(
+        &mut ir,
+        Op::Rect {
+            rect: RectF::new(x as f32, (y - 2) as f32, 20.0, 12.0),
+            color: Rgba8::BLACK,
+        },
+    );
+    let mut surface = RgbaSurface::new(200, 200);
+    render(&ir, &mut surface);
+    assert_eq!(surface.pixel(x + 2, y), Some(Rgba8::BLACK));
+}

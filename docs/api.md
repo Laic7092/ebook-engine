@@ -639,6 +639,7 @@ trait Renderer {
 | `image(id, rect, fit, res)` | 同上；尺寸未知时 IR 已给占位盒 |
 | `unresolved(u)` | 同上 |
 | `push_clip(rect)` / `pop_clip()` | 嵌套顺序由 paint 维护 |
+| `finish()` | 一页 / 一次 `paint_window` 画完时调用一次；默认空实现。后端如果把字形先累积成覆盖率再合成，就在这一步落进像素 —— `paint` 返回之后读像素的宿主不必自己收尾 |
 | `scale()` | 默认 1.0；装饰型 surface（先乘比例再转给后端）覆盖它，`paint_window` 靠它把 surface 高换算成流坐标 |
 
 `RenderError`：
@@ -659,6 +660,19 @@ trait Renderer {
 `RgbaSurface::to_ppm()` 输出 P6 PPM，`to_rgba()` 输出裸 RGBA8；
 `render_page()` 会先清成白色再画。`RgbaSurface::from_page(page)` 用
 `page.box_size()` 决定画布大小。
+
+字形有两种画法，默认即时混合：
+
+| 模式 | 开关 | 语义 | 实测（480×640 整页） |
+|---|---|---|---|
+| 即时（默认） | `set_glyph_batching(false)` | 每个字形画完立刻混合；同色重叠会混合两次 | 0.49 ms |
+| 批处理 | `set_glyph_batching(true)` | 同色字形先累积成 1 字节/像素覆盖率，换色或遇到非字形 op 时一次合成；重叠取 `max`，**结果与绘制顺序无关** | 0.64 ms |
+
+默认关闭是测量结论：正文的墨稀疏且几乎不重叠，批处理多一遍目标缓冲往返，
+反而慢 30%。打开它换的是顺序无关性（`max` 幂等且交换），这是按瓦片/按任务
+并行光栅或换 GPU 后端的前提。两种模式的语义都有测试锁定：
+`crates/ebook-raster/tests/render.rs` 的 `same_color_overlap_composites_once` /
+`same_color_batching_is_order_independent`。
 
 DPR 不进入 IR：`ScaledSurface` 装饰任何 `Surface`，把坐标、边框宽度、字形
 advance 与**字号**一起乘 `scale`，因此字形按设备像素光栅化，而不是画完再放大。

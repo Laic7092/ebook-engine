@@ -151,6 +151,30 @@ pub struct RgbaSurface {
     /// 覆盖字形的颜色：正文墨色由调用方定（夜纸上的浅色字），排版时的颜色
     /// （书里的黑色）只是默认。`None` 时用 `GlyphRun` 自己的颜色。
     ink: Option<Rgba8>,
+    /// 同色字形的覆盖率累积缓冲，1 字节/像素，与 `pixels` 同尺寸。
+    ///
+    /// 字形不是画一次混合一次，而是先按颜色把覆盖率并进这里（取最大值），
+    /// 同一颜色整段文字结束、或遇到第一个非字形 op 时再一次性合成。
+    /// 理由：同一像素被重叠字形覆盖时只混合一次，不再叠出偏暗的边缘；
+    /// 覆盖率是幂等的（`max`），所以结果与绘制顺序无关。
+    mask: Vec<u8>,
+    /// `mask` 里非零像素的下标。合成时只走这一张表。
+    ///
+    /// 正文的覆盖率很稀（一页几百 KB 里只有 5%–10% 是墨），所以不能扫整个
+    /// 包围盒：那会把“只碰沾墨像素”的开销变成“扫一遍正文区域”，实测能把
+    /// 整页渲染从 0.49 ms 拽到 1.0 ms。每个下标只在 `mask` 从 0 变非零时入表，
+    /// 因此合成时每个像素只会被处理一次——顺序无关。
+    mask_ink_at: Vec<u32>,
+    /// `mask` 里累积的是哪个颜色。`None` 表示没有待合成的覆盖率。
+    mask_ink: Option<Rgba8>,
+    /// 是否把同色字形先累积成覆盖率再合成，而不是逐字形立即混合。
+    ///
+    /// 默认关闭，因为**实测更慢**：正文的墨稀疏且几乎不重叠，批处理多一遍
+    /// 目标缓冲往返，`480x640` 整页从 0.49 ms 变成 0.64 ms。
+    /// 打开它换的是一个性质：重叠的同色字形只合成一次（`max` 幂等且交换），
+    /// 因此结果与绘制顺序无关。想要「按瓦片/按任务并行光栅」或上 GPU 后端时
+    /// 才需要这个性质。
+    batch: bool,
 }
 
 /// 一个裁剪矩形的像素范围，`x1`/`y1` 是开区间。
@@ -202,7 +226,29 @@ impl RgbaSurface {
             clips: Vec::new(),
             tone: None,
             ink: None,
+            mask: vec![0; len],
+            mask_ink_at: Vec::new(),
+            mask_ink: None,
+            batch: false,
         }
+    }
+
+    /// 打开/关闭同色字形批处理。默认关闭（逐字形混合更快）。
+    ///
+    /// 打开后：同一颜色的字形（跨 run、跨行都算）先把覆盖率累积进一张
+    /// 1 字节/像素的 mask，遇到换色或非字形 op 时一次性合成。好处是重叠字形
+    /// 只混合一次，而且结果与绘制顺序无关（`max` 幂等且交换）。
+    pub fn set_glyph_batching(&mut self, on: bool) {
+        if self.batch == on {
+            return;
+        }
+        // 切换前先把已经累积的合成掉，否则缓冲会在两种模式间丢失。
+        self.flush_mask();
+        self.batch = on;
+    }
+
+    pub fn glyph_batching(&self) -> bool {
+        self.batch
     }
 
     pub fn from_page(page: &ebook_ir::Page) -> Self {
@@ -234,11 +280,14 @@ impl RgbaSurface {
     }
 
     pub fn clear(&mut self, color: Rgba8) {
+        // 底色必须在所有已累积的字形之下。
+        self.flush_mask();
         self.pixels.fill(color);
     }
 
     /// 设置墨色/伽马修正。`None`（默认）保持既有 sRGB 混合行为。
     pub fn set_tone(&mut self, tone: Option<Tone>) {
+        self.flush_mask();
         self.tone = tone;
     }
 
@@ -254,6 +303,7 @@ impl RgbaSurface {
     /// 让所有字形用这个颜色画，而不是排版时写进 `GlyphRun` 的那个。夜间的
     /// 浅色正文就是这么来的：排版只管几何，颜色在这一层定。
     pub fn set_ink(&mut self, ink: Option<Rgba8>) {
+        self.flush_mask();
         self.ink = ink;
     }
 
@@ -330,6 +380,9 @@ impl RgbaSurface {
         if color.a == 0 {
             return;
         }
+        // 非字形 op 落在字形之上还是之下由 op 顺序决定，先把累积的字形
+        // 合成掉，跟逐 op 立即混合的语义一致。
+        self.flush_mask();
         let clip = self.clip();
         let x0 = x0.max(0).max(clip.x0);
         let y0 = y0.max(0).max(clip.y0);
@@ -371,7 +424,7 @@ impl RgbaSurface {
     fn draw_glyph(&mut self, color: Rgba8, bitmap: &GlyphBitmap, x0: i64, y0: i64) {
         let w = bitmap.w as usize;
         let h = bitmap.h as usize;
-        if w == 0 || h == 0 || bitmap.alpha.len() < w.saturating_mul(h) {
+        if w == 0 || h == 0 || bitmap.alpha.len() < w.saturating_mul(h) || color.a == 0 {
             return;
         }
         let gx = x0 + bitmap.left as i64;
@@ -388,25 +441,77 @@ impl RgbaSurface {
         if bx1 <= bx0 || by1 <= by0 {
             return;
         }
+        if !self.batch {
+            self.blend_glyph(color, bitmap, gx, gy, bx0, bx1, by0, by1);
+            return;
+        }
+        // 只累积覆盖率，不碰 `pixels`：同色的一整段文字（甚至一整页）最后
+        // 只扫一遍目标缓冲。换颜色则先把上一批合成掉。
+        self.mask_collect(color);
+        let width = self.width as usize;
+        // `gx` 可以是负数（字形左边超到画布外），起点取裁剪后的 `gx + bx0`。
+        let x_base = (gx + bx0) as usize;
+        let bx_len = (bx1 - bx0) as usize;
+        for by in by0..by1 {
+            let row = by as usize * w;
+            let dst_row = (gy + by) as usize * width + x_base;
+            for step in 0..bx_len {
+                let coverage = bitmap.alpha[row + (bx0 as usize + step)];
+                if coverage == 0 {
+                    continue;
+                }
+                let index = dst_row + step;
+                // 取最大值：幂等、与顺序无关，重叠字形不会叠出双倍墨，
+                // 也不破坏「串行与并行/不同遍历顺序逐像素相同」。
+                if coverage > self.mask[index] {
+                    if self.mask[index] == 0 {
+                        self.mask_ink_at.push(index as u32);
+                    }
+                    self.mask[index] = coverage;
+                }
+            }
+        }
+    }
+
+    /// 逐字形立即混合（默认）。
+    ///
+    /// 覆盖率为 0 的像素直接跳过，每张字形位图只扫自己的包围盒；一页的墨是
+    /// 稀疏且几乎不重叠的，所以这是一次内存往返就能完成的最省写法。
+    #[allow(clippy::too_many_arguments)]
+    fn blend_glyph(
+        &mut self,
+        color: Rgba8,
+        bitmap: &GlyphBitmap,
+        gx: i64,
+        gy: i64,
+        bx0: i64,
+        bx1: i64,
+        by0: i64,
+        by1: i64,
+    ) {
+        let w = bitmap.w as usize;
         let tone = self.tone;
         let width = self.width as usize;
         for by in by0..by1 {
             let row = by as usize * w;
-            let y = gy + by;
-            for bx in bx0..bx1 {
-                let mut coverage = bitmap.alpha[row + bx as usize];
-                if let Some(tone) = tone {
-                    coverage = tone.coverage(coverage);
-                }
+            let dst_row = (gy + by) as usize * width + (gx + bx0) as usize;
+            let bx_len = (bx1 - bx0) as usize;
+            for step in 0..bx_len {
+                let mut coverage = bitmap.alpha[row + bx0 as usize + step];
                 if coverage == 0 {
                     continue;
+                }
+                if let Some(tone) = tone {
+                    coverage = tone.coverage(coverage);
+                    if coverage == 0 {
+                        continue;
+                    }
                 }
                 let alpha = mul_alpha(color.a, coverage);
                 if alpha == 0 {
                     continue;
                 }
-                let x = gx + bx;
-                let index = y as usize * width + x as usize;
+                let index = dst_row + step;
                 if alpha == 255 {
                     self.pixels[index] = Rgba8::new(color.r, color.g, color.b, 255);
                 } else {
@@ -416,6 +521,55 @@ impl RgbaSurface {
                 }
             }
         }
+    }
+
+    /// 准备把 `color` 的覆盖率累积进 `mask`；颜色变了先把上一批合成掉。
+    fn mask_collect(&mut self, color: Rgba8) {
+        if self.mask_ink == Some(color) {
+            return;
+        }
+        self.flush_mask();
+        self.mask_ink = Some(color);
+    }
+
+    /// 把累积的同色覆盖率一次性合成进像素。
+    ///
+    /// 只走 `mask_ink_at`：每个沾墨像素只出现一次，所以这里既不用扫包围盒，
+    /// 也不用担心顺序（每像素只合成一次，顺序不影响结果）。
+    fn flush_mask(&mut self) {
+        let Some(color) = self.mask_ink else {
+            return;
+        };
+        self.mask_ink = None;
+        if self.mask_ink_at.is_empty() {
+            return;
+        }
+        let tone = self.tone;
+        for &index in &self.mask_ink_at {
+            let index = index as usize;
+            let raw = self.mask[index];
+            self.mask[index] = 0;
+            // 墨色/伽马修正作用在覆盖率上，与逐字形混合时完全同一次查表。
+            let coverage = match tone {
+                Some(tone) => tone.coverage(raw),
+                None => raw,
+            };
+            if coverage == 0 {
+                continue;
+            }
+            let alpha = mul_alpha(color.a, coverage);
+            if alpha == 0 {
+                continue;
+            }
+            if alpha == 255 {
+                self.pixels[index] = Rgba8::new(color.r, color.g, color.b, 255);
+            } else {
+                let dst = self.pixels[index];
+                let out = self.blend(dst, Rgba8::new(color.r, color.g, color.b, alpha));
+                self.pixels[index] = out;
+            }
+        }
+        self.mask_ink_at.clear();
     }
 
     fn draw_dashes(&mut self, u: &Unresolved) {
@@ -553,6 +707,8 @@ impl RgbaSurface {
         if x1 <= x0 || y1 <= y0 {
             return;
         }
+        // 图片与字形共用目标缓冲，顺序由 op 决定：先把累积的字形合成掉。
+        self.flush_mask();
         let width = self.width as usize;
         let scale_x = 256.0 * iw / dw;
         let scale_y = 256.0 * ih / dh;
@@ -722,6 +878,11 @@ impl Surface for RgbaSurface {
 
     fn pop_clip(&mut self) {
         self.clips.pop();
+    }
+
+    /// 把最后一批同色字形合成进像素。`paint` / `paint_window` 返回前调用。
+    fn finish(&mut self) {
+        self.flush_mask();
     }
 }
 
