@@ -52,12 +52,15 @@ pub(crate) struct LaidLine {
     pub(crate) avoid_after: bool,
 }
 
+#[derive(Clone)]
 pub(crate) enum Item {
     Line(LaidLine),
     Op(Op),
 }
 
-#[derive(Default)]
+/// 盒树 + 断行 + 整形的结果。`Clone` 只为 [`FlowCache`](crate::FlowCache)
+/// 的命中路径服务：命中时把缓存的那一份拷出来交给分页，缓存本身留着下次用。
+#[derive(Clone, Default)]
 pub(crate) struct Flow {
     pub(crate) items: Vec<Item>,
     pub(crate) glyphs: Vec<Glyph>,

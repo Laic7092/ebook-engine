@@ -17,7 +17,8 @@ use ebook_ir::{
     Rgba8, StyledDoc,
 };
 use ebook_layout::{
-    Layout, LayoutEnv, LayoutOptions, Mode, NoImageSizes, PageConstraint, Reader, StubMeasurer,
+    FlowCache, Layout, LayoutEnv, LayoutOptions, Mode, NoImageSizes, PageConstraint, Reader,
+    StubMeasurer,
 };
 use ebook_raster::{RgbaSurface, Tone};
 use ebook_render::ScaledSurface;
@@ -171,6 +172,13 @@ pub struct Engine {
     limits: Limits,
     /// 每次成功注册字体就加一；排版缓存靠它失效。
     font_rev: u32,
+    /// 排版前段（盒树 + 断行 + 整形）的缓存。分页依赖页高，断行只依赖宽度，
+    /// 所以地址栏收起、旋屏这类「同宽不同高」的重排只需重跑分页。
+    flow_cache: FlowCache,
+    /// 传给 `layout_cached` 的版本号：`(spine, style, font_rev)` 变了就加一。
+    flow_rev: u64,
+    /// 上一次用过的版本号输入。用它判断要不要递增 `flow_rev`，比手写哈希稳。
+    flow_inputs: Option<(usize, Style, u32)>,
 }
 
 impl Engine {
@@ -204,6 +212,9 @@ impl Engine {
             images: ImageCache::default(),
             limits: Limits::default(),
             font_rev: 0,
+            flow_cache: FlowCache::new(),
+            flow_rev: 0,
+            flow_inputs: None,
         })
     }
 
@@ -349,25 +360,37 @@ impl Engine {
         if let Some(font) = self.font.as_mut() {
             font.set_language(doc.meta.lang.as_deref());
         }
-        let ir = {
-            let env = match self.font.as_ref() {
-                Some(font) => LayoutEnv {
-                    measurer: font,
-                    resources: &NoImageSizes,
-                },
-                None => LayoutEnv {
-                    measurer: &StubMeasurer,
-                    resources: &NoImageSizes,
-                },
-            };
-            let constraint =
-                PageConstraint::new(viewport.width, viewport.height).with_margin(viewport.insets);
-            let options = LayoutOptions {
-                mode,
-                ..LayoutOptions::default()
-            };
-            Layout::new().layout_with(&doc, &env, &constraint, &options)
+        // 断行的输入只有「文档 + 字体 + 可用宽度 + 行数预算」。`spine`、`style`、
+        // `font_rev` 一变，文档字节就变，所以它们是这里唯一的版本号来源；
+        // **页高与 `mode` 故意不在里面**：它们只影响分页。
+        let inputs = (spine, style, self.font_rev);
+        if self.flow_inputs != Some(inputs) {
+            self.flow_inputs = Some(inputs);
+            self.flow_rev = self.flow_rev.wrapping_add(1);
+        }
+        // 拆借用：`env.measurer` 借的是 `self.font`，缓存借的是另一个字段。
+        let flow_rev = self.flow_rev;
+        let Engine {
+            font, flow_cache, ..
+        } = self;
+        let env = match font.as_ref() {
+            Some(font) => LayoutEnv {
+                measurer: font,
+                resources: &NoImageSizes,
+            },
+            None => LayoutEnv {
+                measurer: &StubMeasurer,
+                resources: &NoImageSizes,
+            },
         };
+        let constraint =
+            PageConstraint::new(viewport.width, viewport.height).with_margin(viewport.insets);
+        let options = LayoutOptions {
+            mode,
+            ..LayoutOptions::default()
+        };
+        let ir =
+            Layout::new().layout_cached(&doc, &env, &constraint, &options, flow_cache, flow_rev);
 
         Ok(LastLayout {
             spine,
@@ -380,6 +403,11 @@ impl Engine {
             doc,
             anchors,
         })
+    }
+
+    /// 前段缓存的命中/未命中次数。宿主可以据此观察「换页高」有没有真的省下断行。
+    pub fn flow_cache_stats(&self) -> (u64, u64) {
+        (self.flow_cache.hits(), self.flow_cache.misses())
     }
 
     /// 最近一次排版的 IR。适配层拿它编码成 postcard / 别的形状。

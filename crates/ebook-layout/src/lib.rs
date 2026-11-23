@@ -12,6 +12,7 @@ extern crate alloc;
 #[cfg(feature = "parallel")]
 extern crate std;
 
+mod cache;
 mod flow;
 pub mod hit;
 mod hyphen;
@@ -33,6 +34,7 @@ use ebook_ir::{
     Unresolved, UnresolvedReason, WritingMode, IR_VERSION,
 };
 
+pub use cache::FlowCache;
 pub use hit::Reader;
 #[cfg(feature = "hyphen-en")]
 pub use hyphen::English;
@@ -169,7 +171,7 @@ impl Layout {
         c: &PageConstraint,
         opts: &LayoutOptions,
     ) -> LayoutResult {
-        self.run(doc, env, c, opts, None)
+        self.run(doc, env, c, opts, None, None)
     }
 
     /// 把“段落断行之后的工作单元”切成任务并行计算，再按输入顺序拼回。
@@ -186,7 +188,29 @@ impl Layout {
         opts: &LayoutOptions,
     ) -> LayoutResult {
         let workers = workers.max(1);
-        self.run(doc, env, c, opts, Some(workers))
+        self.run(doc, env, c, opts, Some(workers), None)
+    }
+
+    /// 与前两个入口相同，但盒树 + 断行 + 整形可以跨调用复用。
+    ///
+    /// 分页依赖页高，断行只依赖可用宽度：所以**换个页高、换个模式**（分页 ↔
+    /// 滚动）而宽度没变时，`flow` 直接命中，只剩分页与组装要跑。落地场景是
+    /// 手机地址栏收起、旋屏、以及宿主切换分页/滚动。
+    ///
+    /// `rev` 是调用方的版本号，必须覆盖所有参与排版的**文档与字体字节**：
+    /// 同一个 `rev` 下 `doc` 与 `env` 必须逐字节等价。改字、改样式、换字体、
+    /// 换书都要换一个值（或者直接 [`FlowCache::clear`]）。给错了不会 panic，
+    /// 只会拿到上一份 `flow`——这也是它只能由调用方显式传进来的原因。
+    pub fn layout_cached(
+        &mut self,
+        doc: &StyledDoc,
+        env: &LayoutEnv<'_>,
+        c: &PageConstraint,
+        opts: &LayoutOptions,
+        cache: &mut FlowCache,
+        rev: u64,
+    ) -> LayoutResult {
+        self.run(doc, env, c, opts, None, Some((cache, rev)))
     }
 
     fn run(
@@ -196,6 +220,7 @@ impl Layout {
         c: &PageConstraint,
         opts: &LayoutOptions,
         workers: Option<usize>,
+        cache: Option<(&mut FlowCache, u64)>,
     ) -> LayoutResult {
         let limits = opts.limits.resolved();
 
@@ -211,9 +236,24 @@ impl Layout {
             return limited_result(doc, "max_text_bytes");
         }
 
-        let mut built = flow::flow(doc, env, c, limits.max_lines);
-        let flow_truncated = built.truncated;
         let content = c.content_size();
+        // 键只含「断行真正依赖的东西」：调用方版本号、可用宽度、行数预算。
+        // 页高与 `Mode` 刻意不进键——它们只影响分页。
+        let mut built = match cache {
+            Some((cache, rev)) => {
+                let key = cache::flow_key(rev, content.w, limits.max_lines);
+                match cache.get(key) {
+                    Some(flow) => flow,
+                    None => {
+                        let flow = flow::flow(doc, env, c, limits.max_lines);
+                        cache.put(key, &flow);
+                        flow
+                    }
+                }
+            }
+            None => flow::flow(doc, env, c, limits.max_lines),
+        };
+        let flow_truncated = built.truncated;
 
         // 分页本身按行串行（页起点依赖上一页终点），但把每个 item 换成分页
         // 单元的映射是纯函数，可以按任务切。任务只写自己的下标，拼回时顺序固定。

@@ -150,13 +150,26 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 
 ### G-11 没有真正的增量重排
 
-- **状态**：未修复
-- **现象**：`DirtyBlock` 只作为诊断输出；`ebook-cache` 缓存整份 `LayoutResult` 的
-  LRU，没有「只重排某块」的入口。
-- **影响**：改字号、改窗口、图片迟到时整章重排；长章节/低端设备会卡。
+- **状态**：部分
+- **已修复（阶段切分）**：`Layout::layout_cached` + `FlowCache`（`crates/ebook-layout/src/cache.rs`）
+  把「盒树 + 断行 + 整形」与「分页 + 组装」切成两级：前段的键只含调用方版本号、
+  可用宽度、行数预算，**刻意不含页高与 `Mode`**。`Engine` 已接线（`build_layout`
+  用 `(spine, style, font_rev)` 递增 `flow_rev`），所以以下场景不再重跑断行：
+  手机地址栏收起、旋屏、分页 ↔ 滚动切模。实测（`en.epub` 1655 字 + 真实字体）：
+  同宽换页高 `0.855 ms → 0.132 ms`（省 85%）。不变量：同一输入下带缓存的 IR
+  与不带缓存逐字节相同（`crates/ebook-layout/tests/flow_cache.rs`、
+  `crates/ebook-reader/tests/flow_cache.rs`）。
+- **仍未修复**：没有「只重排某一块」的入口。按块失效需要一个 field-complete 的
+  块级内容哈希（`Node` / `ComputedStyle` 全字段）或块级 `StyledDoc` 缓存，漏一个
+  字段就是静默错排，代价与收益不成比例。
+- **别做（实测结论）**：块级缓存解不了「改字号」——字号参与整形，所有块的键都变。
+  `en.epub` 一章 `layout` 共 0.49 ms，其中整形只占 23%（0.114 ms），其余是盒树 /
+  断行 / 组装，而这些在宽度或字号变化时本来就无法复用。真正卡交互的是 G-19 的
+  翻页动画，不是排版。
 - **证据**：`crates/ebook-layout/src/flow.rs` 的 `dirty.push(...)`；
-  `crates/ebook-cache/src/lib.rs` 的 `LayoutCache::layout`。
-- **修复**：先把 flow 的「计划/断行/回填」拆成可独立重算的块，再让 cache 按块失效。
+  `crates/ebook-cache/src/lib.rs` 的 `LayoutCache::layout`（整份 IR 的 LRU，键含页高）。
+- **修复**：确实需要块级入口时，先把 `flow` 的「计划/断行/回填」拆成可独立重算的
+  块，再让 cache 按块失效；`FlowCache` 的两级形状可以直接沿用。
 
 ### G-13 Web 宿主的内存拷贝与预算
 
