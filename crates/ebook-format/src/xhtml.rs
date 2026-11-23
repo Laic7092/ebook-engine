@@ -16,12 +16,27 @@ const MAX_XHTML_NODES: usize = 1_048_576;
 const MAX_XHTML_DEPTH: usize = 64;
 const MAX_XHTML_PARSE_DEPTH: usize = 128;
 const MAX_XHTML_TEXT_BYTES: usize = 20_000_000;
+/// 每个元素最多记多少属性给选择器用；正常书远低于此。属性总字节也设上限，
+/// 防止病态输入把所有属性塞进 `ElemKey`。
+const MAX_ELEM_ATTRS: usize = 64;
+const MAX_ELEM_ATTR_BYTES: usize = 4 * 1024;
 /// 每节点保存一份锚点路径，宽而深的病态文档会把这份重复开销放大。
 const MAX_XHTML_PATH_ENTRIES: usize = 8_000_000;
 const MAX_XHTML_IMAGES: usize = u16::MAX as usize;
+/// `@import` 的递归深度与总文件数：正常书一两层，病态链要确定性地停下。
+const MAX_CSS_IMPORT_DEPTH: usize = 8;
+const MAX_CSS_IMPORTED: usize = 32;
 
 pub trait AssetResolver {
     fn css(&mut self, href: &str) -> Option<String>;
+
+    /// 读取样式表里的 `@import`，返回 `(归档内路径, 文本)`。
+    ///
+    /// `base` 是发起导入的 CSS 的归档内路径；空串表示章节里的 `<style>`
+    /// （此时相对章节文件解析）。默认 `None`：没有归档上下文的调用方忽略导入。
+    fn css_import(&mut self, _base: &str, _href: &str) -> Option<(String, String)> {
+        None
+    }
 
     /// 把章节里的相对引用（`<img src>`）解析成归档内路径。
     ///
@@ -177,6 +192,7 @@ impl Builder {
                 .attribute("class")
                 .map(|c| c.split_whitespace().map(|s| s.to_string()).collect())
                 .unwrap_or_default(),
+            attrs: element_attrs(xml),
             inline: xml
                 .attribute("style")
                 .map(css::parse_decls)
@@ -317,6 +333,38 @@ impl Builder {
     }
 }
 
+/// 解析一张样式表并把它的 `@import` 递归展开。
+///
+/// 导入的规则插在本文件规则**之前**（CSS 的导入语义），所以先收导入表再
+/// `absorb` 本文件。`seen` 按归档路径去重，环与自身导入都会停。
+fn load_sheet(
+    sheet: &mut StyleSheet,
+    resolver: &mut dyn AssetResolver,
+    base: &str,
+    text: &str,
+    depth: usize,
+    seen: &mut Vec<String>,
+) {
+    let mut local = StyleSheet::default();
+    local.parse_into(text);
+    for href in local.take_imports() {
+        if depth >= MAX_CSS_IMPORT_DEPTH || seen.len() >= MAX_CSS_IMPORTED {
+            break;
+        }
+        let Some((path, text)) = resolver.css_import(base, &href) else {
+            continue;
+        };
+        if seen.iter().any(|known| known == &path) {
+            continue;
+        }
+        seen.push(path.clone());
+        let mut imported = StyleSheet::default();
+        load_sheet(&mut imported, resolver, &path, &text, depth + 1, seen);
+        sheet.absorb(imported);
+    }
+    sheet.absorb(local);
+}
+
 pub fn build(
     xml: &str,
     spine: u32,
@@ -379,12 +427,19 @@ pub fn build_document(
     builder.doc.root = root;
 
     let mut sheet = StyleSheet::default();
+    let mut seen: Vec<String> = Vec::new();
     for source in &builder.sources {
         match source {
-            CssSource::Inline(text) => sheet.parse_into(text),
+            CssSource::Inline(text) => {
+                load_sheet(&mut sheet, resolver, "", text, 0, &mut seen);
+            }
             CssSource::Linked(href) => {
+                let path = resolver.resolve(href).unwrap_or_default();
                 if let Some(text) = resolver.css(href) {
-                    sheet.parse_into(&text);
+                    if !path.is_empty() {
+                        seen.push(path.clone());
+                    }
+                    load_sheet(&mut sheet, resolver, &path, &text, 0, &mut seen);
                 }
             }
         }
@@ -603,6 +658,26 @@ fn is_text_break(name: &str) -> bool {
             | "tr"
             | "ul"
     )
+}
+
+/// 元素属性表（名字小写）。属性选择器与 `<ol start>` 用；超出预算的部分丢弃，
+/// 与其它格式层上限一样是确定性的截断。
+fn element_attrs(node: roxmltree::Node<'_, '_>) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut bytes = 0usize;
+    for attr in node.attributes() {
+        if out.len() >= MAX_ELEM_ATTRS {
+            break;
+        }
+        let name = attr.name().to_ascii_lowercase();
+        let value = attr.value();
+        if bytes.saturating_add(name.len() + value.len()) > MAX_ELEM_ATTR_BYTES {
+            break;
+        }
+        bytes += name.len() + value.len();
+        out.push((name, value.to_string()));
+    }
+    out
 }
 
 /// 图片地址：优先 `src`，其次 `href` / `xlink:href`。

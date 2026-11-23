@@ -160,6 +160,9 @@ IR 里有两个互补的枚举：
 - 热区本身不改颜色；光栅保持透明，SVG 后端输出 `<a>`；命中查询用
   `Reader::link_at`（页内坐标）。
 
+列表 marker（`•` / `1.`）是一个独立的 `GlyphRun`：它不并进任何 `LineBox.glyphs`
+区间，选区、复制、命中与搜索都按行区间走，不会把序号当成正文。
+
 `Fit`：`Contain=0`、`Cover=1`、`Fill=2`。
 `Rotate`：`None=0`、`Cw90=1`。
 `Dir`：`Ltr=0`、`Rtl=1`。

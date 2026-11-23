@@ -433,12 +433,24 @@ impl Layout {
 
         // 截断后丢弃尾部不再被行引用的字形，保证 IR 里没有悬空的字形区间。
         if truncated {
+            // 行区间之外还可能有字形（列表 marker 自成一个 run、不并进
+            // `LineBox.glyphs`），截断的上界要把 run 的区间也算上，否则会留下
+            // 指向已删字形的 run。
+            let run_end = ops
+                .iter()
+                .filter_map(|op| match op {
+                    Op::GlyphRun(run) => Some(run.glyphs.end()),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0);
             let glyph_end = lines
                 .iter()
                 .map(|line| line.glyphs.end())
                 .max()
-                .unwrap_or(0) as usize;
-            built.glyphs.truncate(glyph_end);
+                .unwrap_or(0)
+                .max(run_end);
+            built.glyphs.truncate(glyph_end as usize);
         }
 
         LayoutResult {

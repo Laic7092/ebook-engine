@@ -15,7 +15,7 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 
 缺口集中在三层：
 
-1. **格式/样式语义**：选择器、`white-space` 之外的 CSS 细节、表格/列表、行内背景/边框。
+1. **格式/样式语义**：选择器、`white-space` 之外的 CSS 细节、表格、行内背景/边框。
 2. **资源层**：native 图片解码只有 PNG/JPEG（GIF/WebP 缺）；可变字体/彩色字体/子集化缺。
 3. **宿主/架构**：没有增量重排；翻页动画与跟手滑动仍在 JS 且基本不可用（G-19）。
 
@@ -38,27 +38,29 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 ### G-02 CSS 长度单位和颜色函数覆盖不足
 
 - **状态**：部分
-- **仍未修复**：`@import`、`text-transform: capitalize`、
+- **仍未修复**：`text-transform: capitalize`、
   `vw` / `vh` / `ex` / `ch` 等视口/相对单位（IR 没有视口上下文）。
   （`pt`/`pc`/`in`/`cm`/`mm`、`currentColor`、8 位 hex、`rgb()` / `hsl()`
-  的百分比与 alpha 已支持。）
+  的百分比与 alpha、`@import` 都已支持；导入按文件内的相对路径解析，
+  环与自导入会停，最多 8 层 / 32 个文件。）
 - **影响**：`font-size: 3vw` 之类的声明被整条丢弃，回落到默认字号；
-  `@import` 的书丢掉外部样式表；`capitalize` 静默不生效。
-- **证据**：`crates/ebook-format/src/css.rs` 的 `parse_len` / `parse_color` /
-  `parse_level`（`@import` 落到 `_ => {}`）；`crates/ebook-ir/src/doc.rs` 的
-  `TextTransform` 没有 `Capitalize` 变体。
-- **修复**：`capitalize` 成本最低（只加 IR 枚举变体）；`@import` 需要格式层解析 CSS 间依赖；
-  视口单位要在 `ComputedStyle` 之外引入视口上下文，可放到最后。
+  `capitalize` 静默不生效。
+- **证据**：`crates/ebook-format/src/css.rs` 的 `parse_len` / `parse_color`；
+  `crates/ebook-ir/src/doc.rs` 的 `TextTransform` 没有 `Capitalize` 变体。
+- **修复**：`capitalize` 成本最低（只加 IR 枚举变体）；视口单位要在
+  `ComputedStyle` 之外引入视口上下文，可放到最后。
 
-### G-03 选择器只支持 tag / id / class / 后代 / `>` / `+` / `:first-child` / `:last-child`
+### G-03 选择器缺函数式伪类和伪元素
 
 - **状态**：部分
-- **仍未修复**：属性选择器、`:not()` / 其它伪类、伪元素；这些仍整条规则丢弃。
-  一般兄弟 `~` 已支持（`Combinator::GeneralSibling`）。
-- **影响**：`[epub\:type="chapter"]`、`:not(...)` 等常见写法丢样式，
-  段首缩进、标题间距、图片选择常依赖它们。
-- **证据**：`crates/ebook-format/src/css.rs` 的 `parse_selector`（遇到未支持的
-  符号返回 `None`）/ `matches`。
+- **已支持**：tag / id / class / 属性（`[a]`、`=`、`~=`、`|=`、`^=`、`$=`、
+  `*=`、`i` 标志）/ 后代 / `>` / `+` / `~` / `:first-child` / `:last-child`。
+- **仍未修复**：`:not()` / 其它函数式伪类、伪元素（`::before` / `::after`）；
+  这些仍整条规则丢弃。
+- **影响**：`:not(...)`、`::first-letter` 等写法丢样式，按状态类选择器写的
+  章节/封面微调会失效。
+- **证据**：`crates/ebook-format/src/css.rs` 的 `parse_selector`（遇到 `(` 返回
+  `None`）/ `matches`；`ElemKey::attrs` 保存元素的全部属性。
 - **验收**：每种新增组合都要有 CSS 级联测试，不只看单条声明。
 
 ### G-04 背景、边框只解析不输出
@@ -78,17 +80,23 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
   `crates/ebook-layout/tests/decorations.rs` 覆盖单页与跨页。
 - **验收**：golden 里出现 `rect`/`border` op；pixel 基线覆盖有边框的块。
 
-### G-05 表格和列表没有真正的排版语义
+### G-05 表格没有真正的排版语义
 
-- **状态**：未修复
-- **现象**：`Tag::Table` / `Tr` / `Td` 在 UA 样式里全是 `Display::Block`；
-  `ListStyle` 在 IR 和 CSS 里存在，但布局层不读 `style.list`，不生成 `•` / `1.`。
-- **影响**：表格变成一列普通块；有序/无序列表只有缩进没有 marker。非虚构类
-  EPUB 的目录、参数表、步骤列表明显变形。
-- **证据**：`crates/ebook-format/src/css.rs` 的 `ua_apply`；
-  `crates/ebook-ir/src/doc.rs` 的 `ListStyle`（布局层无引用）。
-- **修复**：表格先支持单层 `tr/td` 的列宽与行高；列表先支持 `decimal` / `disc`
-  marker，`start` 按 `ListStyle.start` 递增。
+- **状态**：部分
+- **已修复**：列表 marker。`<ul>` / `<ol>` 在 UA 样式里设置 `ListStyle`，
+  `li` 继承（`list-style-type: none` 会关掉），布局层在首行内容外侧画
+  `•` / `1.`；`<ol start>` 生效，marker 不并进 `LineBox.glyphs`（不参与选区）。
+- **仍未修复**：
+  - 表格仍是 `Display::Block`：`Tag::Table` / `Tr` / `Td` 都按普通块排，
+    没有列宽、行高与跨行跨列，表格变成一列。
+  - 列表只支持直接 `ul/ol > li`；`list-style-position: inside`、
+    `lower-alpha` / roman 的实际字形（`ListStyle` 只有 `ordered: bool`）、
+    `<li value>` 与嵌套计数的复杂组合都还没做。
+- **影响**：非虚构类 EPUB 的参数表、跨列表格明显变形；列表已经可用。
+- **证据**：`crates/ebook-format/src/css.rs` 的 `ua_apply` / `apply`
+  （`list-style*`）；`crates/ebook-layout/src/flow.rs` 的 `list_marker`；
+  `crates/ebook-layout/tests/lists.rs`。
+- **修复**：表格先支持单层 `tr/td` 的列宽与行高；其余按宿主反馈再扩。
 
 ### G-06 图片解码缺 GIF / WebP
 
@@ -288,8 +296,8 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 
 1. **G-19**：先让跟手滑动可用（起手不拒绝、预取、`transitionend`、rAF、主题
    一致性、`ImageBitmap` + 降 DPR）。唯一「用户已经能感觉到坏掉」的项，成本低。
-2. **G-03 / G-02**：剩余选择器、`capitalize`。成本低，直接改善真实书样式。
-3. **G-05**：列表 marker、单层表格。
+2. **G-03 / G-02**：`:not()` / 伪元素、`capitalize`。成本低，直接改善真实书样式。
+3. **G-05**：单层表格（列表 marker 已完成）。
 4. **G-06 JPEG / G-07 字体混淆**：决定「图片和字体能不能显示」。
 5. **G-11**：真正的增量重排。内核改动，放在语义修复之后。
 6. **G-09 / G-10 / G-08**：剩余 RTL 语义、fixed-layout、可变/彩色字体。

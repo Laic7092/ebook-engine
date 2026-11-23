@@ -81,6 +81,14 @@
   百分比，alpha 与 `rgb()` 共用规则（数字或百分比、越界钳制）。
 - **CSS 一般兄弟选择器 `~`**：按 `prev_element` 链匹配任意前置元素兄弟，文本节点
   不打断；`p ~ p` 不再整条丢弃。
+- **CSS 属性选择器**：`[attr]`、`=`、`~=`、`|=`、`^=`、`$=`、`*=` 与 `i` 标志；
+  属性名按本地名比较，`[epub\:type="cover"]` 这类写法能命中。属性表随
+  `ElemKey` 一起建，超预算的尾部属性按确定规则截断。
+- **CSS `@import`**：`url(...)` / 引号 / 裸 URL 三种写法，媒体查询只取屏幕
+  分支；相对路径按导入它的 CSS 解析，环与自导入去重，最多 8 层 / 32 个文件。
+- **列表 marker**：`<ul>` / `<ol>` 的 `li` 现在画出 `•` / `1.`，`<ol start>`
+  生效，`list-style-type: none` 能关掉；marker 自成一个 run、不并进
+  `LineBox.glyphs`，不参与选区与复制；`text-align` / RTL 下贴在内容外侧。
 - 引擎 Worker（`web/engine-worker.js`）：wasm 实例只存在于 worker 里，开书、注册
   字体、排版、整页光栅、命中/选区/链接查询全在那边；主线程只发 RPC，拿页元数据
   （`eb_page_meta`）、位图（`eb_page_bitmap`，`transfer`）和查询结果。开书只解析

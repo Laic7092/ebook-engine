@@ -1,9 +1,10 @@
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use ebook_ir::{
     Anchor, BorderBox, Break, ComputedStyle, Dir, DirtyBlock, Display, Fit, FontId, Glyph, ImageId,
-    NodeId, NodeKind, Op, PointF, RectF, Rotate, Span, TextAlign, TextTransform, Unresolved,
-    UnresolvedReason, VerticalAlign, WhiteSpace,
+    ListStyle, NodeId, NodeKind, Op, PointF, RectF, Rotate, Span, TextAlign, TextTransform,
+    Unresolved, UnresolvedReason, VerticalAlign, WhiteSpace,
 };
 
 use crate::resolve;
@@ -219,7 +220,7 @@ pub(crate) fn flow(
     };
     let mut y = 0.0;
     let root_w = ctx.content_w;
-    let _ = ctx.block(doc.root, 0.0, &mut y, root_w, CollapsedMargin::ZERO);
+    let _ = ctx.block(doc.root, 0.0, &mut y, root_w, CollapsedMargin::ZERO, None);
     ctx.flow
 }
 
@@ -307,6 +308,7 @@ impl<'a> FlowCtx<'a> {
         y: &mut f32,
         avail_w: f32,
         prev_mb: CollapsedMargin,
+        list_pos: Option<u16>,
     ) -> BlockFlow {
         self.depth += 1;
         if self.depth > 128 {
@@ -377,6 +379,7 @@ impl<'a> FlowCtx<'a> {
             }));
         }
 
+        let items_before = self.flow.items.len();
         match kind {
             NodeKind::Text(_) => {
                 if content_empty && deferred_top {
@@ -417,6 +420,7 @@ impl<'a> FlowCtx<'a> {
                 let child_len = node.child_len;
                 let first_child = node.first_child;
                 let mut buf: Vec<NodeId> = Vec::new();
+                let mut list_seen = 0u16;
                 for index in 0..child_len {
                     if self.flow.truncated {
                         break;
@@ -430,6 +434,14 @@ impl<'a> FlowCtx<'a> {
                         buf.push(kid);
                         continue;
                     }
+                    // 列表项在兄弟里的序号：只在直接父元素里数，`<li>` 之外的
+                    // 块不参与，所以嵌套列表各数各的。
+                    let list_pos = if kid_style.display == Display::ListItem {
+                        list_seen = list_seen.saturating_add(1);
+                        Some(list_seen)
+                    } else {
+                        None
+                    };
                     if !buf.is_empty() {
                         let pending = last_mb;
                         cy += pending.value();
@@ -447,7 +459,7 @@ impl<'a> FlowCtx<'a> {
                         }
                         buf.clear();
                     }
-                    let child = self.block(kid, inner_x, &mut cy, inner_w, last_mb);
+                    let child = self.block(kid, inner_x, &mut cy, inner_w, last_mb, list_pos);
                     last_mb = child.margin;
                     if !child.empty {
                         if content_empty {
@@ -472,6 +484,12 @@ impl<'a> FlowCtx<'a> {
                         last_mb = pending;
                     }
                 }
+            }
+        }
+
+        if !content_empty && style.display == Display::ListItem {
+            if let (Some(ordinal), Some(list)) = (list_pos, style.list) {
+                self.list_marker(items_before, ordinal, list, style);
             }
         }
 
@@ -529,6 +547,91 @@ impl<'a> FlowCtx<'a> {
             margin: margin_bottom,
             empty: false,
             top: box_top,
+        }
+    }
+
+    /// 列表 marker：`•` 或 `1.`，画在第一行的内容起点外侧。
+    ///
+    /// marker 不属于原文，所以自成一个 `LaidRun`、不并进 `LineBox.glyphs`：
+    /// 选区、复制、命中都不会把序号当成正文。宽度用同一套 `shape` 量，字体
+    /// 缺 `•` 时退到 `·` / `*` / `-`，再缺就干脆不画。
+    fn list_marker(&mut self, from: usize, ordinal: u16, list: ListStyle, style: ComputedStyle) {
+        let Some(index) = self.flow.items[from..]
+            .iter()
+            .position(|item| matches!(item, Item::Line(_)))
+            .map(|offset| from + offset)
+        else {
+            return;
+        };
+        let (line_x, line_w, baseline, dir) = match &self.flow.items[index] {
+            Item::Line(line) => (line.x, line.w, line.baseline, line.dir),
+            _ => return,
+        };
+        let text = if list.ordered {
+            format!(
+                "{}. ",
+                list.start.saturating_add(ordinal).saturating_sub(1).max(1)
+            )
+        } else {
+            let bullet = ['\u{2022}', '\u{00B7}', '*', '-'].into_iter().find(|ch| {
+                let font = self.env.font_for(&style.font, *ch);
+                self.env.measurer.covers(*ch, font)
+            });
+            let Some(bullet) = bullet else {
+                return;
+            };
+            let mut text = String::new();
+            text.push(bullet);
+            text.push(' ');
+            text
+        };
+        let Some(first) = text.chars().next() else {
+            return;
+        };
+        let font = self.env.font_for(&style.font, first);
+        if !self.env.measurer.covers(first, font) {
+            return;
+        }
+        let mut shaped: Vec<ShapeGlyph> = Vec::new();
+        let advance = self
+            .env
+            .measurer
+            .shape(&text, font, style.font.size, &mut shaped);
+        if shaped.is_empty() {
+            return;
+        }
+        let gap = (style.font.size * 0.35).max(2.0);
+        let origin_x = if dir == Dir::Rtl {
+            line_x + line_w + gap
+        } else {
+            line_x - gap - advance
+        };
+        let glyph_start = self.flow.glyphs.len() as u32;
+        for glyph in shaped {
+            self.flow.glyphs.push(Glyph {
+                gid: glyph.gid,
+                dx: glyph.dx,
+                // marker 不在原文里，`ch` 没有意义；不出现在 `LineBox.glyphs` 区间。
+                dy: 0.0,
+                ch: 0,
+            });
+        }
+        let run = LaidRun {
+            font,
+            size: style.font.size,
+            color: style.color,
+            dir: Dir::Ltr,
+            rotate: Rotate::None,
+            origin: PointF::new(origin_x, baseline),
+            glyphs: Span::new(glyph_start, self.flow.glyphs.len() as u32 - glyph_start),
+            text,
+            weight: style.font.weight,
+            style: style.font.style,
+            underline: false,
+        };
+        if let Item::Line(line) = &mut self.flow.items[index] {
+            // 先画 marker，再画正文：marker 永远在内容外侧。
+            line.runs.insert(0, run);
         }
     }
 

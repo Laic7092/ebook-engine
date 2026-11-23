@@ -32,6 +32,8 @@ pub struct ElemKey {
     pub tag_name: String,
     pub id: Option<String>,
     pub classes: Vec<String>,
+    /// 元素的全部属性，名字小写、值是原文。属性选择器与 `<ol start>` 都用它。
+    pub attrs: Vec<(String, String)>,
     pub inline: Vec<Decl>,
     pub is_element: bool,
 }
@@ -73,6 +75,27 @@ enum PseudoClass {
     LastChild,
 }
 
+/// 属性选择器的六种匹配方式（加上「只要存在」）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttrOp {
+    Exists,
+    Equals,
+    Includes,
+    Dash,
+    Prefix,
+    Suffix,
+    Substring,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AttrTest {
+    name: String,
+    op: AttrOp,
+    value: String,
+    /// `[attr="v" i]`：值按 ASCII 大小写不敏感比较。
+    insensitive: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 struct Compound {
     /// 与本复合选择器前面的那个复合选择器如何连接；第一个复合选择器忽略此字段。
@@ -80,6 +103,7 @@ struct Compound {
     tag: Option<String>,
     id: Option<String>,
     classes: Vec<String>,
+    attrs: Vec<AttrTest>,
     pseudos: Vec<PseudoClass>,
 }
 
@@ -96,6 +120,8 @@ struct Rule {
 pub struct StyleSheet {
     rules: Vec<Rule>,
     font_faces: Vec<FontFace>,
+    /// 顶层 `@import` 的目标，按出现顺序；由调用方解析相对路径后递归加载。
+    imports: Vec<String>,
     /// 无法落到 IR 的属性名，按首次出现顺序去重。
     unsupported: Vec<String>,
 }
@@ -106,7 +132,34 @@ impl StyleSheet {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.rules.is_empty() && self.font_faces.is_empty()
+        self.rules.is_empty() && self.font_faces.is_empty() && self.imports.is_empty()
+    }
+
+    /// 顶层 `@import` 的目标；取走之后调用方负责递归加载并 `absorb`。
+    /// 只记录第一层：导入文件里的 `@import` 由下一轮 `parse_into` 再收。
+    pub(crate) fn take_imports(&mut self) -> Vec<String> {
+        core::mem::take(&mut self.imports)
+    }
+
+    /// 把另一张表并进来，规则追加在后面（调用方保证「导入的在前、本文件的在后」）。
+    /// 规则数仍受 `MAX_RULES` 约束，避免多个 `@import` 叠加绕过单表上限。
+    pub(crate) fn absorb(&mut self, mut other: StyleSheet) {
+        let room = MAX_RULES.saturating_sub(self.rules.len());
+        if other.rules.len() > room {
+            other.rules.truncate(room);
+        }
+        self.rules.append(&mut other.rules);
+        let faces = MAX_FONT_FACES.saturating_sub(self.font_faces.len());
+        if other.font_faces.len() > faces {
+            other.font_faces.truncate(faces);
+        }
+        self.font_faces.append(&mut other.font_faces);
+        for name in other.unsupported {
+            if !self.unsupported.iter().any(|n| n == &name) {
+                self.unsupported.push(name);
+            }
+        }
+        self.imports.append(&mut other.imports);
     }
 
     pub fn font_faces(&self) -> &[FontFace] {
@@ -158,6 +211,22 @@ impl StyleSheet {
                 let mut k = j;
                 while k < bytes.len() && bytes[k] != b'{' && bytes[k] != b';' {
                     k += 1;
+                }
+                // `@import` 是语句不是块：记下目标，由调用方解析相对路径。
+                // 嵌套在 `@media` 里的 `@import` 非法，也一并忽略。
+                if name == "import" && depth == 0 {
+                    let end = if k < bytes.len() && bytes[k] == b';' {
+                        k
+                    } else {
+                        bytes.len()
+                    };
+                    if let Some((href, media)) = parse_import(&css[j..end]) {
+                        if media_is_screen(media) {
+                            self.imports.push(href);
+                        }
+                    }
+                    i = end.saturating_add(1);
+                    continue;
                 }
                 if k >= bytes.len() {
                     break;
@@ -216,7 +285,7 @@ impl StyleSheet {
                     self.note_unsupported(&decl.name);
                 }
             }
-            for selector_text in selector_text.split(',') {
+            for selector_text in split_selectors(selector_text) {
                 if self.rules.len() >= MAX_RULES {
                     self.note_unsupported("@rules");
                     break;
@@ -236,6 +305,52 @@ impl StyleSheet {
             }
         }
     }
+}
+
+/// 按顶层逗号拆选择器列表：属性值里的逗号（`[title="a,b"]`）不是分隔符。
+fn split_selectors(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut bracket = 0usize;
+    let mut quote = 0u8;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if byte == b'\\' {
+            i += 2;
+            continue;
+        }
+        if quote != 0 {
+            if byte == quote {
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+        match byte {
+            b'"' | b'\'' => {
+                quote = byte;
+                i += 1;
+            }
+            b'[' => {
+                bracket += 1;
+                i += 1;
+            }
+            b']' => {
+                bracket = bracket.saturating_sub(1);
+                i += 1;
+            }
+            b',' if bracket == 0 => {
+                out.push(&text[start..i]);
+                start = i + 1;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    out.push(&text[start..]);
+    out
 }
 
 /// 把一个规则块的值拆成声明。`!important` 单独记，不混在值里。
@@ -483,6 +598,28 @@ fn unquote(value: &str) -> String {
         .to_string()
 }
 
+/// 拆 `@import` 的 prelude：`url(...)` / 引号字符串 / 裸 URL + 媒体查询。
+fn parse_import(prelude: &str) -> Option<(String, &str)> {
+    let text = prelude.trim();
+    let (href, rest) = if text.len() >= 4 && text[..4].eq_ignore_ascii_case("url(") {
+        let after = &text[4..];
+        let close = after.find(')')?;
+        (after[..close].trim(), &after[close + 1..])
+    } else if let Some(quote) = text.chars().next().filter(|c| matches!(c, '"' | '\'')) {
+        let after = &text[quote.len_utf8()..];
+        let close = after.find(quote)?;
+        (&after[..close], &after[close + quote.len_utf8()..])
+    } else {
+        let end = text.find(char::is_whitespace).unwrap_or(text.len());
+        (&text[..end], &text[end..])
+    };
+    let href = href.trim().trim_matches(|c| matches!(c, '"' | '\'')).trim();
+    if href.is_empty() {
+        return None;
+    }
+    Some((href.to_string(), rest.trim()))
+}
+
 fn media_is_screen(prelude: &str) -> bool {
     let lower = prelude.to_ascii_lowercase();
     // 只有 print 且不带 screen 的媒体查询才跳过；其余（含 all/空）都算屏幕。
@@ -531,6 +668,26 @@ pub fn cascade(doc: &mut StyledDoc, keys: &[ElemKey], sheet: &StyleSheet) {
             .unwrap_or_default();
         let mut style = inherit(&parent_style);
         ua_apply(&mut style, keys[id as usize].tag);
+        // `list-style-type` 是继承属性，但 `list` 字段不参与 `inherit()`：
+        // 只有列表项需要它，复制到每个文本节点会白白改 IR 字节。
+        if style.display == Display::ListItem && style.list.is_none() {
+            style.list = parent_style.list;
+        }
+        // `<ol start="3">` 是 UA 级信息，不在 CSS 里；attribute 已在 ElemKey 上。
+        if keys[id as usize].tag == Tag::Ol {
+            if let Some((_, value)) = keys[id as usize]
+                .attrs
+                .iter()
+                .find(|(name, _)| name == "start")
+            {
+                if let Ok(start) = value.trim().parse::<u16>() {
+                    style.list = Some(ListStyle {
+                        ordered: true,
+                        start: start.max(1),
+                    });
+                }
+            }
+        }
 
         matched.clear();
         if !exhausted {
@@ -647,9 +804,21 @@ fn ua_apply(style: &mut ebook_ir::ComputedStyle, tag: Tag) {
             style.display = Display::ListItem;
             style.margin.left = Len::Em(1.5);
         }
-        Tag::Ul | Tag::Ol => {
+        Tag::Ul => {
             style.display = Display::Block;
             style.padding.left = Len::Em(1.5);
+            style.list = Some(ListStyle {
+                ordered: false,
+                start: 1,
+            });
+        }
+        Tag::Ol => {
+            style.display = Display::Block;
+            style.padding.left = Len::Em(1.5);
+            style.list = Some(ListStyle {
+                ordered: true,
+                start: 1,
+            });
         }
         Tag::Blockquote => {
             style.display = Display::Block;
@@ -877,28 +1046,38 @@ fn apply(
                 style.brk.widows = n.max(1);
             }
         }
-        "list-style-type" => {
-            if value != "none" {
+        "list-style-type" => match value {
+            "none" => style.list = None,
+            "decimal" | "lower-alpha" | "upper-alpha" | "lower-roman" | "upper-roman" => {
+                // 只改类型，不重置 `<ol start>` 已经给出的起点。
+                let start = style.list.map_or(1, |list| list.start);
                 style.list = Some(ListStyle {
-                    ordered: matches!(
-                        value,
-                        "decimal" | "lower-alpha" | "upper-alpha" | "lower-roman" | "upper-roman"
-                    ),
+                    ordered: true,
+                    start,
+                })
+            }
+            "disc" | "circle" | "square" => {
+                style.list = Some(ListStyle {
+                    ordered: false,
                     start: 1,
-                });
+                })
             }
-        }
+            _ => {}
+        },
         "list-style" => {
-            let mut ordered = false;
-            for token in value.split_whitespace() {
-                if matches!(
-                    token,
-                    "decimal" | "lower-alpha" | "upper-alpha" | "lower-roman" | "upper-roman"
-                ) {
-                    ordered = true;
-                }
+            let tokens: Vec<&str> = value.split_whitespace().collect();
+            if tokens.contains(&"none") {
+                style.list = None;
+            } else {
+                let ordered = tokens.iter().any(|token| {
+                    matches!(
+                        *token,
+                        "decimal" | "lower-alpha" | "upper-alpha" | "lower-roman" | "upper-roman"
+                    )
+                });
+                let start = style.list.map_or(1, |list| list.start);
+                style.list = Some(ListStyle { ordered, start });
             }
-            style.list = Some(ListStyle { ordered, start: 1 });
         }
         // IR 只有下划线，`line-through` / `overline` / 圆角暂不支持。
         "text-decoration" | "text-decoration-line" => {
@@ -1389,8 +1568,8 @@ fn parse_selector(text: &str) -> Option<Vec<Compound>> {
                 i += 1;
                 Combinator::GeneralSibling
             }
-            // 属性 / 函数式伪类继续整条丢弃，不降级成通配符。
-            b'[' | b']' | b'(' | b')' => return None,
+            // 函数式伪类（`:not(...)`）继续整条丢弃，不降级成通配符。
+            b'(' | b')' => return None,
             _ => Combinator::Descendant,
         };
         if combinator != Combinator::Descendant {
@@ -1402,14 +1581,39 @@ fn parse_selector(text: &str) -> Option<Vec<Compound>> {
             continue;
         }
         let start = i;
+        let mut bracket = 0usize;
+        let mut quote = 0u8;
         while i < bytes.len() {
             let byte = bytes[i];
-            if (byte as char).is_ascii_whitespace()
-                || matches!(byte, b'>' | b'+' | b'~' | b'[' | b']' | b'(' | b')')
-            {
-                break;
+            if quote != 0 {
+                if byte == quote {
+                    quote = 0;
+                }
+                i += 1;
+                continue;
             }
-            i += 1;
+            match byte {
+                b'"' | b'\'' => {
+                    quote = byte;
+                    i += 1;
+                }
+                b'[' => {
+                    bracket += 1;
+                    i += 1;
+                }
+                b']' => {
+                    bracket = bracket.saturating_sub(1);
+                    i += 1;
+                }
+                b'(' if bracket == 0 => return None,
+                _ if bracket == 0
+                    && ((byte as char).is_ascii_whitespace()
+                        || matches!(byte, b'>' | b'+' | b'~')) =>
+                {
+                    break;
+                }
+                _ => i += 1,
+            }
         }
         if i == start {
             return None;
@@ -1453,7 +1657,8 @@ fn parse_compound(token: &str) -> Option<Compound> {
         if after.is_empty() {
             return Some(compound);
         }
-        if !after.starts_with(':') {
+        // `*` 之后只能接类/ID/属性/伪类，不能再接另一个 tag。
+        if !matches!(after.as_bytes().first(), Some(b':' | b'[' | b'.' | b'#')) {
             return None;
         }
         rest = after;
@@ -1461,14 +1666,14 @@ fn parse_compound(token: &str) -> Option<Compound> {
     let mut has_tag = false;
     while !rest.is_empty() {
         if let Some(after) = rest.strip_prefix('#') {
-            let end = after.find(['.', '#', ':']).unwrap_or(after.len());
+            let end = after.find(['.', '#', ':', '[']).unwrap_or(after.len());
             if !valid_compound_name(&after[..end]) {
                 return None;
             }
             compound.id = Some(after[..end].to_string());
             rest = &after[end..];
         } else if let Some(after) = rest.strip_prefix('.') {
-            let end = after.find(['.', '#', ':']).unwrap_or(after.len());
+            let end = after.find(['.', '#', ':', '[']).unwrap_or(after.len());
             if !valid_compound_name(&after[..end]) {
                 return None;
             }
@@ -1479,7 +1684,7 @@ fn parse_compound(token: &str) -> Option<Compound> {
             if after.starts_with(':') {
                 return None;
             }
-            let end = after.find(['.', '#', ':']).unwrap_or(after.len());
+            let end = after.find(['.', '#', ':', '[']).unwrap_or(after.len());
             let pseudo = match after[..end].to_ascii_lowercase().as_str() {
                 "first-child" => PseudoClass::FirstChild,
                 "last-child" => PseudoClass::LastChild,
@@ -1487,11 +1692,15 @@ fn parse_compound(token: &str) -> Option<Compound> {
             };
             compound.pseudos.push(pseudo);
             rest = &after[end..];
+        } else if let Some(after) = rest.strip_prefix('[') {
+            let end = attr_end(after)?;
+            compound.attrs.push(parse_attr_test(&after[..end])?);
+            rest = &after[end + 1..];
         } else {
             if has_tag {
                 return None;
             }
-            let end = rest.find(['.', '#', ':']).unwrap_or(rest.len());
+            let end = rest.find(['.', '#', ':', '[']).unwrap_or(rest.len());
             let name = &rest[..end];
             if !name.chars().all(|c| c.is_alphanumeric() || c == '-') {
                 return None;
@@ -1504,6 +1713,279 @@ fn parse_compound(token: &str) -> Option<Compound> {
     Some(compound)
 }
 
+/// `[` 之后到匹配的 `]` 的字节下标，引号里的 `]` 不算结束。
+fn attr_end(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    let mut quote = 0u8;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if byte == b'\\' {
+            i += 2;
+            continue;
+        }
+        if quote != 0 {
+            if byte == quote {
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+        match byte {
+            b'"' | b'\'' => {
+                quote = byte;
+                i += 1;
+            }
+            b']' => return Some(i),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// 读一个 CSS 转义并写入 `out`，返回吃掉的字节数（`text` 必须以 `\` 开头）。
+fn css_unescape_into(out: &mut String, text: &str) -> usize {
+    let bytes = text.as_bytes();
+    if bytes.len() < 2 {
+        return 1;
+    }
+    if bytes[1] == b'\n' {
+        return 2;
+    }
+    if (bytes[1] as char).is_ascii_hexdigit() {
+        let mut value = 0u32;
+        let mut consumed = 1usize;
+        let mut digits = 0;
+        while consumed < bytes.len() && digits < 6 {
+            let Some(digit) = (bytes[consumed] as char).to_digit(16) else {
+                break;
+            };
+            value = value.saturating_mul(16).saturating_add(digit);
+            consumed += 1;
+            digits += 1;
+        }
+        // 一个可选的空白属于转义的一部分。
+        if let Some(ch) = text[consumed..].chars().next() {
+            if ch.is_ascii_whitespace() {
+                consumed += ch.len_utf8();
+            }
+        }
+        if let Some(ch) = char::from_u32(value) {
+            out.push(ch);
+        }
+        return consumed;
+    }
+    let ch = text[1..].chars().next().unwrap_or('\u{FFFD}');
+    out.push(ch);
+    1 + ch.len_utf8()
+}
+
+/// 解析 `[ ... ]` 里的内容。支持存在、`=`、`~=`、`|=`、`^=`、`$=`、`*=` 与 `i` 标志。
+fn parse_attr_test(text: &str) -> Option<AttrTest> {
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+        i += 1;
+    }
+    let mut name = String::new();
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += css_unescape_into(&mut name, &text[i..]);
+            continue;
+        }
+        let ch = text[i..].chars().next()?;
+        if ch.is_ascii_whitespace() || matches!(ch, '=' | '~' | '^' | '$' | '*') {
+            break;
+        }
+        // `ns|attr` 的命名空间前缀没有实际用途：只留本地名。
+        if ch == '|' && bytes.get(i + 1) != Some(&b'=') {
+            name.clear();
+            i += 1;
+            continue;
+        }
+        if ch == '|' {
+            break;
+        }
+        name.push(ch);
+        i += ch.len_utf8();
+    }
+    if name.is_empty() {
+        return None;
+    }
+    while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() {
+        return Some(AttrTest {
+            name: name.to_ascii_lowercase(),
+            op: AttrOp::Exists,
+            value: String::new(),
+            insensitive: false,
+        });
+    }
+    let op = match bytes[i] {
+        b'=' => AttrOp::Equals,
+        b'~' if bytes.get(i + 1) == Some(&b'=') => AttrOp::Includes,
+        b'|' if bytes.get(i + 1) == Some(&b'=') => AttrOp::Dash,
+        b'^' if bytes.get(i + 1) == Some(&b'=') => AttrOp::Prefix,
+        b'$' if bytes.get(i + 1) == Some(&b'=') => AttrOp::Suffix,
+        b'*' if bytes.get(i + 1) == Some(&b'=') => AttrOp::Substring,
+        _ => return None,
+    };
+    i += if op == AttrOp::Equals { 1 } else { 2 };
+    while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+        i += 1;
+    }
+    let (value, consumed) = read_attr_value(&text[i..])?;
+    i += consumed;
+    while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+        i += 1;
+    }
+    let mut insensitive = false;
+    if i < bytes.len() {
+        match bytes[i] {
+            b'i' | b'I' => insensitive = true,
+            b's' | b'S' => {}
+            _ => return None,
+        }
+        i += 1;
+        while i < bytes.len() && (bytes[i] as char).is_ascii_whitespace() {
+            i += 1;
+        }
+        if i < bytes.len() {
+            return None;
+        }
+    }
+    Some(AttrTest {
+        name: name.to_ascii_lowercase(),
+        op,
+        value,
+        insensitive,
+    })
+}
+
+/// 读属性值：引号字符串（含转义）或到空白为止的裸值。
+fn read_attr_value(text: &str) -> Option<(String, usize)> {
+    let bytes = text.as_bytes();
+    let mut out = String::new();
+    if let Some(&quote) = bytes.first().filter(|b| matches!(b, b'"' | b'\'')) {
+        let mut i = 1usize;
+        while i < bytes.len() {
+            if bytes[i] == quote {
+                return Some((out, i + 1));
+            }
+            if bytes[i] == b'\\' {
+                i += css_unescape_into(&mut out, &text[i..]);
+                continue;
+            }
+            let ch = text[i..].chars().next()?;
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+        return None;
+    }
+    let mut i = 0usize;
+    while i < bytes.len() && !(bytes[i] as char).is_ascii_whitespace() {
+        if bytes[i] == b'\\' {
+            i += css_unescape_into(&mut out, &text[i..]);
+            continue;
+        }
+        let ch = text[i..].chars().next()?;
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some((out, i))
+    }
+}
+
+fn starts_with_ci(hay: &str, needle: &str) -> bool {
+    hay.len() >= needle.len()
+        && hay.as_bytes()[..needle.len()].eq_ignore_ascii_case(needle.as_bytes())
+}
+
+fn ends_with_ci(hay: &str, needle: &str) -> bool {
+    hay.len() >= needle.len()
+        && hay.as_bytes()[hay.len() - needle.len()..].eq_ignore_ascii_case(needle.as_bytes())
+}
+
+fn contains_ci(hay: &str, needle: &str) -> bool {
+    if needle.len() > hay.len() {
+        return false;
+    }
+    (0..=hay.len() - needle.len())
+        .any(|at| hay.as_bytes()[at..at + needle.len()].eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+impl AttrTest {
+    fn matches(&self, value: &str) -> bool {
+        let expected = self.value.as_str();
+        let equal = |a: &str, b: &str| {
+            if self.insensitive {
+                a.eq_ignore_ascii_case(b)
+            } else {
+                a == b
+            }
+        };
+        match self.op {
+            AttrOp::Exists => true,
+            AttrOp::Equals => equal(value, expected),
+            AttrOp::Includes => {
+                // 规范要求匹配值本身不含空白；`~=` 空值不命中任何东西。
+                !expected.is_empty()
+                    && !expected.chars().any(char::is_whitespace)
+                    && value.split_whitespace().any(|part| equal(part, expected))
+            }
+            AttrOp::Dash => {
+                equal(value, expected)
+                    || (value.len() > expected.len()
+                        && value.is_char_boundary(expected.len())
+                        && equal(&value[..expected.len()], expected)
+                        && value.as_bytes()[expected.len()] == b'-')
+            }
+            AttrOp::Prefix => {
+                !expected.is_empty()
+                    && if self.insensitive {
+                        starts_with_ci(value, expected)
+                    } else {
+                        value.starts_with(expected)
+                    }
+            }
+            AttrOp::Suffix => {
+                !expected.is_empty()
+                    && if self.insensitive {
+                        ends_with_ci(value, expected)
+                    } else {
+                        value.ends_with(expected)
+                    }
+            }
+            AttrOp::Substring => {
+                !expected.is_empty()
+                    && if self.insensitive {
+                        contains_ci(value, expected)
+                    } else {
+                        value.contains(expected)
+                    }
+            }
+        }
+    }
+}
+
+/// 取属性值。`[epub\:type]` 的转义名是 `epub:type`，而 XML 解析把前缀拆掉了，
+/// 所以带前缀的名字回退到本地名比较。
+fn attr_value<'a>(key: &'a ElemKey, name: &str) -> Option<&'a str> {
+    if let Some((_, value)) = key.attrs.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) {
+        return Some(value.as_str());
+    }
+    let (_, local) = name.rsplit_once(':')?;
+    key.attrs
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(local))
+        .map(|(_, value)| value.as_str())
+}
+
 fn specificity(selector: &[Compound]) -> Spec {
     let mut ids = 0;
     let mut classes = 0;
@@ -1512,8 +1994,10 @@ fn specificity(selector: &[Compound]) -> Spec {
         if compound.id.is_some() {
             ids += 1;
         }
-        // 伪类按 class 级计数。
-        classes += compound.classes.len() as u16 + compound.pseudos.len() as u16;
+        // 伪类、属性选择器都按 class 级计数。
+        classes += compound.classes.len() as u16
+            + compound.pseudos.len() as u16
+            + compound.attrs.len() as u16;
         if compound.tag.is_some() {
             tags += 1;
         }
@@ -1534,6 +2018,14 @@ fn compound_matches(key: &ElemKey, compound: &Compound) -> bool {
     }
     for class in &compound.classes {
         if !key.classes.iter().any(|c| c == class) {
+            return false;
+        }
+    }
+    for test in &compound.attrs {
+        let Some(value) = attr_value(key, &test.name) else {
+            return false;
+        };
+        if !test.matches(value) {
             return false;
         }
     }
@@ -1695,6 +2187,7 @@ mod tests {
             tag_name: name.to_string(),
             id: id.map(|s| s.to_string()),
             classes: classes.iter().map(|s| s.to_string()).collect(),
+            attrs: Vec::new(),
             inline: Vec::new(),
             is_element: true,
         });
@@ -2204,16 +2697,110 @@ mod tests {
         assert!(!doc.node(a).style.text.underline);
     }
 
+    fn with_attrs(attrs: &[(&str, &str)]) -> (StyledDoc, Vec<ElemKey>, NodeId) {
+        let (doc, mut keys, p) = simple_paragraph();
+        keys[p as usize].attrs = attrs
+            .iter()
+            .map(|(name, value)| (name.to_ascii_lowercase(), value.to_string()))
+            .collect();
+        (doc, keys, p)
+    }
+
+    #[test]
+    fn attribute_selectors_match_all_operators() {
+        let cases: [(&[(&str, &str)], &str); 7] = [
+            (&[("data-note", "x")], "[data-note]"),
+            (&[("data-note", "x")], "[data-note=\"x\"]"),
+            (&[("class", "lead big")], "[class~=\"big\"]"),
+            (&[("lang", "en-US")], "[lang|=\"en\"]"),
+            (&[("href", "https://a/b.pdf")], "[href^=\"https\"]"),
+            (&[("href", "https://a/b.pdf")], "[href$=\".pdf\"]"),
+            (&[("href", "https://a/b.pdf")], "[href*=\"a/b\"]"),
+        ];
+        for (attrs, selector) in cases {
+            let (mut doc, keys, p) = with_attrs(attrs);
+            cascade_css(
+                &mut doc,
+                &keys,
+                &format!("p{selector} {{ color: #ff0000; }}"),
+            );
+            assert_eq!(
+                doc.node(p).style.color,
+                Rgba8::new(255, 0, 0, 255),
+                "{selector} with {attrs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn attribute_selectors_respect_values_and_flags() {
+        let (mut doc, keys, p) = with_attrs(&[("data-x", "abc")]);
+        cascade_css(&mut doc, &keys, "p[data-x=\"ABC\" i] { color: #00ff00; }");
+        assert_eq!(doc.node(p).style.color, Rgba8::new(0, 255, 0, 255));
+
+        let (mut doc, keys, p) = with_attrs(&[("data-x", "abc")]);
+        cascade_css(&mut doc, &keys, "p[data-x=\"ABC\"] { color: #00ff00; }");
+        assert_eq!(doc.node(p).style.color, Rgba8::BLACK, "默认大小写敏感");
+
+        // `^=` / `*=` 的空值不命中任何东西。
+        let (mut doc, keys, p) = with_attrs(&[("data-x", "abc")]);
+        cascade_css(&mut doc, &keys, "p[data-x^=\"\"] { color: #00ff00; }");
+        cascade_css(&mut doc, &keys, "p[data-x*=\"\"] { color: #0000ff; }");
+        assert_eq!(doc.node(p).style.color, Rgba8::BLACK);
+
+        let (mut doc, keys, p) = with_attrs(&[("lang", "en-US")]);
+        cascade_css(&mut doc, &keys, "p[lang=\"en\"] { color: #00ff00; }");
+        assert_eq!(doc.node(p).style.color, Rgba8::BLACK, "= 不是前缀匹配");
+    }
+
+    #[test]
+    fn commas_inside_attribute_values_do_not_split_rules() {
+        let (mut doc, keys, p) = with_attrs(&[("title", "a,b")]);
+        cascade_css(
+            &mut doc,
+            &keys,
+            "p[title=\"a,b\"], p[title=\"no\"] { color: #ff0000; }",
+        );
+        assert_eq!(doc.node(p).style.color, Rgba8::new(255, 0, 0, 255));
+    }
+
+    #[test]
+    fn universal_selector_can_carry_attributes_and_classes() {
+        let selector = parse_selector("*[data-x]").expect("universal attr");
+        assert_eq!(selector.len(), 1);
+        assert_eq!(selector[0].attrs.len(), 1);
+        let selector = parse_selector("*.lead[data-x]").expect("universal class attr");
+        assert_eq!(selector[0].classes, vec!["lead"]);
+        assert_eq!(selector[0].attrs.len(), 1);
+        let selector = parse_selector("p[data-x][data-y]").expect("two attributes");
+        assert_eq!(selector[0].attrs.len(), 2);
+    }
+
+    #[test]
+    fn namespaced_attribute_selectors_match_the_local_name() {
+        let (mut doc, keys, p) = with_attrs(&[("type", "cover")]);
+        cascade_css(
+            &mut doc,
+            &keys,
+            "p[epub\\:type=\"cover\"] { color: #ff0000; }",
+        );
+        assert_eq!(doc.node(p).style.color, Rgba8::new(255, 0, 0, 255));
+    }
+
+    #[test]
+    fn import_statements_are_collected_but_not_rules() {
+        let mut sheet = StyleSheet::default();
+        sheet.parse_into(
+            "@import url(\"a.css\") screen; @import 'b.css' print; @import \"c.css\";             p { color: #ff0000; }",
+        );
+        assert_eq!(sheet.take_imports(), vec!["a.css", "c.css"]);
+        assert_eq!(sheet.rules.len(), 1);
+        assert!(sheet.take_imports().is_empty());
+    }
+
     #[test]
     fn unsupported_selectors_are_rejected_whole() {
-        for selector in [
-            "p[class]",
-            ":not(.x)",
-            "p::before",
-            "div > > p",
-            "> p",
-            "h1 +",
-        ] {
+        for selector in [":not(.x)", "p::before", "div > > p", "> p", "h1 +"] {
             assert!(
                 parse_selector(selector).is_none(),
                 "{selector} 应当整条丢弃"

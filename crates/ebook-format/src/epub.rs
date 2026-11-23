@@ -453,6 +453,21 @@ impl AssetResolver for ZipAssets<'_, '_> {
         self.zip.read_text(&join(&self.base, href))
     }
 
+    fn css_import(&mut self, base: &str, href: &str) -> Option<(String, String)> {
+        let href = href.trim();
+        if is_external(href) {
+            return None;
+        }
+        let path = if base.is_empty() {
+            let path = percent_decode(href.split(['#', '?']).next()?);
+            join(&self.base, &normalize_href(&path))
+        } else {
+            resolve_href(base, href)
+        };
+        let text = self.zip.read_text(&path)?;
+        Some((path, text))
+    }
+
     fn resolve(&mut self, href: &str) -> Option<String> {
         let href = href.trim();
         if is_external(href) {

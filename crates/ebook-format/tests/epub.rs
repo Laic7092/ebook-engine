@@ -175,3 +175,105 @@ fn pandoc_style_doctype_is_accepted() {
     assert!(text.contains("第一卷"), "{text:?}");
     assert!(text.contains("正文 & 版权"), "{text:?}");
 }
+
+#[test]
+fn imported_stylesheets_are_resolved_and_cycles_stop() {
+    let opf = r##"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Import</dc:title><dc:language>en</dc:language><dc:identifier id="id">i</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="c1" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="main" href="styles/main.css" media-type="text/css"/>
+    <item id="extra" href="styles/extra.css" media-type="text/css"/>
+    <item id="print" href="styles/print.css" media-type="text/css"/>
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"##;
+    let chapter = r##"<html xmlns="http://www.w3.org/1999/xhtml"><head>
+      <link rel="stylesheet" href="../styles/main.css"/></head>
+      <body><p>imported</p></body></html>"##;
+    // main 导入 extra（再导回 main，必须停下）与 print（媒体不匹配要跳过）。
+    let main = r##"@import url("extra.css");
+@import "print.css" print;
+@import "https://example.com/remote.css";
+p { background-color: #00ff00; }"##;
+    let extra = r##"@import "main.css"; p { color: #ff0000; }"##;
+    let print = r##"p { color: #0000ff; }"##;
+    let bytes = support::epub(
+        "OEBPS/content.opf",
+        opf,
+        &[
+            ("OEBPS/text/ch1.xhtml", chapter.as_bytes()),
+            ("OEBPS/styles/main.css", main.as_bytes()),
+            ("OEBPS/styles/extra.css", extra.as_bytes()),
+            ("OEBPS/styles/print.css", print.as_bytes()),
+        ],
+    );
+    let src = support::source(bytes);
+    let opened = open(&src).expect("open");
+    let doc = opened.chapter(&src, 0).expect("chapter");
+    let p = doc
+        .walk()
+        .find(|&id| matches!(doc.node(id).kind, NodeKind::Element(Tag::P)))
+        .expect("p");
+    assert_eq!(
+        doc.node(p).style.color,
+        Rgba8::new(255, 0, 0, 255),
+        "extra.css 的规则生效"
+    );
+    assert_eq!(
+        doc.node(p).style.background,
+        Some(Rgba8::new(0, 255, 0, 255)),
+        "main.css 自己的规则也生效"
+    );
+}
+
+#[test]
+fn attribute_selectors_see_chapter_attributes() {
+    let opf = r##"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Attrs</dc:title><dc:language>en</dc:language><dc:identifier id="id">a</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="css" href="style.css" media-type="text/css"/>
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"##;
+    let chapter = r##"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+      <head><link rel="stylesheet" href="style.css"/></head>
+      <body>
+        <p lang="en-US">english</p>
+        <p epub:type="note">note</p>
+      </body></html>"##;
+    let css = r##"p[lang|="en"] { color: #ff0000; }
+p[epub\:type="note"] { background-color: #00ff00; }"##;
+    let bytes = support::epub(
+        "OEBPS/content.opf",
+        opf,
+        &[
+            ("OEBPS/ch1.xhtml", chapter.as_bytes()),
+            ("OEBPS/style.css", css.as_bytes()),
+        ],
+    );
+    let src = support::source(bytes);
+    let opened = open(&src).expect("open");
+    let doc = opened.chapter(&src, 0).expect("chapter");
+    let paragraphs: Vec<_> = doc
+        .walk()
+        .filter(|&id| matches!(doc.node(id).kind, NodeKind::Element(Tag::P)))
+        .collect();
+    assert_eq!(
+        doc.node(paragraphs[0]).style.color,
+        Rgba8::new(255, 0, 0, 255),
+        "[lang|=\"en\"] 命中 en-US"
+    );
+    assert_eq!(
+        doc.node(paragraphs[1]).style.background,
+        Some(Rgba8::new(0, 255, 0, 255)),
+        "带命名空间的属性按本地名命中"
+    );
+}
