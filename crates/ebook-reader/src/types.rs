@@ -141,7 +141,7 @@ pub struct ScrollChapter {
     pub spine: usize,
     /// 全章在全书流坐标里的起点（等于前面所有章的高度之和）。
     pub top: f32,
-    /// 本章内容高度；排不出来的章是 0。
+    /// 本章高度：排版内容高按视口高向上取整（至少一屏）；排不出来的章是 0。
     pub height: f32,
     /// 排版成功为 `true`；失败的章高度按 0 计，不会拖垮后面的章。
     pub ok: bool,

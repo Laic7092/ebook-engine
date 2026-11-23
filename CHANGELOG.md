@@ -77,6 +77,10 @@
   也接受 `.woff` / `.woff2`。解包失败通过 `FontBook` 诊断与 `eb_font_error` 暴露，
   不再静默丢弃。
 - 阅读器翻页动画：淡入淡出与跟手滑动，设置面板新增「翻页动画」开关。
+- **CSS `hsl()` / `hsla()`**：色相接受裸数字与 `deg`、负角绕回；饱和度/亮度必须是
+  百分比，alpha 与 `rgb()` 共用规则（数字或百分比、越界钳制）。
+- **CSS 一般兄弟选择器 `~`**：按 `prev_element` 链匹配任意前置元素兄弟，文本节点
+  不打断；`p ~ p` 不再整条丢弃。
 - 引擎 Worker（`web/engine-worker.js`）：wasm 实例只存在于 worker 里，开书、注册
   字体、排版、整页光栅、命中/选区/链接查询全在那边；主线程只发 RPC，拿页元数据
   （`eb_page_meta`）、位图（`eb_page_bitmap`，`transfer`）和查询结果。开书只解析
@@ -110,6 +114,21 @@
 
 ### Fixed
 
+- **C ABI 出图是原子写**：`eb_plain_page_raw` / `_page_slice_raw` /
+  `_scroll_band_raw` / `_scroll_slice_raw` 先写同目录的 `{path}.{pid}.{seq}.part`
+  再 `rename`，宿主按「文件存在」判断瓦片可用时不会再读到只写了一半的 `EQP1`
+  （滚动条带被取消/并发时那条一屏纸色的空白带）。
+- **滚动章高按视口向上取整**：短章（题记、单段小节）至少占一屏，章尾是纸色，
+  下一章从整屏边界开始；`tops` / 总高 / `scroll_spine_at` / `scroll_progress`
+  都跟这张高度表走。排版失败的章仍是 0。
+- **主题墨色只换默认字色**：`ink != 0` 现在只替换正文主导色（按文本字节数取），
+  书里显式写的 `color`（链接蓝、`em` 红、警告框）保留。`set_ink` 的旧语义还在，
+  需要整页一种颜色时仍可用；native 与 wasm 的 `page_bitmap` 都改了，C 头文件也
+  补了 `ink`/`paper` 的说明。
+- **`<rp>` 回退括号不再进入正文**：引擎自己处理注音，真实 XHTML 里的回退括号
+  不会和基字、`rt` 一起排出来。
+- **`text-indent` 按段落方向镜像**：RTL 首行从右边缩进；`text-align: end` 也不
+  再把缩进算两次（LTR / RTL 都修）。
 - **README 自相矛盾**：末尾还写着「缺字时该段退回浏览器系统字体」，与「现状与
   限制」和 `Op::Unresolved{FontMissing}` 的契约相反。回退路径已经删除：平台
   fallback 链不同会让同一本书在不同端分页不同，书签与跨端同步全部失效。

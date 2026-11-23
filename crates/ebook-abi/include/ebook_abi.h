@@ -263,8 +263,11 @@ EbPageInfo eb_plain_page_info(int32_t id, uint32_t page);
  *   "EQP1" | u32le width | u32le height | width*height*4 bytes RGBA8
  *
  * 行优先，直通 alpha（非预乘）。`scale` 是设备像素比，`ink`/`paper` 是
- * 0xRRGGBBAA 主题色（0 = 不修正 / 白纸），`bold` 全局加粗。
+ * 0xRRGGBBAA 主题色（0 = 不修正 / 白纸），`bold` 全局加粗。`ink` 只替换
+ * 默认字色（正文主导色），书里显式写的链接色/强调色保留。
  * 位图覆盖整个视口（含留白），不是内容盒。
+ * 写文件是原子的：先写 {path}.{pid}.{seq}.part 再 rename；宿主用「文件存在」
+ * 判断可用时不会读到半张位图。
  * 返回：0 好，-1 句柄/路径错，-2 光栅化失败，-3 写文件失败。 */
 int32_t eb_plain_page_raw(int32_t id, uint32_t page, float scale, uint32_t ink,
                           uint32_t paper, bool bold, const char *path);
@@ -295,7 +298,8 @@ int32_t eb_plain_scroll_begin(int32_t id, float width, float height,
                               float word_px, uint32_t align);   /* 章节数；-1/-2 错 */
 /* 书的章节数（滚动会话的章下标范围就是它）；0 句柄/空书。 */
 uint32_t eb_plain_scroll_chapter_count(int32_t id);
-/* 一章：起点/高度/成没成。ok == 0 表示下标越界或这一章排不出来。 */
+/* 一章：起点/高度/成没成。高度按视口高向上取整（至少一屏）。ok == 0 表示
+ * 下标越界或这一章排不出来。 */
 EbScrollChapter eb_plain_scroll_chapter(int32_t id, uint32_t index);
 /* 全书流坐标总长（滚动容器的 contentSize）；首次调用量完全书，-1 错。 */
 float eb_plain_scroll_total_height(int32_t id);

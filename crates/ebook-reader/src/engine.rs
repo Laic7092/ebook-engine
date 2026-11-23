@@ -38,6 +38,8 @@ struct LastLayout {
     limits: Limits,
     ir: LayoutResult,
     doc: StyledDoc,
+    /// 正文默认字色（按文本字节数取主导色）。主题墨色只换它。
+    text_color: Rgba8,
     anchors: Vec<ChapterAnchor>,
 }
 
@@ -391,6 +393,7 @@ impl Engine {
         };
         let ir =
             Layout::new().layout_cached(&doc, &env, &constraint, &options, flow_cache, flow_rev);
+        let text_color = ebook_ir::default_text_color(&doc);
 
         Ok(LastLayout {
             spine,
@@ -401,6 +404,7 @@ impl Engine {
             limits: self.limits,
             ir,
             doc,
+            text_color,
             anchors,
         })
     }
@@ -782,7 +786,7 @@ impl Engine {
                     .last
                     .as_ref()
                     .and_then(|last| last.ir.pages.first())
-                    .map_or(0.0, |page| page.size.h),
+                    .map_or(0.0, |page| ceil_to_viewport(page.size.h, viewport.height)),
                 Err(error) => {
                     if let Some(session) = self.scroll.as_mut() {
                         session.errors[next] = Some(error.to_string());
@@ -1082,6 +1086,16 @@ fn unpack_rgba(value: u32) -> Rgba8 {
     )
 }
 
+/// 滚动列里的章高按视口高向上取整：每章至少占一屏，题记、单段小节不会和下一章
+/// 贴在一起。刚好整页的章别因浮点误差多出一屏；排版失败（0）仍是 0。
+fn ceil_to_viewport(height: f32, viewport: f32) -> f32 {
+    if !height.is_finite() || height <= 0.0 || !viewport.is_finite() || viewport <= 0.0 {
+        return height.max(0.0);
+    }
+    let pages = (height / viewport - 1.0e-4).ceil().max(1.0);
+    pages * viewport
+}
+
 /// 光栅化一份已经排好的章。
 ///
 /// 不碰 `Engine` 的其它状态，所以滚动会话能把章节从缓存里取出来画，
@@ -1133,9 +1147,13 @@ fn render_bitmap(
 
     let mut surface = RgbaSurface::new(width, height);
     if ink != 0 {
-        // 墨色既是对比度的依据，也是字形的颜色：夜里是浅色字，不是黑字。
-        surface.set_tone(Some(Tone::ink(unpack_rgba(ink))));
-        surface.set_ink(Some(unpack_rgba(ink)));
+        // 墨色既是对比度的依据，也是默认字形的颜色：夜里是浅色字，不是黑字。
+        // 只换「默认字色」（正文主导色），作者显式写的链接色/强调色保留，
+        // 否则夜间主题会把整页染成一种颜色。
+        let ink = unpack_rgba(ink);
+        let base = layout.text_color;
+        surface.set_tone(Some(Tone::ink(ink)));
+        surface.set_ink_replacing(Some(ink), base);
     }
     surface.clear(if paper == 0 {
         Rgba8::WHITE

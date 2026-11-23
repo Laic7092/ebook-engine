@@ -31,6 +31,14 @@
 //! 跨章滚动（`eb_plain_scroll_begin`）：章节起点、全书总高、跨章瓦片
 //! （`eb_plain_scroll_band_raw` / `_band_bytes`）、命中与锚点换算都由引擎给，
 //! 宿主不用自己维护“章节 top 表”。
+//!
+//! 所有出位图的入口都收 `ink` / `paper`，是 `0xRRGGBBAA`：`ink == 0` 不修正墨色，
+//! `paper == 0` 是白纸。`ink != 0` 只替换**默认字色**（正文主导色，通常就是
+//! 书的默认 `color`），书里显式写的链接色、强调色保留；否则夜间主题会把整页
+//! 染成一种颜色。
+//!
+//! 落盘先写 `{path}.{pid}.{seq}.part` 再 `rename`：宿主在别的线程用「文件存在」
+//! 判断可用，不能让它读到只写了一半的 `EQP1`。
 
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{c_char, CStr, CString};
@@ -709,6 +717,8 @@ pub extern "C" fn eb_plain_page_info(id: i32, page: u32) -> EbPageInfo {
 }
 
 /// 光栅化一页，写成 `EQP1` 原始位图文件。0 好。
+///
+/// `ink` / `paper` 见模块文档：`0` = 不修正 / 白纸，`ink` 只替换默认字色。
 #[no_mangle]
 pub extern "C" fn eb_plain_page_raw(
     id: i32,
@@ -738,6 +748,8 @@ pub extern "C" fn eb_plain_page_raw(
 
 /// 光栅化滚动流的一个窗口，写成 `EQP1`：`y`/`height` 是点，`scale` 是设备
 /// 像素比。滚动模式的瓦片就是它；同一个 y 再来一次会得到逐字节相同的文件。
+///
+/// `ink` / `paper` 见模块文档：`0` = 不修正 / 白纸，`ink` 只替换默认字色。
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub extern "C" fn eb_plain_page_slice_raw(
@@ -775,6 +787,8 @@ pub extern "C" fn eb_plain_page_slice_raw(
 /// 宿主在后台线程取瓦片时，`layout_scroll` 和 `bitmap_window` 必须在同一次
 /// 锁里：否则另一次调用可能在这两步之间换掉“最近一次排版”，画出来的就是
 /// 另一章。参数与 `eb_plain_layout_scroll` + `eb_plain_page_slice_raw` 相同。
+///
+/// `ink` / `paper` 见模块文档：`0` = 不修正 / 白纸，`ink` 只替换默认字色。
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub extern "C" fn eb_plain_scroll_slice_raw(
@@ -937,6 +951,8 @@ pub extern "C" fn eb_plain_scroll_chapter_top(id: i32, spine: u32) -> f32 {
 }
 
 /// 光栅化全书流坐标的一段，写成 `EQP1`。可能跨章，章缝不会错行。
+///
+/// `ink` / `paper` 见模块文档：`0` = 不修正 / 白纸，`ink` 只替换默认字色。
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub extern "C" fn eb_plain_scroll_band_raw(
@@ -971,6 +987,8 @@ pub extern "C" fn eb_plain_scroll_band_raw(
 ///
 /// 能读内存的宿主（Swift/cgo）用它，就不必为了取瓦片先落一个文件、再自己做
 /// 文件命名与磁盘缓存。失败回 null 且 `*out_len == 0`。
+///
+/// `ink` / `paper` 见模块文档：`0` = 不修正 / 白纸，`ink` 只替换默认字色。
 ///
 /// # Safety
 /// `out_len` 必须指向可写的一个 `size_t`。
@@ -1074,16 +1092,28 @@ fn raw_bytes(bitmap: &ebook_reader::Bitmap) -> Vec<u8> {
     out
 }
 
-/// 把位图写成 `EQP1`。
+/// 把位图写成 `EQP1` 文件：先写同目录下的唯一临时文件，再 `rename` 成目标路径。
+///
+/// 宿主用「文件存在」判断瓦片可用，直接 `File::create(path)` 会让它读到只写了
+/// 一半的位图（魔数与宽高对、像素不够），平台侧解码失败就是一屏纸色。
+/// 临时名带进程号与自增序号：并发写同一个目标路径时不会互相踩。
 fn write_raw(path: &str, bitmap: &ebook_reader::Bitmap) -> i32 {
-    let mut file = match File::create(path) {
-        Ok(file) => file,
-        Err(error) => {
-            crate::set_last_error(format!("{path}: {error}"));
-            return -3;
-        }
+    use std::sync::atomic::AtomicU64;
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = format!("{path}.{}.{seq}.part", std::process::id());
+
+    let write = || -> std::io::Result<()> {
+        let mut file = File::create(&tmp)?;
+        file.write_all(&raw_bytes(bitmap))?;
+        // 这里不需要 `sync_all`：读者看的是同一份页缓存，`rename` 之后看到的就是
+        // 完整的文件；崩溃持久化不是这个函数的职责。
+        Ok(())
     };
-    if let Err(error) = file.write_all(&raw_bytes(bitmap)) {
+    let result = write().and_then(|()| std::fs::rename(&tmp, path));
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&tmp);
         crate::set_last_error(format!("{path}: {error}"));
         return -3;
     }

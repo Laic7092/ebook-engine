@@ -88,6 +88,21 @@ fn page_bitmap_contract() {
         .count();
     assert!(inked_sepia > 0, "sepia page has ink");
 
+    // `ink` 真的换掉默认字色，而不只是改伽马。用拉丁文本：示例书的中文
+    // 字形在测试字体里没有，页面上没有字可染色。
+    let opened = open_text("Sphinx of black quartz, judge my vow.", "ink.txt");
+    assert!(!opened.starts_with("{\"error\""), "open text: {opened}");
+    layout_cached(0, WIDTH, HEIGHT, MARGIN);
+    const NIGHT_INK: [u8; 4] = [0xe8, 0xe4, 0xda, 255];
+    let (_, _, night) = unpack(page_bitmap(0, 1.0, 0xe8e4_daff, 0x1112_11ff, false));
+    let recolored = night
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| **px == NIGHT_INK)
+        .count();
+    assert!(recolored > 0, "night ink should color the default glyphs");
+
     // 6. 全局加粗是绘制阶段的开关：同一份 IR，换 face 后墨量应该变多。
     //    换一本拉丁文的书：内置字体没有 CJK 字形，比对墨量没有意义。
     let opened = open_text("Bold sample text", "bold.txt");

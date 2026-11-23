@@ -105,7 +105,7 @@ op 坐标是**排版流坐标**，不是页面内坐标。`Page.origin` 表示�
 | 交互 | `Reader`（命中、锚点、进度、链接、夹取）、`Selection`/`SelectionRect`（分页矩形与原文）、wasm 侧 JSON 查询 |
 | 缓存 | `ebook-cache`：输入指纹为键的有界 LRU，命中/未命中/淘汰统计 |
 | 并发 | `Layout::layout_parallel`：一次调用内的 `thread::scope`，输出与串行逐字节相同；wasm 走串行 |
-| 渲染 | RGBA8 整数光栅（tone/线性光、嵌套裁剪、双线性图片、PNG+JPEG 图片）、同色字形批处理（可选，`Surface::finish` 收尾）、SVG 导出（CLI）、Canvas2D 阅读器（只搬位图） |
+| 渲染 | RGBA8 整数光栅（tone/线性光、嵌套裁剪、双线性图片、PNG+JPEG 图片）、同色字形批处理（可选，`Surface::finish` 收尾）、SVG 预览导出（CLI）、Canvas2D 阅读器（只搬位图） |
 
 ## 现状与限制
 
@@ -128,7 +128,7 @@ op 坐标是**排版流坐标**，不是页面内坐标。`Page.origin` 表示�
 
 | 后端 | 位置 | 用途 |
 |---|---|---|
-| SVG | `ebook-render` | 参考实现，输出可以直接看，也方便和浏览器排同一份 XHTML 做差分 |
+| SVG | `ebook-render` | 可读预览，输出可以直接看；不复现 kerning/bidi，几何以 RGBA 为准 |
 | 光栅 | `ebook-raster` | 整数混合，跨平台逐字节一致；`to_ppm()` 可以落到文件 |
 | Canvas2D | `web/` | 浏览器阅读器：wasm 在 worker 里，整页位图来自 `eb_page_bitmap`，主线程只做 `putImageData` + 交互 |
 
@@ -148,6 +148,10 @@ int32_t book = eb_plain_open(bytes, len, "demo.epub");
 eb_plain_layout(book, 0, 390, 760, 26, 30, 26, 30, 1.0, 1.6, 0, 0, 0);
 eb_plain_page_raw(book, 0, 3.0, ink, paper, false, "/tmp/page0.eqp");
 ```
+
+`ink` / `paper` 是 `0xRRGGBBAA`（`0` = 不修正 / 白纸）；`ink` 只替换默认字色，
+书里显式写的链接色、强调色保留。出图先写临时文件再 `rename`，宿主按「文件存在」
+判断可用不会读到半张位图。
 
 两个面：`eb_open` / `eb_request`（postcard 请求响应，适合 cgo / Swift）与
 `eb_plain_*`（标量 + 整数句柄 + 文件出图，适合只能拿 `Pointer` 的宿主）。

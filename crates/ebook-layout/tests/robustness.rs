@@ -3,8 +3,8 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ebook_ir::{
-    ComputedStyle, Dir, FontId, FontSpec, Limits, Node, NodeKind, Op, Rgba8, Span, StyledDoc, Tag,
-    TextAlign, TextTransform,
+    ComputedStyle, Dir, FontId, FontSpec, Len, Limits, Node, NodeKind, Op, Rgba8, Span, StyledDoc,
+    Tag, TextAlign, TextTransform,
 };
 use ebook_layout::{
     layout, Layout, LayoutEnv, LayoutOptions, NoImageSizes, PageConstraint, StubMeasurer,
@@ -230,6 +230,47 @@ fn rtl_start_and_end_are_mirrored() {
     assert_eq!(start.runs.lines[0].rect.x, 136.0);
     let end = layout(&rtl_doc(TextAlign::End), &env, &c);
     assert_eq!(end.runs.lines[0].rect.x, 0.0);
+}
+
+fn indented_doc(dir: Dir, align: TextAlign, indent: f32) -> StyledDoc {
+    let mut doc = StyledDoc::default();
+    let mut block = ComputedStyle {
+        dir,
+        ..ComputedStyle::default()
+    };
+    block.text.align = align;
+    block.text.indent = Len::Px(indent);
+    let root = doc.push_node(node(NodeKind::Element(Tag::P), block, None));
+    doc.root = root;
+    let start = doc.text.len() as u32;
+    doc.text.push_str("中中中中");
+    let span = Span::new(start, doc.text.len() as u32 - start);
+    let style = ComputedStyle::inline(FontSpec::default(), Rgba8::BLACK, dir);
+    let text = doc.push_node(node(NodeKind::Text(span), style, Some(root)));
+    doc.set_kids(root, &[text]);
+    doc
+}
+
+/// `text-indent` 从行首一侧扣：LTR 扣左、RTL 扣右，不能把首行推出页外。
+#[test]
+fn text_indent_follows_the_paragraph_direction() {
+    let env = LayoutEnv {
+        measurer: &StubMeasurer,
+        resources: &NoImageSizes,
+    };
+    let c = PageConstraint::new(200.0, 200.0);
+
+    let ltr = layout(&indented_doc(Dir::Ltr, TextAlign::Start, 10.0), &env, &c);
+    assert_eq!(ltr.runs.lines[0].rect.x, 10.0);
+    assert_eq!(ltr.runs.lines[0].rect.w, 64.0);
+
+    let rtl = layout(&indented_doc(Dir::Rtl, TextAlign::Start, 10.0), &env, &c);
+    assert_eq!(rtl.runs.lines[0].rect.x, 126.0, "200 - 10 - 64");
+    assert_eq!(rtl.runs.lines[0].rect.w, 64.0);
+
+    // `end` 也不能被缩进推出去：LTR 的 end 仍然贴右边。
+    let end = layout(&indented_doc(Dir::Ltr, TextAlign::End, 10.0), &env, &c);
+    assert_eq!(end.runs.lines[0].rect.x, 136.0);
 }
 
 /// `text-transform` 会改变字符个数（`ß` → `SS`），`LineBox.src` 仍必须

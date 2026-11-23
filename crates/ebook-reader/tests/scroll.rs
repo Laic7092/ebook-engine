@@ -158,6 +158,30 @@ fn a_slice_can_cross_a_chapter_seam() {
         .all(|pixel| *pixel == [255, 255, 255, 255]));
 }
 
+/// 短章在滚动列里也占满一屏：章尾是纸色，下一章从整屏边界开始。
+#[test]
+fn short_chapters_occupy_a_whole_screen() {
+    let mut engine = Engine::open(txt(), "demo.txt").unwrap();
+    let viewport = viewport();
+    engine.scroll_begin(viewport, Style::default()).unwrap();
+    let chapters = engine.scroll_chapters().unwrap();
+    assert_eq!(chapters.len(), 3, "demo.txt 有三章");
+    for chapter in &chapters {
+        assert!(
+            chapter.ok,
+            "第 {} 章排版失败: {:?}",
+            chapter.spine,
+            engine.scroll_chapter(chapter.spine)
+        );
+        assert_eq!(
+            chapter.height, viewport.height,
+            "第 {} 章不足一屏，高度应向上取整",
+            chapter.spine
+        );
+    }
+    assert_eq!(engine.scroll_total_height().unwrap(), viewport.height * 3.0);
+}
+
 #[test]
 fn hits_and_anchors_are_in_book_flow_coordinates() {
     let Some(mut engine) = open_epub() else {

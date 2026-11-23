@@ -164,6 +164,10 @@ impl Builder {
         }
 
         let name = xml.tag_name().name();
+        // `rp` 是 ruby 的回退括号；引擎自己处理注音，括号不能进正文。
+        if name.eq_ignore_ascii_case("rp") {
+            return None;
+        }
         let tag = map_tag(name);
         let mut key = ElemKey {
             tag,
@@ -680,5 +684,26 @@ fn map_tag(name: &str) -> Tag {
         "tr" => Tag::Tr,
         "td" => Tag::Td,
         _ => Tag::Other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `rp` 是 ruby 的回退括号；引擎自己处理注音，括号不能进入正文。
+    #[test]
+    fn ruby_fallback_parentheses_are_dropped() {
+        let html = "<html><body><p>\
+                    <ruby>漢<rp>(</rp><rt>かん</rt><rp>)</rp></ruby>\
+                    </p></body></html>";
+        let doc: StyledDoc = build(html, 0, &mut NoAssets).expect("xhtml");
+        assert!(doc.text.contains('漢'), "正文丢了: {:?}", doc.text);
+        assert!(doc.text.contains("かん"), "注音丢了: {:?}", doc.text);
+        assert!(
+            !doc.text.contains('(') && !doc.text.contains(')'),
+            "rp 括号不该留下: {:?}",
+            doc.text
+        );
     }
 }

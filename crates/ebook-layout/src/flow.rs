@@ -1807,17 +1807,21 @@ impl<'a> FlowCtx<'a> {
 
         // `start` / `end` 是逻辑值：RTL 段落的 start 在右边，end 在左边。
         // 不能直接映射成左/右，否则阿拉伯语/希伯来语正文的段落对齐是反的。
+        // `text-indent` 从行首一侧扣：LTR 扣左、RTL 扣右；断行侧已经按
+        // `w - indent` 算过可用宽度，这里只决定行盒画在哪。
         let rtl = base_style.dir == Dir::Rtl;
+        let available = (w - indent).max(0.0);
+        let row_x = if rtl { x0 } else { x0 + indent };
         let align_pad = match base_style.text.align {
-            TextAlign::Center => (w - line_w) * 0.5,
-            TextAlign::Start if rtl => w - line_w,
-            TextAlign::End if !rtl => w - line_w,
+            TextAlign::Center => (available - line_w) * 0.5,
+            TextAlign::Start if rtl => available - line_w,
+            TextAlign::End if !rtl => available - line_w,
             TextAlign::Start | TextAlign::End => 0.0,
             TextAlign::Justify => 0.0,
         }
         .max(0.0);
 
-        let start_x = x0 + indent + align_pad;
+        let start_x = row_x + align_pad;
         let top = *y;
         let baseline = top - line_top;
         let mut cx = start_x;

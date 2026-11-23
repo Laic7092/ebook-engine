@@ -53,6 +53,8 @@ fn clear_font_error() {
 struct LastLayout {
     ir: LayoutResult,
     doc: StyledDoc,
+    /// 正文默认字色（按文本字节数取主导色）。主题墨色只换它。
+    text_color: Rgba8,
     /// 本章 `id → Anchor`。fragment 定位只对最近一次排版的那一章有效。
     anchors: Vec<ChapterAnchor>,
 }
@@ -223,6 +225,7 @@ pub fn reset_fonts() {
 /// 返回 8 字节小端头 + 像素：`[w:u32, h:u32, rgba...]`，后面是 `w*h*4` 字节。
 /// `scale` 是设备像素比（非有限/`<=0` 按 1，上限 4）；`ink` / `paper` 是
 /// `0xRRGGBBAA`：`ink` 为 `0` 时不做墨色/伽马修正，`paper` 为 `0` 时是白纸。
+/// `ink != 0` 只换默认字色（正文主导色），作者显式写的颜色保留。
 /// 主题反转仍由宿主做（引擎只认纸色/墨色，不认识 sepia/dark）。
 /// `bold` 是宿主的“全局加粗”开关：绘制阶段把 face 换成同一 family 的合成粗体。
 ///
@@ -256,7 +259,10 @@ pub fn page_bitmap(page: u32, scale: f32, ink: u32, paper: u32, bold: bool) -> V
 
     let mut surface = RgbaSurface::new(w, h);
     if ink != 0 {
-        surface.set_tone(Some(Tone::ink(unpack_rgba(ink))));
+        let ink = unpack_rgba(ink);
+        let base = last.text_color;
+        surface.set_tone(Some(Tone::ink(ink)));
+        surface.set_ink_replacing(Some(ink), base);
     }
     surface.clear(if paper == 0 {
         Rgba8::WHITE
@@ -843,6 +849,7 @@ fn layout_doc_full_edges(
     let constraint = PageConstraint::new(width, height).with_margin(margin);
     let ir = Layout::new().layout(doc, &env, &constraint);
     *LAST.lock().unwrap() = Some(LastLayout {
+        text_color: ebook_ir::default_text_color(doc),
         ir: ir.clone(),
         doc: doc.clone(),
         anchors,

@@ -63,6 +63,7 @@ enum Combinator {
     Descendant,
     Child,
     AdjacentSibling,
+    GeneralSibling,
 }
 
 /// 结构性伪类。只实现只看元素兄弟的两个：文本节点不参与计数。
@@ -1210,6 +1211,15 @@ pub fn parse_color(value: &str) -> Option<Rgba8> {
     {
         return parse_rgb(inner);
     }
+    if let Some(inner) = lower.strip_prefix("hsl(").and_then(|v| v.strip_suffix(')')) {
+        return parse_hsl(inner);
+    }
+    if let Some(inner) = lower
+        .strip_prefix("hsla(")
+        .and_then(|v| v.strip_suffix(')'))
+    {
+        return parse_hsl(inner);
+    }
     let named = match lower.as_str() {
         "black" => Rgba8::BLACK,
         "white" => Rgba8::WHITE,
@@ -1260,6 +1270,57 @@ fn parse_alpha(part: &str) -> Option<u8> {
         parse_finite(part)?
     };
     Some((value.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+}
+
+/// `hsl()` / `hsla()` 的函数体。色相接受裸数字与 `deg`，负值绕回；饱和度、
+/// 亮度必须是百分比；alpha 与 `rgb()` 共用规则（0–1 或百分比）。越界一律钳制。
+fn parse_hsl(inner: &str) -> Option<Rgba8> {
+    let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+    if !matches!(parts.len(), 3 | 4) {
+        return None;
+    }
+    let hue = parse_hue(parts[0])?;
+    let sat = parse_percent(parts[1])?;
+    let light = parse_percent(parts[2])?;
+    let a = match parts.get(3) {
+        Some(part) => parse_alpha(part)?,
+        None => 255,
+    };
+    let (r, g, b) = hsl_to_rgb(hue, sat, light);
+    Some(Rgba8::new(r, g, b, a))
+}
+
+fn parse_hue(part: &str) -> Option<f32> {
+    let value = part.strip_suffix("deg").unwrap_or(part);
+    // 绕回 [0, 360)：`hsl(-120, …)` 与 240 等价。no_std 下没有 `rem_euclid`。
+    let mut degrees = parse_finite(value)? % 360.0;
+    if degrees < 0.0 {
+        degrees += 360.0;
+    }
+    Some(degrees)
+}
+
+fn parse_percent(part: &str) -> Option<f32> {
+    let percent = part.strip_suffix('%')?;
+    Some((parse_finite(percent)? / 100.0).clamp(0.0, 1.0))
+}
+
+/// CSS Color 3 的 HSL → RGB：先算色度 `c` 与次级分量 `x`，再加亮度基线 `m`。
+fn hsl_to_rgb(hue: f32, sat: f32, light: f32) -> (u8, u8, u8) {
+    let c = (1.0 - (2.0 * light - 1.0).abs()) * sat;
+    let h = hue / 60.0;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r, g, b) = match h as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = light - c / 2.0;
+    let byte = |value: f32| ((value.clamp(0.0, 1.0) * 255.0) + 0.5) as u8;
+    (byte(r + m), byte(g + m), byte(b + m))
 }
 
 fn parse_finite(value: &str) -> Option<f32> {
@@ -1324,8 +1385,12 @@ fn parse_selector(text: &str) -> Option<Vec<Compound>> {
                 i += 1;
                 Combinator::AdjacentSibling
             }
-            // `~` / 属性 / 函数式伪类继续整条丢弃，不降级成通配符。
-            b'~' | b'[' | b']' | b'(' | b')' => return None,
+            b'~' => {
+                i += 1;
+                Combinator::GeneralSibling
+            }
+            // 属性 / 函数式伪类继续整条丢弃，不降级成通配符。
+            b'[' | b']' | b'(' | b')' => return None,
             _ => Combinator::Descendant,
         };
         if combinator != Combinator::Descendant {
@@ -1551,6 +1616,16 @@ fn match_at(
             .is_some_and(|parent| match_at(doc, keys, aux, parent, selector, index - 1, budget)),
         Combinator::AdjacentSibling => aux.prev_element[node as usize]
             .is_some_and(|sibling| match_at(doc, keys, aux, sibling, selector, index - 1, budget)),
+        Combinator::GeneralSibling => {
+            let mut sibling = aux.prev_element[node as usize];
+            while let Some(candidate) = sibling {
+                if match_at(doc, keys, aux, candidate, selector, index - 1, budget) {
+                    return true;
+                }
+                sibling = aux.prev_element[candidate as usize];
+            }
+            false
+        }
     }
 }
 
@@ -1786,6 +1861,47 @@ mod tests {
             Some(Rgba8::new(0, 0, 0, 255))
         );
         assert_eq!(parse_color("rgba(0,0,0,0)"), Some(Rgba8::TRANSPARENT));
+    }
+
+    #[test]
+    fn parses_hsl_and_hsla_components() {
+        assert_eq!(
+            parse_color("hsl(0, 100%, 50%)"),
+            Some(Rgba8::new(255, 0, 0, 255))
+        );
+        assert_eq!(
+            parse_color("hsl(120deg, 100%, 25%)"),
+            Some(Rgba8::new(0, 128, 0, 255))
+        );
+        assert_eq!(
+            parse_color("hsl(240, 100%, 50%)"),
+            Some(Rgba8::new(0, 0, 255, 255))
+        );
+        // 色相绕回：负角与超过一圈等价。
+        assert_eq!(
+            parse_color("hsl(-120, 100%, 50%)"),
+            Some(Rgba8::new(0, 0, 255, 255))
+        );
+        assert_eq!(
+            parse_color("hsl(360, 100%, 50%)"),
+            Some(Rgba8::new(255, 0, 0, 255))
+        );
+        // 无饱和度：亮度决定灰阶。
+        assert_eq!(
+            parse_color("hsl(0, 0%, 100%)"),
+            Some(Rgba8::new(255, 255, 255, 255))
+        );
+        assert_eq!(
+            parse_color("hsla(0, 100%, 50%, 25%)"),
+            Some(Rgba8::new(255, 0, 0, 64))
+        );
+        assert_eq!(
+            parse_color("hsl(0, 100%, 50%, .5)"),
+            Some(Rgba8::new(255, 0, 0, 128))
+        );
+        // 饱和度/亮度必须是百分比，分量个数不对就整条丢。
+        assert_eq!(parse_color("hsl(0, 100, 50)"), None);
+        assert_eq!(parse_color("hsl(0, 100%)"), None);
     }
 
     #[test]
@@ -2091,7 +2207,6 @@ mod tests {
     #[test]
     fn unsupported_selectors_are_rejected_whole() {
         for selector in [
-            "p ~ span",
             "p[class]",
             ":not(.x)",
             "p::before",
@@ -2105,9 +2220,31 @@ mod tests {
             );
         }
         // 支持的形式仍能解析出组合器。
-        let selector = parse_selector("div > p + h1").expect("selector");
-        assert_eq!(selector.len(), 3);
+        let selector = parse_selector("div > p + h1 ~ span").expect("selector");
+        assert_eq!(selector.len(), 4);
         assert_eq!(selector[1].combinator, Combinator::Child);
         assert_eq!(selector[2].combinator, Combinator::AdjacentSibling);
+        assert_eq!(selector[3].combinator, Combinator::GeneralSibling);
+    }
+
+    /// `~` 命中前面**任意**一个元素兄弟；文本节点不参与计数。
+    #[test]
+    fn general_sibling_matches_every_preceding_element() {
+        let (mut doc, mut keys, first) = simple_paragraph();
+        let body = doc.node(first).parent.expect("body");
+        let second = element(&mut doc, &mut keys, Some(body), Tag::P, "p", None, &[]);
+        let third = element(&mut doc, &mut keys, Some(body), Tag::P, "p", None, &[]);
+        let text = text_node(&mut doc, &mut keys, first, "x");
+        doc.set_kids(first, &[text]);
+        doc.set_kids(body, &[first, second, third]);
+
+        cascade_css(&mut doc, &keys, "p ~ p { color: #ff0000; }");
+        assert_eq!(
+            doc.node(first).style.color,
+            Rgba8::BLACK,
+            "第一个 p 前面没有元素兄弟"
+        );
+        assert_eq!(doc.node(second).style.color, Rgba8::new(255, 0, 0, 255));
+        assert_eq!(doc.node(third).style.color, Rgba8::new(255, 0, 0, 255));
     }
 }

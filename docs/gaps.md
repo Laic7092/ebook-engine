@@ -38,22 +38,24 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 ### G-02 CSS 长度单位和颜色函数覆盖不足
 
 - **状态**：部分
-- **仍未修复**：`hsl()`、`@import`、`text-transform: capitalize`、
+- **仍未修复**：`@import`、`text-transform: capitalize`、
   `vw` / `vh` / `ex` / `ch` 等视口/相对单位（IR 没有视口上下文）。
-  （`pt`/`pc`/`in`/`cm`/`mm`、`currentColor`、8 位 hex、`rgb()` 百分比与 alpha 已支持。）
+  （`pt`/`pc`/`in`/`cm`/`mm`、`currentColor`、8 位 hex、`rgb()` / `hsl()`
+  的百分比与 alpha 已支持。）
 - **影响**：`font-size: 3vw` 之类的声明被整条丢弃，回落到默认字号；
   `@import` 的书丢掉外部样式表；`capitalize` 静默不生效。
 - **证据**：`crates/ebook-format/src/css.rs` 的 `parse_len` / `parse_color` /
   `parse_level`（`@import` 落到 `_ => {}`）；`crates/ebook-ir/src/doc.rs` 的
   `TextTransform` 没有 `Capitalize` 变体。
-- **修复**：`hsl()` 与 `capitalize` 成本最低；`@import` 需要格式层解析 CSS 间依赖；
+- **修复**：`capitalize` 成本最低（只加 IR 枚举变体）；`@import` 需要格式层解析 CSS 间依赖；
   视口单位要在 `ComputedStyle` 之外引入视口上下文，可放到最后。
 
 ### G-03 选择器只支持 tag / id / class / 后代 / `>` / `+` / `:first-child` / `:last-child`
 
 - **状态**：部分
-- **仍未修复**：`~`、属性选择器、`:not()` / 其它伪类、伪元素；这些仍整条规则丢弃。
-- **影响**：`[epub\:type="chapter"]`、`:not(...)`、`p ~ p` 等常见写法丢样式，
+- **仍未修复**：属性选择器、`:not()` / 其它伪类、伪元素；这些仍整条规则丢弃。
+  一般兄弟 `~` 已支持（`Combinator::GeneralSibling`）。
+- **影响**：`[epub\:type="chapter"]`、`:not(...)` 等常见写法丢样式，
   段首缩进、标题间距、图片选择常依赖它们。
 - **证据**：`crates/ebook-format/src/css.rs` 的 `parse_selector`（遇到未支持的
   符号返回 `None`）/ `matches`。
@@ -186,17 +188,6 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 - **修复**：`FontBook` 接受 `Vec<u8>` 所有权；`layout_cached` 用 `move` 而不是
   clone；宿主层加总预算（见 G-16）。
 
-### G-14 SVG 后端不是精确参考渲染
-
-- **状态**：部分
-- **现象**：`ebook-render::SvgSurface::glyph_run` 只写
-  `<text font-family="sans-serif">` + 原始字符串，忽略 `Glyph` 数组、advance、
-  kerning、bidi 重排；`image()` 只画占位。`ebook-cli` 的 `CliSvg` 能内联真实
-  图片，但文字仍是 `<text>`。
-- **影响**：SVG 输出不能用来验证排版几何；bidi/两端对齐/字距失真。
-- **证据**：`crates/ebook-render/src/svg.rs`、`crates/ebook-cli/src/svg.rs`。
-- **修复**：要么把 glyph 转成 `<path>`，要么在文档里明确它只是「可读预览」。
-
 ### G-15 parsed face 没有缓存
 
 - **状态**：部分
@@ -256,11 +247,13 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 
 ### G-18 其他已知小项
 
-- **状态**：未修复 / 部分
+- **状态**：部分
+- **已修复**：`text-indent` 按段落方向镜像（LTR 从左边扣、RTL 从右边扣）；
+  `<rp>` 回退括号不再进入正文。
 - `text-emphasis`（中文着重号）不支持，CJK 正文常见。
-- `ruby` 只处理直接 `ruby/rt`，没有 `rp` / `ruby-position` / 复杂 ruby。
+- `ruby`：布局层有 `NodeKind::Ruby`，但格式层没有把 `ruby/rt` 折成它，
+  真实 XHTML 的注音不会排到基字上方；也没有 `ruby-position` / 复杂 ruby。
 - `text-align: justify` 对 CJK 把余量平均加到每个字间隙，不是标点/字间分开处理。
-- `text-indent` 在 RTL 下不镜像。
 - `opacity`、`transform`、`filter`、`box-shadow` 不支持。
 - `page-break-*` 与 `break-*` 只支持一部分，`left/right/recto/verso` 没有奇偶页处理。
 - `linear="no"` 只记录在 `SpineItem`，阅读顺序没有真正跳过。
@@ -283,6 +276,7 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 |---|---|
 | 竖排 / `WritingMode::Vertical*` | 字段保留，纵向布局是独立工程 |
 | flex / grid / 绝对定位 / float | 不追求浏览器级 CSS 兼容 |
+| SVG 逐字形精确渲染 | SVG 后端是可读预览：文本按 `GlyphRun.text` 输出，不复现 kerning/bidi/几何；几何校验用 RGBA / 像素基线 |
 | PDF 输出 | 当前只有 SVG / RGBA / Canvas |
 | DRM 解密 | 只考虑 `encryption.xml` 的字体混淆，不做内容解密 |
 | 完整的 UAX #14 上下文规则 | 只实现成对可判定部分，已写在 `docs/design.md` |
@@ -294,12 +288,12 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 
 1. **G-19**：先让跟手滑动可用（起手不拒绝、预取、`transitionend`、rAF、主题
    一致性、`ImageBitmap` + 降 DPR）。唯一「用户已经能感觉到坏掉」的项，成本低。
-2. **G-03 / G-02**：剩余选择器、`hsl()`、`capitalize`。成本低，直接改善真实书样式。
+2. **G-03 / G-02**：剩余选择器、`capitalize`。成本低，直接改善真实书样式。
 3. **G-05**：列表 marker、单层表格。
 4. **G-06 JPEG / G-07 字体混淆**：决定「图片和字体能不能显示」。
 5. **G-11**：真正的增量重排。内核改动，放在语义修复之后。
-6. **G-09 / G-10 / G-08 / G-14**：剩余 RTL 语义、fixed-layout、可变/彩色字体、
-   精确 SVG。工作量大，单独排期。
+6. **G-09 / G-10 / G-08**：剩余 RTL 语义、fixed-layout、可变/彩色字体。
+   工作量大，单独排期。
 
 ---
 

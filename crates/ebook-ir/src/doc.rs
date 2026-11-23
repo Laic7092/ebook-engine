@@ -562,3 +562,33 @@ impl<'a> Iterator for Walk<'a> {
         Some(id)
     }
 }
+
+/// 正文的默认字色：按文本字节数取出现最多的颜色。
+///
+/// 主题墨色只替换这个颜色。根元素的 `color` 不够用：书里的默认色常常写在
+/// `body`（如 `body { color: #222 }`）或 `p` 上，而 `<em>`、链接、警告框等
+/// 显式强调色应该保留。用主导色代替“继承链来源”，不需要改 IR 编码。
+pub fn default_text_color(doc: &StyledDoc) -> Rgba8 {
+    let mut counts: Vec<(Rgba8, usize)> = Vec::new();
+    for node in &doc.nodes {
+        let NodeKind::Text(span) = &node.kind else {
+            continue;
+        };
+        let len = span.len as usize;
+        if len == 0 {
+            continue;
+        }
+        if let Some(entry) = counts
+            .iter_mut()
+            .find(|(color, _)| *color == node.style.color)
+        {
+            entry.1 += len;
+        } else {
+            counts.push((node.style.color, len));
+        }
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(_, bytes)| *bytes)
+        .map_or(Rgba8::BLACK, |(color, _)| color)
+}

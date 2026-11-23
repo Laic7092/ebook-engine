@@ -18,6 +18,6 @@ pub use types::{
 };
 
 pub use ebook_format::TocEntry;
-pub use ebook_ir::{EdgesF, LayoutResult, Location};
+pub use ebook_ir::{default_text_color, EdgesF, LayoutResult, Location};
 pub use ebook_layout::SelectionRect;
 pub use ebook_render;

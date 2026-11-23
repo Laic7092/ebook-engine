@@ -151,6 +151,9 @@ pub struct RgbaSurface {
     /// 覆盖字形的颜色：正文墨色由调用方定（夜纸上的浅色字），排版时的颜色
     /// （书里的黑色）只是默认。`None` 时用 `GlyphRun` 自己的颜色。
     ink: Option<Rgba8>,
+    /// `Some(base)` 时 `ink` 只替换等于 `base` 的字形颜色（默认字色），
+    /// 书里显式写的链接色/强调色保留；`None` 时替换全部。
+    ink_base: Option<Rgba8>,
     /// 同色字形的覆盖率累积缓冲，1 字节/像素，与 `pixels` 同尺寸。
     ///
     /// 字形不是画一次混合一次，而是先按颜色把覆盖率并进这里（取最大值），
@@ -226,6 +229,7 @@ impl RgbaSurface {
             clips: Vec::new(),
             tone: None,
             ink: None,
+            ink_base: None,
             mask: vec![0; len],
             mask_ink_at: Vec::new(),
             mask_ink: None,
@@ -302,9 +306,31 @@ impl RgbaSurface {
 
     /// 让所有字形用这个颜色画，而不是排版时写进 `GlyphRun` 的那个。夜间的
     /// 浅色正文就是这么来的：排版只管几何，颜色在这一层定。
+    ///
+    /// 这是旧语义：作者显式写的颜色也一起换掉。要保留作者颜色用
+    /// [`Self::set_ink_replacing`]。
     pub fn set_ink(&mut self, ink: Option<Rgba8>) {
         self.flush_mask();
         self.ink = ink;
+        self.ink_base = None;
+    }
+
+    /// 只把等于 `base` 的字形换成 `ink`（默认字色），其它颜色原样保留。
+    ///
+    /// 夜间/米黄主题要的是「黑字换成浅色墨」而不是「整页一个颜色」：
+    /// 书里的链接蓝、强调红不该被抹掉。
+    pub fn set_ink_replacing(&mut self, ink: Option<Rgba8>, base: Rgba8) {
+        self.flush_mask();
+        self.ink = ink;
+        self.ink_base = Some(base);
+    }
+
+    /// 字形实际使用的颜色。
+    fn ink_for(&self, color: Rgba8) -> Rgba8 {
+        match self.ink {
+            Some(ink) if self.ink_base.is_none_or(|base| base == color) => ink,
+            _ => color,
+        }
     }
 
     pub fn ink(&self) -> Option<Rgba8> {
@@ -791,7 +817,7 @@ impl RgbaSurface {
             let dx = pen_x - origin_x as f32;
             let dy = pen_y - origin_y as f32;
             if let Some(bitmap) = res.glyph_alpha_at(run.font, glyph.gid, run.size, dx, dy) {
-                let color = self.ink.unwrap_or(run.color);
+                let color = self.ink_for(run.color);
                 self.draw_glyph(color, &bitmap, origin_x, origin_y);
             }
             pen_x += advance;
@@ -803,7 +829,7 @@ impl RgbaSurface {
             if width > 0.0 {
                 let y = baseline + (run.size * 0.08).max(1.0);
                 let height = (run.size * 0.055).max(1.0);
-                let color = self.ink.unwrap_or(run.color);
+                let color = self.ink_for(run.color);
                 self.fill_rect(RectF::new(origin.x, y, width, height), color);
             }
         }

@@ -419,6 +419,8 @@ engine.scroll_progress(y)?;                 // 流坐标 → 0..1
 - 高度是**懒**的：`scroll_chapter(i)` 只保证 `0..=i` 量过，可以分摊到多帧；
   `scroll_total_height()` / `scroll_chapters()` 才量全书。
 - 一章排不出来不会拖垮整本书：该章 `height == 0`、`ok == false`，后面的章照排。
+- 章节高按视口高向上取整：短章（题记、单段小节）也占满一屏，章尾是纸色，
+  下一章从整屏边界开始。
 - `scroll_slice` 自己找出涉及的章、分别光栅化再拼到同一张位图，章缝不会错行；
   内容之外是纸色。起点会吸到设备像素栅格。
 - 章节 IR 有 LRU（当前章 + 3 章）；字体换了（`register_font`）后旧高度失效，
@@ -653,7 +655,7 @@ trait Renderer {
 
 | 后端 | 类型 | 输出 |
 |---|---|---|
-| 参考 | `SvgRenderer` + `SvgSurface` | 可直接看的 SVG；文本用 `GlyphRun.text` |
+| 可读预览 | `SvgRenderer` + `SvgSurface` | 可直接看的 SVG；文本用 `GlyphRun.text`，不复现 kerning/bidi/几何，几何校验以 RGBA 为准 |
 | 光栅 | `RgbaSurface` | RGBA8，整数混合，跨平台逐字节一致 |
 | Canvas2D | `web/reader.js` | 浏览器阅读器，文本可选中；wasm 在 `web/engine-worker.js` 里 |
 
@@ -706,7 +708,7 @@ advance 与**字号**一起乘 `scale`，因此字形按设备像素光栅化，
 | `eb_base_font_size()` | `epub` | 当前书首章根节点字号；宿主用它把 px 字号换算成缩放比例 |
 | `eb_font(bytes)` | `epub` | 注册字体，返回 id；失败 `u32::MAX` |
 | `eb_font_reset()` / `eb_font_count()` | `epub` | 字体槽管理 |
-| `eb_page_bitmap(page, scale, ink, paper, bold)` | `epub` | 引擎整页光栅：8 字节头（`w:u32, h:u32`）+ `w*h*4` RGBA；`scale` 是 DPR，`ink`/`paper` 是 `0xRRGGBBAA`（`0` = 不修正/白纸），`bold` 是全局加粗 |
+| `eb_page_bitmap(page, scale, ink, paper, bold)` | `epub` | 引擎整页光栅：8 字节头（`w:u32, h:u32`）+ `w*h*4` RGBA；`scale` 是 DPR，`ink`/`paper` 是 `0xRRGGBBAA`（`0` = 不修正/白纸）；`ink` 只替换默认字色（作者显式 `color` 保留），`bold` 是全局加粗 |
 | `eb_hit(page, x, y)` | 任意 | 页内坐标命中：`{"location":{...}|null}` |
 | `eb_link_at(page, x, y)` | 任意 | 页内坐标上的链接：`{"href":"..."|"null"}` |
 | `eb_selection(a_page,a_line,a_byte,b_page,b_line,b_byte)` | 任意 | 选区：`{start,end,rects:[{page,rect}],text}` |
@@ -779,6 +781,8 @@ JS 侧解码器是手写的，IR 版本、枚举 tag、字段顺序都见本文�
 ```
 
 行优先、直通 alpha（非预乘）。位图覆盖整个视口（含留白），不是内容盒。
+写文件是原子的：先写同目录的 `{path}.{pid}.{seq}.part`，再 `rename` 到目标
+路径；宿主用「文件存在」判断可用时不会读到半张位图。
 `eb_plain_page_raw` 出一页；`eb_plain_page_slice_raw` 出滚动流的一片
 （`y`/`height` 是点，`y` 在 `[0, eb_plain_content_height)` 里，同一 `y`
 逐字节可复现）。`eb_plain_scroll_band_raw` 出**跨章**的一段（`y` 在

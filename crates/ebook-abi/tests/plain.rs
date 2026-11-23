@@ -97,6 +97,62 @@ fn lays_out_and_writes_a_raw_page() {
     eb_plain_close(engine);
 }
 
+/// 落盘先写临时文件再 `rename`：目标路径要么不存在，要么是完整位图，成功
+/// 之后也不留下 `.part` 残片。
+#[test]
+fn raw_writes_are_atomic_and_leave_no_parts() {
+    let _guard = serial();
+    let (engine, _) = open_book();
+    assert_eq!(
+        eb_plain_layout(engine, 0, 400.0, 700.0, 24.0, 24.0, 24.0, 24.0, 1.0, 1.0, 0.0, 0.0, 0,),
+        0
+    );
+
+    let dir = std::env::temp_dir().join("eb-abi-atomic");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("page.raw");
+    let c_path = CString::new(path.to_str().unwrap()).unwrap();
+    assert_eq!(
+        eb_plain_page_raw(engine, 0, 1.0, 0, 0, false, c_path.as_ptr()),
+        0
+    );
+
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(&bytes[..4], b"EQP1");
+    let width = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+    let height = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    assert_eq!(bytes.len(), 12 + width * height * 4, "目标文件不是完整位图");
+
+    let leftovers: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name != "page.raw")
+        .collect();
+    assert!(leftovers.is_empty(), "临时文件没清掉: {leftovers:?}");
+
+    // 目录不存在：失败返回 -3，也不会凭空留下文件。
+    let missing = dir.join("nope").join("page.raw");
+    let c_missing = CString::new(missing.to_str().unwrap()).unwrap();
+    assert_eq!(
+        eb_plain_page_raw(engine, 0, 1.0, 0, 0, false, c_missing.as_ptr()),
+        -3
+    );
+    assert!(!missing.exists());
+
+    // 覆盖同一个目标路径：仍然是完整位图。
+    assert_eq!(
+        eb_plain_page_raw(engine, 0, 1.0, 0, 0, false, c_path.as_ptr()),
+        0
+    );
+    let again = std::fs::read(&path).unwrap();
+    assert_eq!(again.len(), bytes.len());
+
+    let _ = std::fs::remove_dir_all(&dir);
+    eb_plain_close(engine);
+}
+
 #[test]
 fn lays_out_scroll_and_writes_a_slice() {
     let _guard = serial();
