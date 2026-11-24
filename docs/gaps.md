@@ -303,20 +303,6 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
   rev 不变；滚动列追加后总高增长、旧 band 逐字节不变；无文件也能排版；
   native/wasm parity；空/超长/越界不 panic。
 
-### G-27 打开大书要整本进内存
-
-- **状态**：未修复（宿主 Quire 在 iOS 导入 300MB EPUB 时卡死）
-- **现状**：`eb_plain_open` 收的是 `bytes`，内部 `to_vec()`；Asuka 侧
-  `engine.open(path)` 先把整本 `fs.read` 进来。打开一本 300MB 的书至少两份
-  全量拷贝，且发生在主线程，再叠加 ZIP 解析。
-- **需求**：`eb_plain_open_path(path)`（或 `open` 的路径变体）：按需
-  `pread`/mmap，不持有整本字节；加 `eb_plain_probe(path)` 只读
-  OPF/封面/目录/章数/文本字节数，不解析全书；无文件也能排版/光栅。
-- **验收**：300MB EPUB 打开时宿主常驻内存不随文件线性增长；`probe` 在
-  一秒内返回元数据；native/wasm 对同一文件 IR 逐字节一致。
-- **关系**：与 G-26 是同一个「书是章节流，不是一个 blob」的两端；G-26 是在线
-  端，本条是本地端。
-
 ---
 
 ## 5. 明确不做（不是缺陷）
