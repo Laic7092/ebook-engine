@@ -100,7 +100,7 @@ op 坐标是**排版流坐标**，不是页面内坐标。`Page.origin` 表示�
 | 滚动 | `Mode::Scroll`：整章排成一页，`content_height` 给流长度，`paint_window` 按内容 y 取瓦片（窗口外的 op 直接跳过，代价只跟瓦片高走）；跨章会话 `scroll_begin` / `scroll_slice` / `scroll_hit` / `scroll_anchor_y` 连章节 top 表和全书总高一起给；与分页共用同一份断行，`Page.origin` 契约不变 |
 | 文本 | `TextMeasurer::shape`（默认逐字，`FontBook` 用 harfrust）、按簇双向重排（UAX #9）、字距/词距、可选断字词典、`TextRules` 三个中文政策开关 |
 | 替换元素 | 块级/行内图片（固有尺寸未知时占位）、ruby 注音 |
-| 契约 | IR 1.4：`Glyph.ch`、`Op::Link`、`GlyphRun.weight/style/underline`、`Issue`/`IssueCode`、`LayoutResult.truncated`、`LayoutStats` |
+| 契约 | IR 1.5：`Glyph.ch`、`Op::Link`、`GlyphRun.weight/style/underline`、`Issue`/`IssueCode`、`LayoutResult.truncated`、`LayoutStats`、`LayoutResult.blocks` |
 | 限额 | `Limits` 六个字段（节点/深度/文本字节/页数/行数/图片像素），超限返回合法截断 IR |
 | 交互 | `Reader`（命中、锚点、进度、链接、夹取）、`Selection`/`SelectionRect`（分页矩形与原文）、wasm 侧 JSON 查询 |
 | 缓存 | `ebook-cache`：输入指纹为键的有界 LRU，命中/未命中/淘汰统计 |

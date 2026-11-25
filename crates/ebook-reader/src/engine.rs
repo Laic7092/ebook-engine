@@ -10,22 +10,23 @@
 
 use ebook_font::FontBook;
 use ebook_format::epub::EpubReader;
-use ebook_format::txt::TxtReader;
+use ebook_format::txt::{StreamBook, TxtReader};
 use ebook_format::{Book, ChapterAnchor, FormatError, LinkTarget, TocEntry};
 use ebook_ir::{
-    EdgesF, FontId, GlyphBitmap, ImageData, ImageId, LayoutResult, Location, PointF, Resources,
-    Rgba8, StyledDoc,
+    Anchor, AnchorRange, BlockBox, EdgesF, FontId, GlyphBitmap, ImageData, ImageId, LayoutResult,
+    Location, NodeId, PointF, Resources, Rgba8, StyledDoc,
 };
 use ebook_layout::{
-    FlowCache, Layout, LayoutEnv, LayoutOptions, Mode, NoImageSizes, PageConstraint, Reader,
-    StubMeasurer,
+    BlockWindow, FlowCache, Layout, LayoutEnv, LayoutOptions, Mode, NoImageSizes, PageConstraint,
+    Reader, StubMeasurer,
 };
 use ebook_raster::{RgbaSurface, Tone};
 use ebook_render::ScaledSurface;
 
+use crate::heights::{estimate_height, index_key, HeightIndex};
 use crate::types::{
-    Bitmap, EngineError, Limits, PageBox, ScrollChapter, ScrollLoc, SelectionResult, Style,
-    Viewport,
+    Bitmap, EngineError, Limits, Locator, LocatorRange, PageBox, ScrollChapter, ScrollLoc,
+    ScrollMetrics, SelectionResult, Style, Viewport,
 };
 
 /// 最近一次排版的产物。交互查询（命中/选区/进度/锚点）只认这一份。
@@ -41,6 +42,8 @@ struct LastLayout {
     /// 正文默认字色（按文本字节数取主导色）。主题墨色只换它。
     text_color: Rgba8,
     anchors: Vec<ChapterAnchor>,
+    /// 这份 IR 是哪一块窗口排出来的；`None` 是整章。
+    window: Option<BlockWindow>,
 }
 
 impl LastLayout {
@@ -48,7 +51,20 @@ impl LastLayout {
         Reader::new(&self.ir)
     }
 
+    /// 粗略字节数：只用于缓存淘汰，不需要精确到分配器粒度。
+    fn approx_bytes(&self) -> usize {
+        use core::mem::size_of;
+        self.doc.text.len()
+            + self.doc.nodes.len() * size_of::<ebook_ir::Node>()
+            + self.ir.display.ops.len() * size_of::<ebook_ir::Op>()
+            + self.ir.display.glyphs.len() * size_of::<ebook_ir::Glyph>()
+            + self.ir.runs.lines.len() * size_of::<ebook_ir::LineBox>()
+            + self.ir.blocks.len() * size_of::<ebook_ir::BlockBox>()
+            + self.anchors.len() * size_of::<ChapterAnchor>()
+    }
+
     /// 这份排版结果是不是这些输入排出来的。
+    #[allow(clippy::too_many_arguments)]
     fn matches(
         &self,
         spine: usize,
@@ -57,6 +73,7 @@ impl LastLayout {
         style: Style,
         font_rev: u32,
         limits: Limits,
+        window: Option<BlockWindow>,
     ) -> bool {
         self.spine == spine
             && self.mode == mode
@@ -64,50 +81,59 @@ impl LastLayout {
             && self.style == style
             && self.font_rev == font_rev
             && self.limits == limits
+            && self.window == window
     }
 }
 
-/// 滚动会话里缓存几章的排版结果：当前章加左右各一章，跨章瓦片够用。
-const CHAPTER_CACHE: usize = 4;
+/// 排版结果缓存的字节预算。滚动时当前章 + 前后各一章通常就够；按字节而不是
+/// 按章数淘汰，小章节可以多留几份，大章节不会把四份整章 IR 同时留在内存里。
+const CHAPTER_CACHE_BYTES: usize = 12 * 1024 * 1024;
+/// 至少保留这么多份，保证跨章瓦片不用反复重排。
+const CHAPTER_CACHE_MIN: usize = 2;
 
-/// 连续滚动会话：跨章的高度表 + 已排过的章。
+/// 连续滚动会话：全书高度索引 + 视口/样式。
 ///
-/// 宿主只给视口和样式，章节起点（`tops`）由引擎算：需要某章高度时现场排版
-/// 并记住，所以第一次滚到某处可能触发一次排版，之后只读表。高度是**懒**
-/// 的：`scroll_chapter(i)` 只保证 `0..=i` 量过，`scroll_total_height()` 才量全书。
+/// 高度是**分层**的：`scroll_begin` 为每章算一个估计值（只看章节字节数），
+/// 滚到某章才用排版结果替换该章的估计值。所以：
+/// - `scroll_total_height()` 不再排整本书；
+/// - `scroll_slice` / `scroll_hit` 只排相交的章；
+/// - 实测值可以导出/导入，下次打开直接恢复精度。
 struct ScrollSession {
     viewport: Viewport,
     style: Style,
     font_rev: u32,
-    /// 每章内容高度；`None` 还没排。
-    heights: Vec<Option<f32>>,
-    /// 每章排版失败的原因（失败章按 0 高计，不阻塞后面的章）。
-    errors: Vec<Option<String>>,
-    /// `tops[i]` 是第 i 章在全书流坐标里的起点；对 `i <= measured` 有效。
-    tops: Vec<f32>,
-    /// 已经连续量过的高度的章数：`tops[measured]` 是已量部分的末尾。
-    measured: usize,
+    index: HeightIndex,
 }
 
 impl ScrollSession {
-    fn new(viewport: Viewport, style: Style, font_rev: u32, count: usize) -> Self {
+    fn new(viewport: Viewport, style: Style, font_rev: u32, index: HeightIndex) -> Self {
         Self {
             viewport,
             style,
             font_rev,
-            heights: vec![None; count],
-            errors: vec![None; count],
-            tops: vec![0.0; count + 1],
-            measured: 0,
+            index,
         }
     }
 
     fn count(&self) -> usize {
-        self.heights.len()
+        self.index.len()
     }
 
-    fn matches(&self, viewport: Viewport, style: Style, font_rev: u32) -> bool {
-        self.viewport == viewport && self.style == style && self.font_rev == font_rev
+    fn matches(&self, viewport: Viewport, style: Style, font_rev: u32, count: usize) -> bool {
+        self.viewport == viewport
+            && self.style == style
+            && self.font_rev == font_rev
+            && self.index.len() == count
+    }
+
+    fn chapter(&self, index: usize) -> ScrollChapter {
+        ScrollChapter {
+            spine: index,
+            top: self.index.top(index),
+            height: self.index.height(index),
+            ok: self.index.error(index).is_none(),
+            estimated: !self.index.is_measured(index),
+        }
     }
 }
 
@@ -116,6 +142,8 @@ impl ScrollSession {
 enum Backend {
     Epub(EpubReader<'static>),
     Txt(TxtReader),
+    /// 宿主按章推送（在线书源）。没有整本字节，章节可以 append/replace。
+    Stream(StreamBook),
 }
 
 impl Backend {
@@ -123,6 +151,7 @@ impl Backend {
         match self {
             Backend::Epub(reader) => reader.book(),
             Backend::Txt(reader) => reader.book(),
+            Backend::Stream(reader) => reader.book(),
         }
     }
 
@@ -134,13 +163,18 @@ impl Backend {
             Backend::Txt(reader) => reader
                 .chapter_with_anchors(index)
                 .map(|(doc, _links, anchors)| (doc, anchors)),
+            Backend::Stream(reader) => reader
+                .chapter_with_anchors(index)
+                .map(|(doc, _links, anchors)| (doc, anchors)),
         }
     }
 
-    fn asset<'a>(&'a self, href: &str) -> Option<(&'a [u8], &'a str)> {
+    /// 拥有字节的资产读取：读完就把压缩字节丢掉，只留解码后的图片缓存。
+    fn asset_owned(&self, href: &str) -> Option<(Vec<u8>, String)> {
         match self {
-            Backend::Epub(reader) => reader.asset(href),
-            Backend::Txt(reader) => reader.asset(href),
+            Backend::Epub(reader) => reader.asset_owned(href),
+            Backend::Txt(_) => None,
+            Backend::Stream(_) => None,
         }
     }
 
@@ -148,6 +182,33 @@ impl Backend {
         match self {
             Backend::Epub(reader) => reader.resolve_link_from(spine, href),
             Backend::Txt(reader) => reader.resolve_link_from(spine, href),
+            Backend::Stream(reader) => reader.resolve_link_from(spine, href),
+        }
+    }
+
+    /// 一章的原始字节数。高度估计只需要它，不需要先解析正文。
+    fn chapter_size(&self, index: usize) -> Option<u64> {
+        match self {
+            Backend::Epub(reader) => reader.chapter_size(index),
+            Backend::Txt(reader) => reader.chapter_size(index),
+            Backend::Stream(reader) => reader.chapter_size(index),
+        }
+    }
+
+    /// 内嵌字体的字节。惰性打开的书在这里才真正解压字体。
+    fn font_bytes(&self, index: usize) -> Option<Vec<u8>> {
+        match self {
+            Backend::Epub(reader) => reader.font_bytes(index),
+            Backend::Txt(_) => None,
+            Backend::Stream(_) => None,
+        }
+    }
+
+    /// 章节内容版本；只有流式书才有。EPUB/TXT 的内容不会变，返回 `None`。
+    fn chapter_rev(&self, index: usize) -> Option<u64> {
+        match self {
+            Backend::Stream(reader) => reader.chapter_rev(index),
+            _ => None,
         }
     }
 }
@@ -162,6 +223,8 @@ pub struct Engine {
     /// 切片在 `Engine` 存活期间始终有效；析构顺序见上面的注释。
     bytes: Box<[u8]>,
     name: String,
+    /// 书内容指纹：高度索引跨会话复用的键。扫首尾各 8KB，不哈希整本书。
+    fingerprint: u64,
     font: Option<FontBook>,
     last: Option<LastLayout>,
     /// 已经排过、暂时不在 `last` 里的章（滚动会话跨章用，LRU）。
@@ -195,16 +258,19 @@ impl Engine {
         let raw: &'static [u8] = unsafe { std::slice::from_raw_parts(boxed.as_ptr(), boxed.len()) };
 
         let backend = if boxed.starts_with(b"PK") {
-            Backend::Epub(EpubReader::open(raw)?)
+            // 字体字节懒加载：打开带几 MB 内嵌字体的书不再先付一遍字体内存。
+            Backend::Epub(EpubReader::open_lazy(raw)?)
         } else {
             let text = ebook_format::decode_text(&boxed);
             Backend::Txt(TxtReader::from_text(&text, Some(name)))
         };
+        let fingerprint = fingerprint_of(&boxed, name);
 
         Ok(Self {
             backend,
             bytes: boxed,
             name: name.to_string(),
+            fingerprint,
             font: None,
             last: None,
             chapters: Vec::new(),
@@ -218,6 +284,173 @@ impl Engine {
             flow_rev: 0,
             flow_inputs: None,
         })
+    }
+
+    /// 新建一本空的书。章节由宿主用 [`Engine::append_chapter`] 推入；
+    /// 没有整本字节，打开不扫描任何正文。
+    pub fn new_book(title: &str) -> Self {
+        let stream = StreamBook::new(title);
+        let fingerprint = stream.fingerprint();
+        Self {
+            backend: Backend::Stream(stream),
+            bytes: Box::default(),
+            name: title.to_string(),
+            fingerprint,
+            font: None,
+            last: None,
+            chapters: Vec::new(),
+            scroll: None,
+            last_error: None,
+            font_error: None,
+            images: ImageCache::default(),
+            limits: Limits::default(),
+            font_rev: 0,
+            flow_cache: FlowCache::new(),
+            flow_rev: 0,
+            flow_inputs: None,
+        }
+    }
+
+    /// 尾部追加一章纯文本，返回新的章数。`title` 由宿主给（显示在目录/章节头）。
+    ///
+    /// `text` 每行一段，不跑“第 N 章”分章规则；单章受 `max_text_bytes` 限制。
+    /// 只在流式书（[`Engine::new_book`]）上可用。
+    pub fn append_chapter(&mut self, title: &str, text: &str) -> Result<usize, EngineError> {
+        const MAX_CHAPTER_BYTES: usize = 20_000_000;
+        if text.is_empty() {
+            return Err(EngineError::Chapter(String::from("empty chapter")));
+        }
+        if text.len() > MAX_CHAPTER_BYTES {
+            return Err(EngineError::Chapter(format!(
+                "chapter is {} bytes, limit is {MAX_CHAPTER_BYTES}",
+                text.len()
+            )));
+        }
+        let (count, fingerprint) = match &mut self.backend {
+            Backend::Stream(reader) => {
+                let count = reader.append(title, text);
+                (count, reader.fingerprint())
+            }
+            _ => {
+                return Err(EngineError::Chapter(String::from(
+                    "append_chapter is only available on a stream book",
+                )))
+            }
+        };
+        self.fingerprint = fingerprint;
+        self.invalidate_stream_caches(None);
+        if let Some(session) = self.scroll.as_ref() {
+            let viewport = session.viewport;
+            let style = session.style;
+            let estimate = estimate_height(
+                self.backend.chapter_size(count - 1),
+                viewport,
+                style,
+                viewport.height,
+            );
+            let key = self.height_key(viewport, style);
+            if let Some(session) = self.scroll.as_mut() {
+                session.index.push_estimate(estimate);
+                session.index.set_key(key);
+            }
+        }
+        Ok(count)
+    }
+
+    /// 替换一章。章数与其它章不变；该章 `rev` 变、它的排版/高度缓存失效。
+    pub fn replace_chapter(
+        &mut self,
+        index: usize,
+        title: &str,
+        text: &str,
+    ) -> Result<(), EngineError> {
+        const MAX_CHAPTER_BYTES: usize = 20_000_000;
+        if text.is_empty() {
+            return Err(EngineError::Chapter(String::from("empty chapter")));
+        }
+        if text.len() > MAX_CHAPTER_BYTES {
+            return Err(EngineError::Chapter(format!(
+                "chapter is {} bytes, limit is {MAX_CHAPTER_BYTES}",
+                text.len()
+            )));
+        }
+        let fingerprint = match &mut self.backend {
+            Backend::Stream(reader) => {
+                if index >= reader.count() {
+                    return Err(EngineError::ChapterOutOfRange(index as u32));
+                }
+                if !reader.replace(index, title, text) {
+                    return Err(EngineError::ChapterOutOfRange(index as u32));
+                }
+                reader.fingerprint()
+            }
+            _ => {
+                return Err(EngineError::Chapter(String::from(
+                    "replace_chapter is only available on a stream book",
+                )))
+            }
+        };
+        self.fingerprint = fingerprint;
+        self.invalidate_stream_caches(Some(index));
+        if let Some(session) = self.scroll.as_ref() {
+            let viewport = session.viewport;
+            let style = session.style;
+            let estimate = estimate_height(
+                self.backend.chapter_size(index),
+                viewport,
+                style,
+                viewport.height,
+            );
+            let key = self.height_key(viewport, style);
+            if let Some(session) = self.scroll.as_mut() {
+                session.index.invalidate(index, estimate);
+                session.index.set_key(key);
+            }
+        }
+        Ok(())
+    }
+
+    /// 清空流式书的全部章节。EPUB/TXT 不支持。
+    pub fn clear_chapters(&mut self) -> Result<(), EngineError> {
+        let (fingerprint, is_empty) = match &mut self.backend {
+            Backend::Stream(reader) => {
+                reader.clear();
+                (reader.fingerprint(), reader.count() == 0)
+            }
+            _ => {
+                return Err(EngineError::Chapter(String::from(
+                    "clear_chapters is only available on a stream book",
+                )))
+            }
+        };
+        self.fingerprint = fingerprint;
+        self.scroll = None;
+        self.invalidate_stream_caches(None);
+        let _ = is_empty;
+        Ok(())
+    }
+
+    /// 该章内容版本。流式书每次 append/replace 后变化，宿主用它做页位图的键；
+    /// EPUB/TXT 内容不会变，返回 `None`。
+    pub fn chapter_rev(&self, index: usize) -> Option<u64> {
+        self.backend.chapter_rev(index)
+    }
+
+    fn invalidate_stream_caches(&mut self, spine: Option<usize>) {
+        self.flow_cache.clear();
+        self.flow_inputs = None;
+        match spine {
+            Some(index) => {
+                if self.last.as_ref().is_some_and(|last| last.spine == index) {
+                    self.last = None;
+                }
+                self.chapters.retain(|entry| entry.spine != index);
+            }
+            None => {
+                self.last = None;
+                self.chapters.clear();
+            }
+        }
     }
 
     /// 资源上限：native 与 wasm 的预算不同，由宿主决定。
@@ -248,9 +481,11 @@ impl Engine {
 
     /// 封面图片的字节与媒体类型（EPUB 的 `cover-image`，或 EPUB2 的
     /// `meta name="cover"`）；没有封面时 `None`。TXT 永远没有。
-    pub fn cover(&self) -> Option<(&[u8], &str)> {
+    ///
+    /// 返回拥有值：封面只读一次，没有必要为了一个 `&[u8]` 把压缩字节常驻。
+    pub fn cover(&self) -> Option<(Vec<u8>, String)> {
         let href = self.backend.book().cover_href.as_deref()?;
-        self.backend.asset(href)
+        self.backend.asset_owned(href)
     }
 
     pub fn chapter_count(&self) -> usize {
@@ -314,14 +549,14 @@ impl Engine {
         if self
             .last
             .as_ref()
-            .is_some_and(|last| last.matches(spine, mode, viewport, style, font_rev, limits))
+            .is_some_and(|last| last.matches(spine, mode, viewport, style, font_rev, limits, None))
         {
             return Ok(());
         }
         if let Some(index) = self
             .chapters
             .iter()
-            .position(|entry| entry.matches(spine, mode, viewport, style, font_rev, limits))
+            .position(|entry| entry.matches(spine, mode, viewport, style, font_rev, limits, None))
         {
             let layout = self.chapters.remove(index);
             if let Some(previous) = self.last.replace(layout) {
@@ -329,7 +564,7 @@ impl Engine {
             }
             return Ok(());
         }
-        let layout = self.build_layout(spine, mode, viewport, style)?;
+        let layout = self.build_layout(spine, mode, viewport, style, None)?;
         if let Some(previous) = self.last.replace(layout) {
             self.remember(previous);
         }
@@ -338,8 +573,12 @@ impl Engine {
 
     fn remember(&mut self, layout: LastLayout) {
         self.chapters.push(layout);
-        if self.chapters.len() > CHAPTER_CACHE {
-            self.chapters.remove(0);
+        // 按字节预算淘汰最旧的整章 IR；小章节能多留几份，大章节不会把四份
+        // 几十 MB 的结果同时留在内存里。
+        let mut total: usize = self.chapters.iter().map(LastLayout::approx_bytes).sum();
+        while self.chapters.len() > CHAPTER_CACHE_MIN && total > CHAPTER_CACHE_BYTES {
+            let dropped = self.chapters.remove(0);
+            total = total.saturating_sub(dropped.approx_bytes());
         }
     }
 
@@ -349,6 +588,7 @@ impl Engine {
         mode: Mode,
         viewport: Viewport,
         style: Style,
+        window: Option<BlockWindow>,
     ) -> Result<LastLayout, EngineError> {
         let (mut doc, anchors) = self.backend.chapter(spine).map_err(|error| {
             let message = format!("{error:?}");
@@ -389,6 +629,7 @@ impl Engine {
             PageConstraint::new(viewport.width, viewport.height).with_margin(viewport.insets);
         let options = LayoutOptions {
             mode,
+            window,
             ..LayoutOptions::default()
         };
         let ir =
@@ -406,7 +647,128 @@ impl Engine {
             doc,
             text_color,
             anchors,
+            window,
         })
+    }
+
+    /// 只排一章里的一个块窗口（`from..=to` 的文档节点子树）。
+    ///
+    /// 这是章内流式排版入口：窗口外的块不进入 `flow`，所以产出的 ops/行数
+    /// 只和窗口有关，不受前面有多少段影响。窗口坐标已经平移到 0 附近；
+    /// `blocks()` 给出每个块在窗口里的矩形，宿主按 `[spine, node]` 持久化。
+    ///
+    /// 结果会替换当前章的 `last`：`bitmap` / `pages` / `hit` 都只看到这一窗。
+    /// 需要整章时再 `layout()` 一次即可。
+    pub fn layout_block_window(
+        &mut self,
+        spine: usize,
+        from: NodeId,
+        to: NodeId,
+        viewport: Viewport,
+        style: Style,
+    ) -> Result<(), EngineError> {
+        let window = BlockWindow { from, to };
+        let layout = self.build_layout(spine, Mode::Scroll, viewport, style, Some(window))?;
+        if let Some(previous) = self.last.replace(layout) {
+            self.remember(previous);
+        }
+        Ok(())
+    }
+
+    /// 当前窗/整章里的块表，按流坐标排序。窗口排版后就是这一窗的块。
+    pub fn blocks(&self) -> &[BlockBox] {
+        self.last
+            .as_ref()
+            .map(|last| last.ir.blocks.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// 页内点 → 不依赖像素的原文锚点（章 + DOM 路径 + 字节偏移）。
+    pub fn anchor_at(&self, page: u32, x: f32, y: f32) -> Option<Anchor> {
+        self.last
+            .as_ref()?
+            .reader()
+            .anchor_at(page, PointF::new(x, y))
+    }
+
+    /// 两个页内位置 → 稳定区间。
+    pub fn anchor_range(&self, a: Location, b: Location) -> Option<AnchorRange> {
+        self.last.as_ref()?.ir.anchor_range(a, b)
+    }
+
+    /// 稳定锚点 → 当前排版里的页/行/字节位置。
+    pub fn locate(&self, anchor: &Anchor) -> Option<Location> {
+        let last = self.last.as_ref()?;
+        if anchor.spine as usize != last.spine {
+            return None;
+        }
+        last.ir.location_of(anchor)
+    }
+
+    /// 锚点 → 它所属的块节点。窗口排版的 `from`/`to` 用它。
+    pub fn block_of_anchor(&self, anchor: &Anchor) -> Option<NodeId> {
+        let last = self.last.as_ref()?;
+        if anchor.spine as usize != last.spine {
+            return None;
+        }
+        last.doc.block_of_anchor(anchor)
+    }
+
+    /// 当前章里某一行的块单元。
+    pub fn block_at_line(&self, line: u32) -> Option<&BlockBox> {
+        self.last.as_ref()?.ir.block_at_line(line)
+    }
+
+    /// 页内点 → 宿主可持久化的 [`Locator`]（章 + 节点 + 字节偏移）。
+    pub fn locator_at(&self, page: u32, x: f32, y: f32) -> Option<Locator> {
+        let last = self.last.as_ref()?;
+        // 和 `hit` 用同一条路径：宿主拿到的 Locator 必须能换算回同一个
+        // 页/行/字节；`anchor_at` 是严格命中，落在行间空白时返回 None。
+        let location = last.reader().hit(page, PointF::new(x, y))?;
+        let line = last.ir.line(location.line)?;
+        let anchor = line.anchor.as_ref()?;
+        Some(Locator {
+            spine: anchor.spine,
+            node: line.node,
+            offset: anchor.offset.saturating_add(location.byte),
+        })
+    }
+
+    /// [`Locator`] → 当前排版里的页/行/字节位置。
+    pub fn locate_locator(&self, locator: &Locator) -> Option<Location> {
+        let last = self.last.as_ref()?;
+        if locator.spine as usize != last.spine {
+            return None;
+        }
+        let anchor = last.doc.anchor_of(locator.node)?;
+        last.ir.location_of(&anchor.with_offset(locator.offset))
+    }
+
+    /// 两个页内位置 → 稳定区间。端点落在行尾时夹到该行长度。
+    pub fn locator_range(&self, a: Location, b: Location) -> Option<LocatorRange> {
+        let last = self.last.as_ref()?;
+        let point = |location: Location| {
+            let line = last.ir.line(location.line)?;
+            let anchor = line.anchor.as_ref()?;
+            Some(Locator {
+                spine: anchor.spine,
+                node: line.node,
+                offset: anchor.offset.saturating_add(location.byte),
+            })
+        };
+        Some(LocatorRange {
+            start: point(a)?,
+            end: point(b)?,
+        })
+    }
+
+    /// [`Locator`] 所属的块节点；窗口排版的 `from`/`to` 可以直接用它。
+    pub fn block_of_locator(&self, locator: &Locator) -> Option<NodeId> {
+        let last = self.last.as_ref()?;
+        if locator.spine as usize != last.spine {
+            return None;
+        }
+        last.doc.block_of(locator.node)
     }
 
     /// 前段缓存的命中/未命中次数。宿主可以据此观察「换页高」有没有真的省下断行。
@@ -504,12 +866,15 @@ impl Engine {
     ///
     /// 此后用 [`Engine::scroll_slice`] 按全书流坐标取瓦片、[`Engine::scroll_hit`]
     /// 按流坐标命中、[`Engine::scroll_line_y`] / [`Engine::scroll_anchor_y`]
-    /// 把位置换成该滚到哪。章节起点不用宿主自己算：引擎在需要时排版那一章并
-    /// 记住高度（懒），宿主只需要把 `scroll_chapter(i)` 得到的表拿去做滚动容器。
+    /// 把位置换成该滚到哪。
+    ///
+    /// 这里**不排任何章**：只读 zip 中央目录/切章区间，为每章算一个估计高度。
+    /// 滚动条可以立刻显示；`scroll_chapter` / `scroll_slice` 滚到某章时才排版
+    /// 那一章并用实测值替换估计值。
     ///
     /// 上下留白会被置 0（滚动容器自己留，瓦片之间才没有空白带），左右保留。
-    /// 同样的视口/样式/字体再调一次不会丢失已量到的高度。字体换了（
-    /// `register_font`）之后必须重新开始：旧高度属于旧字体，引擎不会拿它凑合。
+    /// 同样的视口/样式/字体再调一次不会丢失已实测的高度；字体换了会把实测值
+    /// 退回估计值（旧高度属于旧字体），但**保留会话与滚动位置**。
     pub fn scroll_begin(
         &mut self,
         mut viewport: Viewport,
@@ -524,9 +889,27 @@ impl Engine {
         let keep = self
             .scroll
             .as_ref()
-            .is_some_and(|session| session.matches(viewport, style, self.font_rev));
+            .is_some_and(|session| session.matches(viewport, style, self.font_rev, count));
         if !keep {
-            self.scroll = Some(ScrollSession::new(viewport, style, self.font_rev, count));
+            let estimates = self.estimates(viewport, style);
+            let reuse = self.scroll.as_ref().is_some_and(|session| {
+                session.viewport == viewport && session.style == style && session.count() == count
+            });
+            if reuse {
+                // 只有字体版本变了：保留章数/视口，实测高度作废、退回估计。
+                let key = self.height_key(viewport, style);
+                let session = self.scroll.as_mut().expect("checked above");
+                session.font_rev = self.font_rev;
+                session.index = HeightIndex::with_estimates(estimates, key);
+            } else {
+                let key = self.height_key(viewport, style);
+                self.scroll = Some(ScrollSession::new(
+                    viewport,
+                    style,
+                    self.font_rev,
+                    HeightIndex::with_estimates(estimates, key),
+                ));
+            }
         }
         // 章节缓存可以跨会话复用；参数变了的条目留着只占内存。
         self.chapters.retain(|entry| {
@@ -540,48 +923,77 @@ impl Engine {
 
     /// 滚动会话里的一章：起点（全书流坐标）、高度、这一章排没排成功。
     ///
-    /// 返回 `top` 之前会把 `0..=index` 的章都量过（只差没量的那几章），
-    /// 所以宿主可以逐章取表、分摊到多帧里。
+    /// 只实测 `index` 这一章，不要求前面的章已经量过。`estimated` 为 `true`
+    /// 表示这一章仍是估计值（排版失败也会被当成“已量过”，避免反复重试）。
     pub fn scroll_chapter(&mut self, index: usize) -> Result<ScrollChapter, EngineError> {
         self.scroll_check()?;
         let count = self.chapter_count();
         if index >= count {
             return Err(EngineError::ChapterOutOfRange(index as u32));
         }
-        self.scroll_measure_to(index)?;
+        self.scroll_measure(index)?;
         let session = self.scroll.as_ref().ok_or(EngineError::NoScroll)?;
-        Ok(ScrollChapter {
-            spine: index,
-            top: session.tops[index],
-            height: session.heights[index].unwrap_or(0.0),
-            ok: session.errors[index].is_none(),
-        })
+        Ok(session.chapter(index))
     }
 
-    /// 全书章节表。等同于逐章 `scroll_chapter`，代价是量完全书（首次）。
+    /// 全书章节表。会实测每一章（宿主要分摊开销请逐章 `scroll_chapter`，
+    /// 或者用 [`Engine::scroll_chapters_estimated`] 先拿估计表）。
     pub fn scroll_chapters(&mut self) -> Result<Vec<ScrollChapter>, EngineError> {
         self.scroll_check()?;
         let count = self.chapter_count();
-        if count > 0 {
-            self.scroll_measure_to(count - 1)?;
+        for index in 0..count {
+            self.scroll_measure(index)?;
         }
-        (0..count).map(|index| self.scroll_chapter(index)).collect()
+        let session = self.scroll.as_ref().ok_or(EngineError::NoScroll)?;
+        Ok((0..count).map(|index| session.chapter(index)).collect())
     }
 
-    /// 全书流坐标总长（滚动容器的 contentSize）。首次调用会排完全书。
+    /// 全书章节表，但不触发排版：没实测的章用估计高度。
+    pub fn scroll_chapters_estimated(&mut self) -> Result<Vec<ScrollChapter>, EngineError> {
+        self.scroll_check()?;
+        let session = self.scroll.as_ref().ok_or(EngineError::NoScroll)?;
+        Ok((0..session.count())
+            .map(|index| session.chapter(index))
+            .collect())
+    }
+
+    /// 高度索引的当前状态：总高、已实测章数、总章数。
+    pub fn scroll_metrics(&mut self) -> Result<ScrollMetrics, EngineError> {
+        self.scroll_check()?;
+        let session = self.scroll.as_ref().ok_or(EngineError::NoScroll)?;
+        Ok(ScrollMetrics {
+            total: session.index.total(),
+            measured: session.index.measured_count() as u32,
+            count: session.count() as u32,
+        })
+    }
+
+    /// 导出已实测的高度表（键含书指纹/视口/样式/字体版本）。宿主持久化它，
+    /// 下次打开 `scroll_begin` 后 `scroll_index_import`，滚动条直接是上次的精度。
+    pub fn scroll_index_export(&mut self) -> Result<Vec<u8>, EngineError> {
+        self.scroll_check()?;
+        let session = self.scroll.as_ref().ok_or(EngineError::NoScroll)?;
+        Ok(session.index.export())
+    }
+
+    /// 导入高度表。键或章数不匹配时返回 `false`，不部分应用。
+    pub fn scroll_index_import(&mut self, bytes: &[u8]) -> Result<bool, EngineError> {
+        self.scroll_check()?;
+        let session = self.scroll.as_mut().ok_or(EngineError::NoScroll)?;
+        Ok(session.index.import(bytes))
+    }
+
+    /// 全书流坐标总长（滚动容器的 contentSize）。
+    ///
+    /// 这是当前索引的总和：已实测的章用实测值，其余用估计值。**不会排整本书**。
+    /// 需要精确值就逐章 `scroll_chapter` 或用 [`Engine::scroll_chapters`]。
     pub fn scroll_total_height(&mut self) -> Result<f32, EngineError> {
         self.scroll_check()?;
-        let count = self.chapter_count();
-        if count > 0 {
-            self.scroll_measure_to(count - 1)?;
-        }
-        Ok(self
-            .scroll
-            .as_ref()
-            .map_or(0.0, |session| session.tops[count]))
+        let session = self.scroll.as_ref().ok_or(EngineError::NoScroll)?;
+        Ok(session.index.total())
     }
 
-    /// 全书流坐标 `y` 落在哪一章：返回章下标与该章起点。
+    /// 全书流坐标 `y` 落在哪一章：返回章下标与该章起点。不触发排版。
     pub fn scroll_spine_at(&mut self, y: f32) -> Result<Option<(usize, f32)>, EngineError> {
         self.scroll_check()?;
         let Some(index) = self.scroll_index_at(y)? else {
@@ -590,7 +1002,7 @@ impl Engine {
         let top = self
             .scroll
             .as_ref()
-            .map_or(0.0, |session| session.tops[index]);
+            .map_or(0.0, |session| session.index.top(index));
         Ok(Some((index, top)))
     }
 
@@ -598,6 +1010,10 @@ impl Engine {
     ///
     /// 一种调用搞定一屏（或一枚瓦片）：引擎自己找出涉及的章、分别光栅化再拼
     /// 到同一张位图，章缝不会错行。内容之外的区域是纸色。
+    ///
+    /// `y` 先按当前高度索引换算成「章 + 章内偏移」再排版该章：实测让总高变化
+    /// 时，同一块内容不会因为前面某章高了一行而跳走。宿主如果要绝对稳定，
+    /// 应当用 `scroll_line_y` / `scroll_anchor_y` 维护锚点。
     #[allow(clippy::too_many_arguments)]
     pub fn scroll_slice(
         &mut self,
@@ -623,6 +1039,11 @@ impl Engine {
             .scroll
             .as_ref()
             .map(|session| session.viewport)
+            .ok_or(EngineError::NoScroll)?;
+        let style = self
+            .scroll
+            .as_ref()
+            .map(|session| session.style)
             .ok_or(EngineError::NoScroll)?;
         let width = (viewport.width * scale).round().max(1.0) as u32;
         let rows = (height * scale).round().max(1.0) as u32;
@@ -650,50 +1071,60 @@ impl Engine {
 
         // 起点对齐设备像素：相邻两章的边界行由同一公式算出，不会重一行/漏一行。
         let y = ((y.max(0.0) * scale).round() / scale).max(0.0);
-        let stride = width as usize * 4;
         let count = self.chapter_count();
-        for index in 0..count {
-            self.scroll_measure_to(index)?;
+        // 绝对 y →（章，章内偏移）。只实测这一章；它前面的章仍可用估计值。
+        let Some(first) = self.scroll_index_at(y)? else {
+            return Ok(out);
+        };
+        let local = {
+            let session = self.scroll.as_ref().ok_or(EngineError::NoScroll)?;
+            (y - session.index.top(first)).max(0.0)
+        };
+        self.scroll_measure(first)?;
+        let (y, mut index) = {
+            let session = self.scroll.as_ref().ok_or(EngineError::NoScroll)?;
+            let height = session.index.height(first).max(0.0);
+            let local = local.min(height);
+            let y = session.index.top(first) + local;
+            (y, session.index.locate(y).unwrap_or(count))
+        };
+
+        let stride = width as usize * 4;
+        while index < count {
+            self.scroll_measure(index)?;
             let (top, chapter_height) = {
                 let session = self.scroll.as_ref().ok_or(EngineError::NoScroll)?;
-                (session.tops[index], session.heights[index].unwrap_or(0.0))
+                (session.index.top(index), session.index.height(index))
             };
             if top >= y + height {
                 break;
             }
             let segment_start = top.max(y);
             let segment_end = (top + chapter_height).min(y + height);
-            if segment_end <= segment_start {
-                continue;
-            }
-            let row_from = (((segment_start - y) * scale).round() as i64).clamp(0, rows as i64);
-            let row_to = (((segment_end - y) * scale).round() as i64).clamp(row_from, rows as i64);
-            if row_to <= row_from {
-                continue;
-            }
-            let local_top = segment_start - top;
-            let local_height = (row_to - row_from) as f32 / scale;
-            let style = self
-                .scroll
-                .as_ref()
-                .map(|session| session.style)
-                .ok_or(EngineError::NoScroll)?;
-            self.focus(index, Mode::Scroll, viewport, style)?;
-            let bitmap = self.bitmap_window(0, local_top, local_height, scale, ink, paper, bold)?;
-            if bitmap.width != width {
-                // 视口宽是同一份视口算出来的，宽度不该变；真变了宁可留纸色，
-                // 也不要按错的跨距搬行。
-                continue;
-            }
-            let copy = (bitmap.height as i64).min(row_to - row_from) as usize;
-            let from = row_from as usize * stride;
-            let bytes = copy * stride;
-            if from + bytes <= out.rgba.len() && bitmap.rgba.len() >= bytes {
-                out.rgba[from..from + bytes].copy_from_slice(&bitmap.rgba[..bytes]);
+            if segment_end > segment_start {
+                let row_from = (((segment_start - y) * scale).round() as i64).clamp(0, rows as i64);
+                let row_to =
+                    (((segment_end - y) * scale).round() as i64).clamp(row_from, rows as i64);
+                if row_to > row_from {
+                    let local_top = segment_start - top;
+                    let local_height = (row_to - row_from) as f32 / scale;
+                    self.focus(index, Mode::Scroll, viewport, style)?;
+                    let bitmap =
+                        self.bitmap_window(0, local_top, local_height, scale, ink, paper, bold)?;
+                    if bitmap.width == width {
+                        let copy = (bitmap.height as i64).min(row_to - row_from) as usize;
+                        let from = row_from as usize * stride;
+                        let bytes = copy * stride;
+                        if from + bytes <= out.rgba.len() && bitmap.rgba.len() >= bytes {
+                            out.rgba[from..from + bytes].copy_from_slice(&bitmap.rgba[..bytes]);
+                        }
+                    }
+                }
             }
             if top + chapter_height >= y + height {
                 break;
             }
+            index += 1;
         }
         Ok(out)
     }
@@ -705,12 +1136,18 @@ impl Engine {
         let Some(index) = self.scroll_index_at(y)? else {
             return Ok(None);
         };
-        let (top, viewport, style) = {
+        self.scroll_measure(index)?;
+        let (top, height, viewport, style) = {
             let session = self.scroll.as_ref().ok_or(EngineError::NoScroll)?;
-            (session.tops[index], session.viewport, session.style)
+            (
+                session.index.top(index),
+                session.index.height(index),
+                session.viewport,
+                session.style,
+            )
         };
         self.focus(index, Mode::Scroll, viewport, style)?;
-        let local = y - top;
+        let local = (y - top).clamp(0.0, height.max(0.0));
         let Some(hit) = self.hit(0, x, local) else {
             return Ok(None);
         };
@@ -724,6 +1161,8 @@ impl Engine {
     }
 
     /// 行号 → 全书流坐标（行盒顶边）。滚动到某行就用它。
+    ///
+    /// 只实测 `spine` 这一章；它前面的章即使还是估计值也不影响返回值之外的章。
     pub fn scroll_line_y(&mut self, spine: usize, line: u32) -> Result<Option<f32>, EngineError> {
         let top = self.scroll_focus(spine)?;
         Ok(self.flow_line_y(0, line).map(|y| top + y))
@@ -743,7 +1182,7 @@ impl Engine {
         Ok(self.flow_line_y(0, line).map(|y| top + y))
     }
 
-    /// 全书流坐标 → 滚动进度 0..=1。首次调用会量完全书（滚动条本来就需要总高）。
+    /// 全书流坐标 → 滚动进度 0..=1。用当前高度索引，不触发全书排版。
     pub fn scroll_progress(&mut self, y: f32) -> Result<f32, EngineError> {
         let total = self.scroll_total_height()?;
         if total <= 0.0 || !y.is_finite() {
@@ -752,7 +1191,7 @@ impl Engine {
         Ok((y / total).clamp(0.0, 1.0))
     }
 
-    /// 滚动会话是否还在（字体换过之后会失效）。
+    /// 滚动会话是否还在（字体换过之后会自动退回估计值，不会丢弃会话）。
     pub fn has_scroll_session(&self) -> bool {
         self.scroll.is_some()
     }
@@ -761,61 +1200,65 @@ impl Engine {
         let Some(session) = self.scroll.as_ref() else {
             return Err(EngineError::NoScroll);
         };
-        // 字体变了：高度表属于旧字体，不能凑合，丢掉让宿主重新 begin。
-        if session.font_rev != self.font_rev {
-            self.scroll = None;
-            return Err(EngineError::NoScroll);
+        if session.font_rev == self.font_rev {
+            return Ok(());
+        }
+        // 字体变了：实测高度不可信，但会话/视口/滚动位置还在。退回估计值，
+        // 实测过的章会在下次滚到时重新量。
+        let viewport = session.viewport;
+        let style = session.style;
+        let estimates = self.estimates(viewport, style);
+        let key = self.height_key(viewport, style);
+        if let Some(session) = self.scroll.as_mut() {
+            session.font_rev = self.font_rev;
+            session.index = HeightIndex::with_estimates(estimates, key);
         }
         Ok(())
     }
 
-    /// 量到第 `index` 章（含）：只排还没量过的那几章。
-    fn scroll_measure_to(&mut self, index: usize) -> Result<(), EngineError> {
+    /// 实测一章。只排这一章；失败按 0 高记录，不向调用方传播（`ok` 会说明）。
+    fn scroll_measure(&mut self, index: usize) -> Result<(), EngineError> {
         self.scroll_check()?;
-        loop {
-            let (next, viewport, style) = {
-                let session = self.scroll.as_ref().ok_or(EngineError::NoScroll)?;
-                if session.measured > index || session.measured >= session.count() {
-                    return Ok(());
-                }
-                (session.measured, session.viewport, session.style)
-            };
-            // 一章排不出来不该拖垮整本书：高度按 0 记，错误留给 `scroll_chapter`。
-            let height = match self.focus(next, Mode::Scroll, viewport, style) {
-                Ok(()) => self
-                    .last
-                    .as_ref()
-                    .and_then(|last| last.ir.pages.first())
-                    .map_or(0.0, |page| ceil_to_viewport(page.size.h, viewport.height)),
-                Err(error) => {
-                    if let Some(session) = self.scroll.as_mut() {
-                        session.errors[next] = Some(error.to_string());
-                    }
-                    0.0
-                }
-            };
-            let Some(session) = self.scroll.as_mut() else {
-                return Err(EngineError::NoScroll);
-            };
-            session.heights[next] = Some(height);
-            session.tops[next + 1] = session.tops[next] + height;
-            session.measured = next + 1;
+        let count = self.chapter_count();
+        if index >= count {
+            return Err(EngineError::ChapterOutOfRange(index as u32));
         }
+        let (viewport, style, measured) = {
+            let session = self.scroll.as_ref().ok_or(EngineError::NoScroll)?;
+            (
+                session.viewport,
+                session.style,
+                session.index.is_measured(index),
+            )
+        };
+        if measured {
+            return Ok(());
+        }
+        let height = match self.focus(index, Mode::Scroll, viewport, style) {
+            Ok(()) => self
+                .last
+                .as_ref()
+                .and_then(|last| last.ir.pages.first())
+                .map_or(0.0, |page| ceil_to_viewport(page.size.h, viewport.height)),
+            Err(error) => {
+                if let Some(session) = self.scroll.as_mut() {
+                    session.index.set_error(index, error.to_string());
+                }
+                return Ok(());
+            }
+        };
+        if let Some(session) = self.scroll.as_mut() {
+            session.index.set_measured(index, height);
+        }
+        Ok(())
     }
 
-    /// 流坐标 `y` 落在哪一章（必要时继续量后面的章）。
+    /// 流坐标 `y` 落在哪一章。纯索引查询，不排版。
     fn scroll_index_at(&mut self, y: f32) -> Result<Option<usize>, EngineError> {
         self.scroll_check()?;
         let y = if y.is_finite() { y.max(0.0) } else { 0.0 };
-        let count = self.chapter_count();
-        for index in 0..count {
-            self.scroll_measure_to(index)?;
-            let session = self.scroll.as_ref().ok_or(EngineError::NoScroll)?;
-            if y < session.tops[index + 1] {
-                return Ok(Some(index));
-            }
-        }
-        Ok(None)
+        let session = self.scroll.as_ref().ok_or(EngineError::NoScroll)?;
+        Ok(session.index.locate(y))
     }
 
     /// 排版/聚焦一章并返回它在全书流坐标里的起点。
@@ -825,13 +1268,31 @@ impl Engine {
         if spine >= count {
             return Err(EngineError::ChapterOutOfRange(spine as u32));
         }
-        self.scroll_measure_to(spine)?;
+        self.scroll_measure(spine)?;
         let (top, viewport, style) = {
             let session = self.scroll.as_ref().ok_or(EngineError::NoScroll)?;
-            (session.tops[spine], session.viewport, session.style)
+            (session.index.top(spine), session.viewport, session.style)
         };
         self.focus(spine, Mode::Scroll, viewport, style)?;
         Ok(top)
+    }
+
+    /// 为全书每一章算一个初始高度。只看章节字节数 + 视口 + 样式，不解压正文。
+    fn estimates(&self, viewport: Viewport, style: Style) -> Vec<f32> {
+        let count = self.chapter_count();
+        let sizes: Vec<Option<u64>> = (0..count)
+            .map(|index| self.backend.chapter_size(index))
+            .collect();
+        let sample = sizes.iter().flatten().copied().next().unwrap_or(16 * 1024);
+        let fallback = estimate_height(Some(sample), viewport, style, viewport.height);
+        sizes
+            .into_iter()
+            .map(|size| estimate_height(size.or(Some(sample)), viewport, style, fallback))
+            .collect()
+    }
+
+    fn height_key(&self, viewport: Viewport, style: Style) -> u64 {
+        index_key(self.fingerprint, viewport, style, self.font_rev)
     }
 
     /// 行盒在**页内流坐标**里的顶边（不含章起点）。
@@ -1004,21 +1465,32 @@ impl Engine {
     }
 
     /// 把书里第 `index` 个内嵌字体按 `@font-face` 的 family/weight/style 装进来。
+    ///
+    /// 惰性打开的书在这里才解压字体字节：宿主没用到这个字体就不付内存。
     pub fn register_font_face(&mut self, index: usize) -> Result<FontId, String> {
-        let Some(face) = self.backend.book().fonts().get(index).cloned() else {
+        let Some(face) = self.backend.book().fonts().get(index) else {
             let message = format!("没有第 {index} 个内嵌字体");
             self.font_error = Some(message.clone());
             return Err(message);
         };
+        let family = face.family.clone();
+        let weight = face.weight;
+        let style = face.style;
+        let href = face.href.clone();
+        let Some(bytes) = self.backend.font_bytes(index) else {
+            let message = format!("{href}: 字体字节读不出来");
+            self.font_error = Some(message.clone());
+            return Err(message);
+        };
         let font = self.font.get_or_insert_with(FontBook::new);
-        match font.try_add_styled(&face.family, face.weight, face.style, face.bytes) {
+        match font.try_add_styled(&family, weight, style, bytes) {
             Ok(id) => {
                 self.font_error = None;
                 self.font_rev = self.font_rev.wrapping_add(1);
                 Ok(id)
             }
             Err(error) => {
-                let message = format!("{}: {error}", face.href);
+                let message = format!("{href}: {error}");
                 self.font_error = Some(message.clone());
                 Err(message)
             }
@@ -1075,6 +1547,28 @@ impl Engine {
             })
             .unwrap_or(16.0)
     }
+}
+
+/// 书内容指纹：长度 + 名字 + 首尾各 8KB。不哈希整本书，几十 MB 的书也
+/// 只在打开时付一次很小的常数成本。
+fn fingerprint_of(bytes: &[u8], name: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |chunk: &[u8]| {
+        for &byte in chunk {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    eat(b"ebook-book-fingerprint-v1");
+    eat(&(bytes.len() as u64).to_le_bytes());
+    eat(name.as_bytes());
+    let head = &bytes[..bytes.len().min(8192)];
+    let tail = &bytes[bytes.len().saturating_sub(8192)..];
+    eat(head);
+    if tail.len() > head.len() || bytes.len() > 8192 {
+        eat(tail);
+    }
+    hash
 }
 
 fn unpack_rgba(value: u32) -> Rgba8 {
@@ -1243,8 +1737,8 @@ impl Resources for PageResources<'_> {
         }
         let decoded = self
             .book
-            .asset(&src)
-            .and_then(|(bytes, _)| ebook_format::image::decode_image(bytes));
+            .asset_owned(&src)
+            .and_then(|(bytes, _)| ebook_format::image::decode_image(&bytes));
         let hit = decoded.clone();
         self.cache.insert(src, decoded, self.budget);
         hit

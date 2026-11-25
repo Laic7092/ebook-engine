@@ -522,6 +522,39 @@ impl StyledDoc {
         &self.text[span.as_range()]
     }
 
+    /// 按 `Anchor.path` 找节点：路径是每层子节点下标，根路径为空。
+    pub fn node_by_path(&self, path: &[u16]) -> Option<NodeId> {
+        let mut id = self.root;
+        for &index in path {
+            id = *self.kids(id).get(index as usize)?;
+        }
+        Some(id)
+    }
+
+    /// 从任意节点向上找最近的块级节点。文本/行内节点落在它所属的段落上，
+    /// 这就是块窗口的 `BlockId`（节点 id 本身）。
+    pub fn block_of(&self, id: NodeId) -> Option<NodeId> {
+        let mut cur = Some(id);
+        while let Some(node_id) = cur {
+            let node = self.nodes.get(node_id as usize)?;
+            if node.style.is_block_level() {
+                return Some(node_id);
+            }
+            cur = node.parent;
+        }
+        None
+    }
+
+    /// 锚点 → 所属块节点。窗口排版与“跳到锚点”共用这一条路径。
+    pub fn block_of_anchor(&self, anchor: &Anchor) -> Option<NodeId> {
+        self.block_of(self.node_by_path(&anchor.path)?)
+    }
+
+    /// 节点的稳定锚点（节点起点，offset 0）。
+    pub fn anchor_of(&self, id: NodeId) -> Option<Anchor> {
+        self.nodes.get(id as usize)?.src.clone()
+    }
+
     pub fn push_node(&mut self, mut node: Node) -> NodeId {
         let id = self.nodes.len() as NodeId;
         node.first_child = 0;

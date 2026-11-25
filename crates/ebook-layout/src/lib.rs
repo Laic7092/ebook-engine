@@ -119,10 +119,22 @@ pub enum Mode {
 
 /// 一次排版的选项。零值表示“全部走默认”：`Limits` 里为 0 的字段由
 /// [`Limits::resolved`] 换成默认上限。
+/// 块级窗口：只排 `from..=to` 的文档节点子树，窗口外的块直接跳过。
+///
+/// `from` / `to` 是文档节点 id（同一章、同一份解析内稳定）。调用方通常先用
+/// `StyledDoc::block_of` 把 `Anchor` 折到最近的块级节点，再传进来。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockWindow {
+    pub from: NodeId,
+    pub to: NodeId,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LayoutOptions {
     pub limits: Limits,
     pub mode: Mode,
+    /// `Some` 时只排这个块窗口；`FlowCache` 不会被使用（窗口是独立结果）。
+    pub window: Option<BlockWindow>,
 }
 
 impl LayoutOptions {
@@ -130,6 +142,7 @@ impl LayoutOptions {
         Self {
             limits,
             mode: Mode::Paged,
+            window: None,
         }
     }
 
@@ -140,7 +153,14 @@ impl LayoutOptions {
         Self {
             limits: Limits::default(),
             mode: Mode::Scroll,
+            window: None,
         }
+    }
+
+    /// 只排一个块窗口；通常和 `Mode::Scroll` 一起用。
+    pub fn window(mut self, from: NodeId, to: NodeId) -> Self {
+        self.window = Some(BlockWindow { from, to });
+        self
     }
 }
 
@@ -239,19 +259,24 @@ impl Layout {
         let content = c.content_size();
         // 键只含「断行真正依赖的东西」：调用方版本号、可用宽度、行数预算。
         // 页高与 `Mode` 刻意不进键——它们只影响分页。
-        let mut built = match cache {
-            Some((cache, rev)) => {
-                let key = cache::flow_key(rev, content.w, limits.max_lines);
-                match cache.get(key) {
-                    Some(flow) => flow,
-                    None => {
-                        let flow = flow::flow(doc, env, c, limits.max_lines);
-                        cache.put(key, &flow);
-                        flow
+        // 窗口结果是独立坐标（已归一化到 0 附近），不能写进整章 FlowCache。
+        let mut built = if let Some(window) = opts.window {
+            flow::flow(doc, env, c, limits.max_lines, Some(window))
+        } else {
+            match cache {
+                Some((cache, rev)) => {
+                    let key = cache::flow_key(rev, content.w, limits.max_lines);
+                    match cache.get(key) {
+                        Some(flow) => flow,
+                        None => {
+                            let flow = flow::flow(doc, env, c, limits.max_lines, None);
+                            cache.put(key, &flow);
+                            flow
+                        }
                     }
                 }
+                None => flow::flow(doc, env, c, limits.max_lines, None),
             }
-            None => flow::flow(doc, env, c, limits.max_lines),
         };
         let flow_truncated = built.truncated;
 
@@ -462,6 +487,7 @@ impl Layout {
                 glyphs: built.glyphs,
             },
             runs: RunMap { lines },
+            blocks: built.blocks,
             dirty: built.dirty,
             issues,
             truncated,
@@ -491,6 +517,7 @@ fn limited_result(doc: &StyledDoc, detail: &str) -> LayoutResult {
         pages: Vec::new(),
         display: DisplayList::default(),
         runs: RunMap::default(),
+        blocks: Vec::new(),
         dirty: Vec::new(),
         issues: alloc::vec![Issue {
             node: doc.root,

@@ -90,17 +90,24 @@ impl Backend {
         }
     }
 
-    fn asset<'a>(&'a self, href: &str) -> Option<(&'a [u8], &'a str)> {
-        match self {
-            Backend::Epub(reader) => reader.asset(href),
-            Backend::Txt(reader) => reader.asset(href),
-        }
-    }
-
     fn resolve_link_from(&self, spine: usize, href: &str) -> Option<LinkTarget> {
         match self {
             Backend::Epub(reader) => reader.resolve_link_from(spine, href),
             Backend::Txt(reader) => reader.resolve_link_from(spine, href),
+        }
+    }
+
+    fn asset_owned(&self, href: &str) -> Option<(Vec<u8>, String)> {
+        match self {
+            Backend::Epub(reader) => reader.asset_owned(href),
+            Backend::Txt(_) => None,
+        }
+    }
+
+    fn font_bytes(&self, index: usize) -> Option<Vec<u8>> {
+        match self {
+            Backend::Epub(reader) => reader.font_bytes(index),
+            Backend::Txt(_) => None,
         }
     }
 }
@@ -116,7 +123,8 @@ pub fn open_book(bytes: &[u8]) -> String {
     let boxed = bytes.to_vec().into_boxed_slice();
     let len = boxed.len();
     let leaked: &'static [u8] = Box::leak(boxed);
-    match EpubReader::open(leaked) {
+    // 字体字节懒加载：打开书不再把全部内嵌字体解压进内存。
+    match EpubReader::open_lazy(leaked) {
         Ok(reader) => {
             // 只在开书成功后才登记所有权；失败路径在下面直接回收。
             if len > 0 {
@@ -409,8 +417,8 @@ impl Resources for PageResources<'_> {
         }
         let decoded = self
             .book
-            .asset(&src)
-            .and_then(|(bytes, _)| ebook_format::image::decode_image(bytes));
+            .asset_owned(&src)
+            .and_then(|(bytes, _)| ebook_format::image::decode_image(&bytes));
         let hit = decoded.clone();
         cache.insert(src, decoded);
         hit
@@ -437,24 +445,39 @@ pub fn font_face_count() -> u32 {
 /// 把第 `index` 个内嵌字体按 `@font-face` 的 family/weight/style 装进 `FontBook`，
 /// 返回 `FontId`；失败返回 `u32::MAX`。字体字节同时暴露给浏览器侧的 `FontFace`。
 pub fn load_font_face(index: usize) -> u32 {
-    let face = {
+    let (family, weight, style, href) = {
         let books = BOOK.lock().unwrap();
-        books
-            .as_ref()
-            .and_then(|reader| reader.book().fonts().get(index).cloned())
+        let Some(reader) = books.as_ref() else {
+            return u32::MAX;
+        };
+        let Some(face) = reader.book().fonts().get(index) else {
+            return u32::MAX;
+        };
+        (
+            face.family.clone(),
+            face.weight,
+            face.style,
+            face.href.clone(),
+        )
     };
-    let Some(face) = face else {
+    let Some(bytes) = BOOK
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|reader| reader.font_bytes(index))
+    else {
+        set_font_error(format!("{href}: 字体字节读不出来"));
         return u32::MAX;
     };
     let mut slot = FONT.lock().unwrap();
     let font = slot.get_or_insert_with(FontBook::new);
-    match font.try_add_styled(&face.family, face.weight, face.style, face.bytes) {
+    match font.try_add_styled(&family, weight, style, bytes) {
         Ok(id) => {
             clear_font_error();
             id.0 as u32
         }
         Err(error) => {
-            set_font_error(format!("{}: {error}", face.href));
+            set_font_error(format!("{href}: {error}"));
             u32::MAX
         }
     }

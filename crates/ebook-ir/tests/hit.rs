@@ -95,6 +95,7 @@ fn result() -> LayoutResult {
             glyphs,
         },
         runs: RunMap { lines },
+        blocks: alloc::vec![],
         dirty: alloc::vec![],
         issues: alloc::vec![],
         truncated: false,

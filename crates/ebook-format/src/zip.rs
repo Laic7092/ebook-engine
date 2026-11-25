@@ -20,6 +20,9 @@ pub struct Entry {
     name: String,
     method: u16,
     compressed: u64,
+    /// 中央目录里的解压后大小。高度估计、预算与“值不值得读”都只看它，
+    /// 不需要先把整个条目解压出来。
+    uncompressed: u64,
     offset: u64,
 }
 
@@ -90,7 +93,7 @@ impl<'a> ZipArchive<'a> {
             let extra_end = name_end.checked_add(extra_len).ok_or(ZipError::Truncated)?;
             let raw_name = data.get(name_start..name_end).ok_or(ZipError::Truncated)?;
             let extra = data.get(name_end..extra_end).ok_or(ZipError::Truncated)?;
-            let (compressed, offset) =
+            let (compressed, uncompressed, offset) =
                 read_entry_sizes(compressed32, uncompressed32, offset32, extra)?;
 
             // 单个非 UTF-8 文件名不应该让整本书打不开。能用的条目继续保留，
@@ -101,6 +104,7 @@ impl<'a> ZipArchive<'a> {
                         name,
                         method,
                         compressed,
+                        uncompressed,
                         offset,
                     });
                 } else {
@@ -145,9 +149,63 @@ impl<'a> ZipArchive<'a> {
         lookup(&self.entries, &self.exact, &self.folded, name).is_some()
     }
 
-    pub fn read(&self, name: &str) -> Option<Vec<u8>> {
+    /// 条目的解压后大小；只看中央目录，不触碰压缩数据。
+    pub fn uncompressed_size(&self, name: &str) -> Option<u64> {
         let name = normalize(name)?;
-        let entry = lookup(&self.entries, &self.exact, &self.folded, &name)?;
+        lookup(&self.entries, &self.exact, &self.folded, &name).map(|entry| entry.uncompressed)
+    }
+
+    pub fn read(&self, name: &str) -> Option<Vec<u8>> {
+        let raw = self.raw_entry(name)?;
+        let entry = self.entry(name)?;
+        match entry.method {
+            0 => Some(raw.to_vec()),
+            8 => miniz_oxide::inflate::decompress_to_vec_with_limit(raw, MAX_ENTRY_BYTES).ok(),
+            _ => None,
+        }
+    }
+
+    /// 只解压前 `max` 字节。图片的固有尺寸/MIME 只在前几十 KB 里，没必要为了
+    /// 一个 `image_size()` 把整张图（可能是 20MB 的 JPEG）解压出来。
+    pub fn read_prefix(&self, name: &str, max: usize) -> Option<Vec<u8>> {
+        if max == 0 {
+            return None;
+        }
+        let raw = self.raw_entry(name)?;
+        let entry = self.entry(name)?;
+        match entry.method {
+            0 => Some(raw[..raw.len().min(max)].to_vec()),
+            8 => {
+                use miniz_oxide::inflate::stream::{inflate, InflateState};
+                use miniz_oxide::{DataFormat, MZFlush, MZStatus};
+                let mut state = InflateState::new_boxed(DataFormat::Raw);
+                let mut out = alloc::vec![0u8; max];
+                let result = inflate(&mut state, raw, &mut out, MZFlush::Finish);
+                match result.status {
+                    Ok(MZStatus::Ok | MZStatus::StreamEnd) if result.bytes_written > 0 => {
+                        out.truncate(result.bytes_written);
+                        Some(out)
+                    }
+                    // 输出缓冲刚好被填满时 miniz 会报 Buf（还没看到流结束），
+                    // 但已经写出的前缀正是调用方要的。
+                    Err(miniz_oxide::MZError::Buf) if result.bytes_written > 0 => {
+                        out.truncate(result.bytes_written);
+                        Some(out)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn entry(&self, name: &str) -> Option<&Entry> {
+        let name = normalize(name)?;
+        lookup(&self.entries, &self.exact, &self.folded, &name)
+    }
+
+    fn raw_entry(&self, name: &str) -> Option<&[u8]> {
+        let entry = self.entry(name)?;
         let compressed = usize::try_from(entry.compressed).ok()?;
         if compressed > MAX_ENTRY_BYTES {
             return None;
@@ -163,12 +221,7 @@ impl<'a> ZipArchive<'a> {
             .checked_add(name_len)?
             .checked_add(extra_len)?;
         let end = start.checked_add(compressed)?;
-        let raw = self.data.get(start..end)?;
-        match entry.method {
-            0 => Some(raw.to_vec()),
-            8 => miniz_oxide::inflate::decompress_to_vec_with_limit(raw, MAX_ENTRY_BYTES).ok(),
-            _ => None,
-        }
+        self.data.get(start..end)
     }
 
     pub fn read_text(&self, name: &str) -> Option<String> {
@@ -476,9 +529,9 @@ fn read_entry_sizes(
     uncompressed32: u32,
     offset32: u32,
     extra: &[u8],
-) -> Result<(u64, u64), ZipError> {
-    if compressed32 != u32::MAX && offset32 != u32::MAX {
-        return Ok((compressed32 as u64, offset32 as u64));
+) -> Result<(u64, u64, u64), ZipError> {
+    if compressed32 != u32::MAX && uncompressed32 != u32::MAX && offset32 != u32::MAX {
+        return Ok((compressed32 as u64, uncompressed32 as u64, offset32 as u64));
     }
     let mut p = 0usize;
     while p + 4 <= extra.len() {
@@ -490,9 +543,13 @@ fn read_entry_sizes(
         if id == 0x0001 {
             let mut q = 0usize;
             let mut compressed = compressed32 as u64;
+            let mut uncompressed = uncompressed32 as u64;
             let mut offset = offset32 as u64;
+            // ZIP64 扩展字段的顺序固定为 uncompressed, compressed, offset，
+            // 只包含“对应 32 位字段为 0xFFFF_FFFF 的那些项”。
             if uncompressed32 == u32::MAX {
-                q = q.checked_add(8).ok_or(ZipError::Truncated)?;
+                uncompressed = read_u64_slice(body, q)?;
+                q += 8;
             }
             if compressed32 == u32::MAX {
                 compressed = read_u64_slice(body, q)?;
@@ -501,7 +558,7 @@ fn read_entry_sizes(
             if offset32 == u32::MAX {
                 offset = read_u64_slice(body, q)?;
             }
-            return Ok((compressed, offset));
+            return Ok((compressed, uncompressed, offset));
         }
         p = body_end;
     }

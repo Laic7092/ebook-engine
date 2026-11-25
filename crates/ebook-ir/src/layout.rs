@@ -12,7 +12,7 @@ pub struct IrVersion {
     pub minor: u16,
 }
 
-pub const IR_VERSION: IrVersion = IrVersion { major: 1, minor: 4 };
+pub const IR_VERSION: IrVersion = IrVersion { major: 1, minor: 5 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Rotate {
@@ -178,6 +178,16 @@ pub struct Location {
     pub byte: u32,
 }
 
+/// 不依赖像素的原文区间：两端都是 [`Anchor`]（章 + DOM 路径 + 字节偏移）。
+///
+/// `start == end` 时可以当点定位用；`start` 在前、`end` 在后。重排、换字号、
+/// 换页高都不改变它，只有章节内容变化才会失效（宿主用 `chapter_rev` 作废）。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnchorRange {
+    pub start: Anchor,
+    pub end: Anchor,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IssueCode {
     #[default]
@@ -277,6 +287,23 @@ impl RunMap {
     }
 }
 
+/// 一个块级排版单元：稳定节点 id、它在这次流里的矩形、行数与首行锚点。
+///
+/// `node` 是文档节点 id（同一次解析内稳定），不是像素坐标；窗口排版、
+/// 块级缓存和“跳到某一块”都用它。`rect.y` 是排版流坐标。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BlockBox {
+    pub node: NodeId,
+    /// 块边框盒，`rect.y` 是流坐标；窗口排版里会被归一化到 0 附近。
+    pub rect: RectF,
+    /// 块内第一行/节点锚点；空块为 `None`。
+    pub anchor: Option<Anchor>,
+    /// 这个块子树里排出的行数（不含容器外的兄弟）。
+    pub lines: u32,
+    /// 嵌套深度（根为 0），用于同一 y 上的父子排序。
+    pub depth: u16,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DirtyBlock {
     pub node: NodeId,
@@ -291,6 +318,8 @@ pub struct LayoutResult {
     pub pages: Vec<Page>,
     pub display: DisplayList,
     pub runs: RunMap,
+    /// 块级排版单元表，按 `rect.y` 排序（同 y 父块在前）。
+    pub blocks: Vec<BlockBox>,
     pub dirty: Vec<DirtyBlock>,
     /// 排版过程中发现的可恢复问题（缺字、缺图、...）。本轮只收集，不拦截。
     pub issues: Vec<Issue>,
@@ -351,6 +380,7 @@ impl LayoutResult {
         bytes += self.display.ops.capacity() * core::mem::size_of::<Op>();
         bytes += self.display.glyphs.capacity() * core::mem::size_of::<Glyph>();
         bytes += self.runs.lines.capacity() * core::mem::size_of::<LineBox>();
+        bytes += self.blocks.capacity() * core::mem::size_of::<BlockBox>();
         bytes += self.dirty.capacity() * core::mem::size_of::<DirtyBlock>();
         bytes += self.issues.capacity() * core::mem::size_of::<Issue>();
         for op in &self.display.ops {
@@ -488,6 +518,32 @@ impl LayoutResult {
         let line = self.runs.lines.get(location.line as usize)?;
         let anchor = line.anchor.as_ref()?;
         Some(anchor.with_offset(anchor.offset.saturating_add(location.byte)))
+    }
+
+    /// 两个页内位置 → 一个稳定区间。端点的字节偏移按行锚点累加，
+    /// 所以和 [`Self::location_of`] 往返一致。
+    pub fn anchor_range(&self, a: Location, b: Location) -> Option<AnchorRange> {
+        let start = self.anchor_of_location(a)?;
+        let end = self.anchor_of_location(b)?;
+        Some(AnchorRange { start, end })
+    }
+
+    fn anchor_of_location(&self, location: Location) -> Option<Anchor> {
+        let line = self.runs.lines.get(location.line as usize)?;
+        let anchor = line.anchor.as_ref()?;
+        Some(anchor.with_offset(anchor.offset.saturating_add(location.byte)))
+    }
+
+    /// 命中行所属的块单元（最近一个 `rect` 包含该行顶边的块）。
+    /// 同一块有父子嵌套时取最内层（`depth` 最大）。
+    pub fn block_at_line(&self, line: u32) -> Option<&BlockBox> {
+        let line = self.runs.lines.get(line as usize)?;
+        self.blocks
+            .iter()
+            .filter(|block| {
+                block.rect.y <= line.rect.y + 0.001 && line.rect.y < block.rect.bottom() + 0.001
+            })
+            .max_by_key(|block| block.depth)
     }
 }
 

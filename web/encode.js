@@ -236,6 +236,14 @@ function writeDirty(w, value) {
   w.varint(value.reason);
 }
 
+function writeBlock(w, value) {
+  w.varint(value.node);
+  writeRect(w, value.rect);
+  w.option(value.anchor, writeAnchor);
+  w.varint(value.lines);
+  w.varint(value.depth);
+}
+
 export function encodeLayout(layout) {
   const w = new Writer();
   for (const byte of MAGIC) {
@@ -250,6 +258,7 @@ export function encodeLayout(layout) {
   w.vec(layout.display.ops, writeOp);
   w.vec(layout.display.glyphs, writeGlyph);
   w.vec(layout.runs.lines, writeLineBox);
+  w.vec(layout.blocks, writeBlock);
   w.vec(layout.dirty, writeDirty);
   w.vec(layout.issues, writeIssue);
   w.u8(layout.truncated ? 1 : 0);

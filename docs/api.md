@@ -58,11 +58,12 @@ ByteSource ──format──> StyledDoc ──layout──> LayoutResult ──
 
 ```
 LayoutResult
-├── version: IrVersion       // 1.4
+├── version: IrVersion       // 1.5
 ├── spine: u32               // 与 StyledDoc.meta.spine 一致
 ├── pages: Vec<Page>
 ├── display: DisplayList { ops: Vec<Op>, glyphs: Vec<Glyph> }
 ├── runs: RunMap { lines: Vec<LineBox> }
+├── blocks: Vec<BlockBox>   // 块级排版单元（1.5）
 ├── dirty: Vec<DirtyBlock>
 ├── issues: Vec<Issue>       // 可恢复问题的诊断流（见 2.3）
 └── truncated: bool          // 因 Limits 截断过；结果仍是合法 IR
@@ -230,7 +231,7 @@ IR 里有两个互补的枚举：
 
 ### 3.3 版本与兼容策略
 
-当前 `IR_VERSION = 1.4`。
+当前 `IR_VERSION = 1.5`。
 
 - **major 表示字节布局。** 增删字段、改字段顺序、增删/重排枚举变体、改整数宽度，
   必须升 major。旧解码器遇到不同 major 直接拒绝。
@@ -238,7 +239,7 @@ IR 里有两个互补的枚举：
   1.2 加 `Glyph.ch` / `Op::Link` / `Issue` / `Limits`（`Limits` 不进字节流），
   1.3 加 `LayoutResult.truncated`（`LayoutStats` 只是内存里的估算，不序列化）；
   1.4 给 `GlyphRun` 末尾追加 `weight` / `style` / `underline`，给 `TextStyle`
-  末尾追加 `underline`。
+  末尾追加 `underline`；1.5 在 `LayoutResult` 末尾追加 `blocks`（块级单元）。
   `read_header` 不因 minor 不同而拒绝。
 - **但 postcard 是位置编码，不是自描述格式。** 旧解码器无法“跳过未知字段”，
   所以 minor 增补后 native 与 JS 必须**一起**升级；`decode` 依赖结构体形状，
@@ -407,33 +408,99 @@ pub fn paint_window(ir: &LayoutResult, page: u32, top: f32,
 
 ```rust
 // ebook-reader
-engine.scroll_begin(viewport, style)?;      // 上下留白会被置 0
-engine.scroll_chapter(i)?;                  // { spine, top, height, ok }，懒量 0..=i
-engine.scroll_chapters()?;                  // 全书表，首次会排完全书
-engine.scroll_total_height()?;              // 滚动容器 contentSize
-engine.scroll_spine_at(y)?;                 // y → (章, 章首)
+engine.scroll_begin(viewport, style)?;      // 上下留白会被置 0；只算估计高度
+engine.scroll_chapter(i)?;                  // 只实测第 i 章；{ estimated } 区分估计/实测
+engine.scroll_chapters()?;                  // 实测全书（显式；会逐章排版）
+engine.scroll_chapters_estimated()?;        // 不排版的全书表（估计值）
+engine.scroll_metrics()?;                   // { total, measured, count }
+engine.scroll_index_export()?;              // 已实测高度 → 字节
+engine.scroll_index_import(&bytes)?;        // 键/章数不匹配返回 false
+engine.scroll_total_height()?;              // 当前索引总高（估计 + 实测），不排整本
+engine.scroll_spine_at(y)?;                 // y → (章, 章首)，纯索引查询
 engine.scroll_slice(y, height, scale, ink, paper, bold)?;  // 可跨章的一段
 engine.scroll_hit(x, y)?;                   // → { spine, line, byte, y }
-engine.scroll_line_y(spine, line)?;         // 行 → 全书流坐标
-engine.scroll_anchor_y(spine, "#frag")?;    // 目录/链接 → 全书流坐标
-engine.scroll_progress(y)?;                 // 流坐标 → 0..1
+engine.scroll_line_y(spine, line)?;         // 行 → 全书流坐标（只量这一章）
+engine.scroll_anchor_y(spine, "#frag")?;    // 目录/链接 → 全书流坐标（只量这一章）
+engine.scroll_progress(y)?;                 // 流坐标 → 0..1；不排整本
 ```
 
-- 高度是**懒**的：`scroll_chapter(i)` 只保证 `0..=i` 量过，可以分摊到多帧；
-  `scroll_total_height()` / `scroll_chapters()` 才量全书。
+- `scroll_begin` **不排版任何章**：每章先有一个估计高度（章节字节数 + 视口 +
+  样式），滚动条立即可用。`scroll_chapter(i)` 只实测第 i 章；未实测章
+  `ScrollChapter::estimated == true`。`scroll_total_height` 返回“实测 + 估计”
+  的当前总和，所以总高会随着实测收敛，这是预期行为。
+- `scroll_slice` / `scroll_hit` / `scroll_line_y` / `scroll_anchor_y` 只排相交
+  的那一章（或跨章时的少数几章），不再从第 0 章扫到目标章。绝对 `y` 会先按
+  当前索引换算成“章 + 章内偏移”，实测导致总高变化时同一块内容不会乱跳；
+  需要绝对稳定的宿主应维护锚点（`scroll_line_y` / `scroll_anchor_y`）。
+- 高度索引是 Fenwick 前缀和，单章实测 O(log n) 更新；键 = 书指纹 + 视口 +
+  样式 + 字体版本，可跨会话导出/导入（C 面 `eb_plain_scroll_index_*`，
+  postcard 面 `ScrollIndexExport` / `ScrollIndexImport`）。
 - 一章排不出来不会拖垮整本书：该章 `height == 0`、`ok == false`，后面的章照排。
 - 章节高按视口高向上取整：短章（题记、单段小节）也占满一屏，章尾是纸色，
   下一章从整屏边界开始。
 - `scroll_slice` 自己找出涉及的章、分别光栅化再拼到同一张位图，章缝不会错行；
   内容之外是纸色。起点会吸到设备像素栅格。
-- 章节 IR 有 LRU（当前章 + 3 章）；字体换了（`register_font`）后旧高度失效，
-  `scroll_*` 会返回 `NoScroll`，宿主重新 `scroll_begin` 即可。
+- 章节 IR 缓存按 12MB 字节预算淘汰（至少留 2 章）；字体换了
+  （`register_font`）不会丢会话，实测高度退回估计值，滚到哪章再重新量。
+- 章节流（在线书源）：`Engine::new_book` / `append_chapter` /
+  `replace_chapter` / `chapter_rev` / `clear_chapters`。C 面是
+  `eb_plain_new_book` / `_append_chapter` / `_replace_chapter` / `_chapter_rev` /
+  `_clear_chapters`，postcard 面是 `Request::AppendChapter` 等；`chapter_rev`
+  变化即该章内容变了，宿主用它做页位图键。
 - C ABI：`eb_plain_scroll_begin` / `_chapter_count` / `_chapter` /
   `_total_height` / `_spine_at` / `_chapter_top` / `_band_raw` / `_band_bytes` /
   `_hit` / `_line_y` / `_anchor_y` / `_progress`；协议面是 `Request::Scroll*`
   （`ScrollBand` 直接回 `Response::Bitmap`，不需要落盘）。
 - 并发与分页相同：一个 `Engine` 是 `&mut`，多个引擎可以同时排版/取瓦片；
   没有全局状态。取消一枚瓦片就是丢掉结果——修掉 O(章高) 之后它本来就是毫秒级。
+
+#### 4.7.2 稳定位置与块级窗口
+
+页/行/字节是**排版相关**位置，换字号或页高就会变。跨会话、书签、标注应使用
+`Anchor` / `Locator`：
+
+```rust
+// ebook-reader
+pub struct Locator { pub spine: u32, pub node: u32, pub offset: u32 }
+pub struct LocatorRange { pub start: Locator, pub end: Locator }
+
+engine.locator_at(page, x, y)?;         // 页内点 → 章 + 节点 + 字节
+engine.locate_locator(&locator)?;       // 稳定位置 → 当前页/行/字节
+engine.locator_range(a, b)?;            // 两个位置 → 稳定区间
+engine.block_of_locator(&locator)?;     // 稳定位置 → 块节点
+
+engine.anchor_at(page, x, y)?;          // 底层 Anchor（spine + DOM path + offset）
+engine.anchor_range(a, b)?;             // AnchorRange
+engine.locate(&anchor)?;                // Anchor → 当前页/行/字节
+```
+
+`Locator` 不依赖像素、页号或滚动值；章节内容变了用 `chapter_rev` 作废。
+C 面用不透明字符串 `spine:node:offset`（区间是 `a|b`）：
+`eb_plain_locator_at` / `_locator_range` / `_locate`；postcard 面是
+`Request::AnchorAt` / `Locate` / `AnchorRange`。
+
+块级单元由 `LayoutResult.blocks` 给出：
+
+```rust
+pub struct BlockBox {
+    pub node: NodeId,      // 稳定节点 id；Anchor 可折到它
+    pub rect: RectF,       // 这一块在流里的边框盒
+    pub anchor: Option<Anchor>,
+    pub lines: u32,        // 子树排出的行数
+    pub depth: u16,
+}
+```
+
+`engine.blocks()` 返回当前窗/整章的块表。只排一块（或一段连续块）用：
+
+```rust
+engine.layout_block_window(spine, from_node, to_node, viewport, style)?;
+```
+
+窗口外的块不进入 `flow`：不整形、不产生行和 op，坐标归一化到 0 附近；
+`pages` / `bitmap` / `hit` 都只看到这一窗。`from`/`to` 是文档节点 id，
+用 `block_of_locator` / `StyledDoc::block_of_anchor` 得到。内核入口是
+`LayoutOptions::window(from, to)`（`BlockWindow`），`FlowCache` 不参与窗口排版。
 
 ### 4.8 `LayoutCache`（`ebook-cache`）
 

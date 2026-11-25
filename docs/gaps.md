@@ -246,12 +246,15 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 
 ### G-16 宿主资源与内存边界
 
-- **状态**：部分
-- **现象**：Web 端没有显式内存预算；CJK 字体、整本 zip、所有章节 IR 可能同时
-  留在内存。`MAX_FONT_BYTES = 32MB` 只拦单字体。
-- **影响**：移动端 wasm 容易触顶；字体 + 图片 + IR 的峰值不可控。
-- **修复**：宿主层加总预算（字体/图片/IR），超限时降级（只留当前章 IR、
-  图片按需解码、字体子集化）。
+- **状态**：部分（主要峰值已收紧）
+- **已修复**：内嵌字体改为惰性读取（`EpubReader::open_lazy` + `font_bytes`，
+  `Book::fonts` 只留元数据）；阅读器/Web 的图片字节改成读后即丢
+  （`asset_owned`），不再用 `OnceCell` 把每条压缩资产常驻；章 IR 缓存从
+  “固定 4 章”改成 12MB 字节预算 + 至少 2 章；单张图解压设 2000 万像素上限；
+  高度索引跨会话复用，不再为此重排整本书。
+- **仍未覆盖**：字体子集化、跨字体/图片/IR 的统一总预算、图片条带解码。
+- **影响**：移动端 wasm 的峰值仍可能被“一个大字体 + 一张大图 + 当前章 IR”
+  顶到，但没有“所有章节 IR / 所有字体 / 所有资产同时常驻”的结构性问题。
 
 ### G-18 其他已知小项
 
@@ -275,33 +278,6 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 - **证据**：`crates/ebook-format/src/html_repair.rs`；`tests/robust.rs`；
   `crates/ebook-format/examples/audit.rs`。
 - **验收**：坏章节只影响自己；公开语料 + 变异 fuzz 下无 panic、无整本失败。
-
-### G-26 没有章节流入口：宿主无法追加/替换一章文本
-
-- **状态**：未修复（宿主 Quire 的在线书源需要）
-- **场景**：宿主按章从书源取正文，没有整本字节。现在只能把 3 章拼成临时 TXT，
-  `eb_plain_close` + `eb_plain_open` 重开。
-- **代价**：两套章号（窗口内 `spine` vs 全书下标，Quire 有 22 处换算）；换窗
-  必须重排并丢 `FlowCache`/滚动列；目录两份；页缓存要带窗口基址；窗口要落盘，
-  标题不像「第…章」时还得宿主补。
-- **需求**：
-  1. `eb_plain_new_book(title)`：0 章，书名由参数给。
-  2. `eb_plain_append_chapter(doc, title, text)`：尾部追加，返回章数。
-  3. `eb_plain_replace_chapter(doc, spine, title, text)`：换一章，章数与 `spine` 不变。
-  4. `eb_plain_chapter_rev(doc, spine) -> u64`：该章内容版本，替换/追加后变化，
-     宿主用它做页位图的键。
-  5. 可选：`eb_plain_clear_chapters`、`eb_plain_insert_chapter`（后者移动
-     `spine`，优先级低）。postcard 面加同义变体。
-- **语义**：UTF-8；标题由宿主给（包成 `H1`），`text` 每行一段，不跑分章规则；
-  替换后该章 `layout`/`scroll`/`FlowCache` 失效、`scroll_total_height` 重算；
-  单章受 `max_text_bytes`，总量不限（逐章懒解析）；非法 `spine`/空文本/超限
-  返回空结果或 `-2`，不 panic；只加新函数。
-- **与 G-11 无关**：G-11 是同一文本的重排缓存，这里是内容本身会变。
-- **证据**：`quire-asuka/reader.asuka`（`openOnline`/`switchWindow`/`windowBase`）、
-  `remote/online.asuka`（`materialize`）。
-- **验收**：append 后章数 +1 且旧章不变；replace 后该章 IR 与 rev 变、其他章
-  rev 不变；滚动列追加后总高增长、旧 band 逐字节不变；无文件也能排版；
-  native/wasm parity；空/超长/越界不 panic。
 
 ---
 
@@ -329,8 +305,7 @@ native/wasm 有逐字节 parity，错误输入有 fuzz 和 limits 兜底。
 5. **G-11**：真正的增量重排。内核改动，放在语义修复之后。
 6. **G-09 / G-10 / G-08**：剩余 RTL 语义、fixed-layout、可变/彩色字体。
    工作量大，单独排期。
-7. **G-26**：章节流入口（append / replace / chapter_rev）。宿主现在用
-   `close`/`open` + 临时 TXT，换窗必须重排；只加新函数，等有需求再排。
+7. 全书与章内流式化已完成；剩余语义缺口按上面的顺序继续。
 
 ---
 

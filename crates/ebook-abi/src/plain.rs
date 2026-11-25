@@ -220,6 +220,21 @@ fn c_path(path: *const c_char) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// 标量面的稳定位置编码：`spine:node:offset`。宿主只当不透明字符串保存；
+/// 区间用 `|` 连接两个端点。
+fn locator_text(locator: ebook_reader::Locator) -> String {
+    format!("{}:{}:{}", locator.spine, locator.node, locator.offset)
+}
+
+fn parse_locator(text: &str) -> Option<ebook_reader::Locator> {
+    let mut parts = text.split(':');
+    Some(ebook_reader::Locator {
+        spine: parts.next()?.parse().ok()?,
+        node: parts.next()?.parse().ok()?,
+        offset: parts.next()?.parse().ok()?,
+    })
+}
+
 /// 跑一段可能 panic 的代码，失败 → -1。
 fn guard(f: impl FnOnce() -> i32) -> i32 {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| {
@@ -277,6 +292,134 @@ pub unsafe extern "C" fn eb_plain_open(data: *const u8, len: usize, name: *const
                 crate::set_last_error(format!("{error:?}"));
                 -1
             }
+        }
+    })
+}
+
+/// 新建一本空的书（宿主按章推送）。返回句柄（>=1），-1 失败。
+///
+/// 这是 G-26 的流式入口：不传整本字节，章节用 `eb_plain_append_chapter` /
+/// `eb_plain_replace_chapter` 推进来，`eb_plain_chapter_rev` 给出页缓存键。
+#[no_mangle]
+pub extern "C" fn eb_plain_new_book(title: *const c_char) -> i32 {
+    guard(|| {
+        let title = c_path(title).unwrap_or_default();
+        let engine = ebook_reader::Engine::new_book(&title);
+        let eb = Arc::new(EbEngine {
+            inner: Mutex::new(engine),
+        });
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let mut engines = ENGINES.lock().unwrap_or_else(|poison| poison.into_inner());
+        engines.insert(id, Handle(eb));
+        crate::set_last_error("");
+        id
+    })
+}
+
+/// 尾部追加一章纯文本。返回新的章数（>=1）；-1 句柄/参数错；
+/// -2 不是流式书、空文本或超过单章上限。
+#[no_mangle]
+pub extern "C" fn eb_plain_append_chapter(
+    id: i32,
+    title: *const c_char,
+    text: *const c_char,
+) -> i32 {
+    guard(|| {
+        let (Some(title), Some(text)) = (c_path(title), c_path(text)) else {
+            crate::set_last_error("章节标题或正文为空");
+            return -1;
+        };
+        match with_engine(id, |engine| engine.append_chapter(&title, &text)) {
+            None => -1,
+            Some(Ok(count)) => count as i32,
+            Some(Err(error)) => {
+                crate::set_last_error(error.to_string());
+                -2
+            }
+        }
+    })
+}
+
+/// 替换一章。章数与其它章不变；0 成功，-1 句柄/参数错，-2 越界/空文本/超限。
+#[no_mangle]
+pub extern "C" fn eb_plain_replace_chapter(
+    id: i32,
+    spine: u32,
+    title: *const c_char,
+    text: *const c_char,
+) -> i32 {
+    guard(|| {
+        let (Some(title), Some(text)) = (c_path(title), c_path(text)) else {
+            crate::set_last_error("章节标题或正文为空");
+            return -1;
+        };
+        match with_engine(id, |engine| {
+            engine.replace_chapter(spine as usize, &title, &text)
+        }) {
+            None => -1,
+            Some(Ok(())) => 0,
+            Some(Err(error)) => {
+                crate::set_last_error(error.to_string());
+                -2
+            }
+        }
+    })
+}
+
+/// 清空流式书的所有章节。0 成功；-1 句柄错；-2 不是流式书。
+#[no_mangle]
+pub extern "C" fn eb_plain_clear_chapters(id: i32) -> i32 {
+    guard(|| match with_engine(id, |engine| engine.clear_chapters()) {
+        None => -1,
+        Some(Ok(())) => 0,
+        Some(Err(error)) => {
+            crate::set_last_error(error.to_string());
+            -2
+        }
+    })
+}
+
+/// 该章内容版本：append/replace 后变化；0 表示没有这一章或不是流式书。
+#[no_mangle]
+pub extern "C" fn eb_plain_chapter_rev(id: i32, spine: u32) -> u64 {
+    with_engine(id, |engine| engine.chapter_rev(spine as usize).unwrap_or(0)).unwrap_or(0)
+}
+
+/// 导出高度索引到 `path`。返回写入字节数；-1 没有滚动会话/句柄错，-3 写失败。
+#[no_mangle]
+pub extern "C" fn eb_plain_scroll_index_write(id: i32, path: *const c_char) -> i32 {
+    guard(|| {
+        let Some(path) = c_path(path) else {
+            return -1;
+        };
+        let bytes = with_engine(id, |engine| engine.scroll_index_export().ok());
+        let Some(Some(bytes)) = bytes else {
+            crate::set_last_error("还没有滚动会话");
+            return -1;
+        };
+        if let Err(error) = std::fs::write(&path, &bytes) {
+            crate::set_last_error(format!("{path}: {error}"));
+            return -3;
+        }
+        bytes.len() as i32
+    })
+}
+
+/// 从 `path` 导入高度索引。1 成功，0 键/章数不匹配或文件不可读，-1 句柄/参数错。
+#[no_mangle]
+pub extern "C" fn eb_plain_scroll_index_read(id: i32, path: *const c_char) -> i32 {
+    guard(|| {
+        let Some(path) = c_path(path) else {
+            return -1;
+        };
+        let Ok(bytes) = std::fs::read(&path) else {
+            return 0;
+        };
+        match with_engine(id, |engine| engine.scroll_index_import(&bytes)) {
+            None => -1,
+            Some(Ok(true)) => 1,
+            Some(Ok(false)) => 0,
+            Some(Err(_)) => 0,
         }
     })
 }
@@ -368,9 +511,7 @@ pub extern "C" fn eb_plain_cover_href(id: i32) -> *const c_char {
 /// 封面的 MIME（`image/png`、`image/jpeg`；`""` 没有封面）。
 #[no_mangle]
 pub extern "C" fn eb_plain_cover_mime(id: i32) -> *const c_char {
-    meta(id, |engine| {
-        engine.cover().map(|(_, mime)| mime.to_string())
-    })
+    meta(id, |engine| engine.cover().map(|(_, mime)| mime))
 }
 
 /// 封面字节数（0 没有封面）：宿主可据此决定要不要先缓存。
@@ -391,7 +532,7 @@ pub extern "C" fn eb_plain_cover_write(id: i32, path: *const c_char) -> i32 {
             crate::set_last_error("封面路径为空");
             return -1;
         };
-        let bytes = with_engine(id, |engine| engine.cover().map(|(bytes, _)| bytes.to_vec()));
+        let bytes = with_engine(id, |engine| engine.cover().map(|(bytes, _)| bytes));
         let Some(Some(bytes)) = bytes else {
             crate::set_last_error("这本书没有封面");
             return -1;
@@ -1151,6 +1292,78 @@ pub extern "C" fn eb_plain_progress(id: i32, page: u32, line: u32, byte: u32) ->
             .unwrap_or(-1.0)
     })
     .unwrap_or(-1.0)
+}
+
+/// 页内点 → 稳定位置（`spine:node:offset`；`""` 没有）。重排后仍有效。
+#[no_mangle]
+pub extern "C" fn eb_plain_locator_at(id: i32, page: u32, x: f32, y: f32) -> *const c_char {
+    with_engine(id, |engine| {
+        engine
+            .locator_at(page, x, y)
+            .map_or_else(|| scratch(""), |locator| scratch(&locator_text(locator)))
+    })
+    .unwrap_or_else(|| scratch(""))
+}
+
+/// 两个页内位置 → 稳定区间（`a|b`；`""` 没有）。
+#[no_mangle]
+pub extern "C" fn eb_plain_locator_range(
+    id: i32,
+    a_page: u32,
+    a_line: u32,
+    a_byte: u32,
+    b_page: u32,
+    b_line: u32,
+    b_byte: u32,
+) -> *const c_char {
+    let a = ebook_reader::Location {
+        page: a_page,
+        line: a_line,
+        byte: a_byte,
+    };
+    let b = ebook_reader::Location {
+        page: b_page,
+        line: b_line,
+        byte: b_byte,
+    };
+    with_engine(id, |engine| {
+        engine.locator_range(a, b).map_or_else(
+            || scratch(""),
+            |range| {
+                scratch(&format!(
+                    "{}|{}",
+                    locator_text(range.start),
+                    locator_text(range.end)
+                ))
+            },
+        )
+    })
+    .unwrap_or_else(|| scratch(""))
+}
+
+/// 稳定位置（`spine:node:offset`）→ 当前排版的页/行/字节。
+#[no_mangle]
+pub extern "C" fn eb_plain_locate(id: i32, locator: *const c_char) -> EbLoc {
+    let none = EbLoc {
+        page: -1,
+        line: 0,
+        byte: 0,
+        progress: -1.0,
+    };
+    let Some(locator) = c_path(locator).and_then(|text| parse_locator(&text)) else {
+        return none;
+    };
+    with_engine(id, |engine| {
+        engine
+            .locate_locator(&locator)
+            .map_or(none, |location| EbLoc {
+                page: location.page as i32,
+                line: location.line,
+                byte: location.byte,
+                progress: engine.progress(location).unwrap_or(-1.0),
+            })
+    })
+    .unwrap_or(none)
 }
 
 /// 页内点 → 链接地址（`""` 没有）。指针在本进程内有效，直到后续 64 次取字符串。

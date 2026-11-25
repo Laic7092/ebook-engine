@@ -28,8 +28,8 @@ function compare(name, bytes) {
 // 所以这里对新增字段的语义做最小断言，防止 decode/encode 一起跑偏。
 function checkFields(name, layout) {
   const { major, minor } = layout.version;
-  if (major !== 1 || minor !== 4) {
-    throw new Error(`${name}: IR version ${major}.${minor}, want 1.4`);
+  if (major !== 1 || minor !== 5) {
+    throw new Error(`${name}: IR version ${major}.${minor}, want 1.5`);
   }
 
   const glyphs = layout.display.glyphs;
@@ -73,6 +73,20 @@ function checkFields(name, layout) {
   if (typeof layout.truncated !== "boolean") {
     throw new Error(`${name}: truncated flag is not a boolean`);
   }
+  if (!Array.isArray(layout.blocks)) {
+    throw new Error(`${name}: blocks is not an array`);
+  }
+  for (const block of layout.blocks) {
+    if (!Number.isInteger(block.node) || block.node < 0) {
+      throw new Error(`${name}: block node is not a u32`);
+    }
+    if (!Number.isInteger(block.lines) || block.lines < 0) {
+      throw new Error(`${name}: block lines is not a u32`);
+    }
+    if (!Number.isInteger(block.depth) || block.depth < 0) {
+      throw new Error(`${name}: block depth is not a u16`);
+    }
+  }
 }
 
 function checkSpans(name, layout) {
@@ -110,8 +124,8 @@ function checkSpans(name, layout) {
 // golden 里暂时没有 link（格式层还没填 `Node.link`），所以这一段是 link 解码的唯一覆盖。
 function selfCheck() {
   const layout = {
-    header: { major: 1, minor: 4 },
-    version: { major: 1, minor: 4 },
+    header: { major: 1, minor: 5 },
+    version: { major: 1, minor: 5 },
     spine: 0,
     pages: [{
       index: 0,
@@ -155,6 +169,13 @@ function selfCheck() {
         node: 9,
       }],
     },
+    blocks: [{
+      node: 9,
+      rect: { x: 10, y: 20, w: 8, h: 16 },
+      anchor: { spine: 0, path: [1, 2], offset: 5 },
+      lines: 1,
+      depth: 2,
+    }],
     dirty: [],
     issues: [{ node: 4, code: 3, detail: "image pending" }],
     truncated: true,
@@ -171,6 +192,7 @@ function selfCheck() {
   diff(layout.display.ops, again.display.ops, "ops");
   diff(layout.display.glyphs, again.display.glyphs, "glyphs");
   diff(layout.runs.lines, again.runs.lines, "lines");
+  diff(layout.blocks, again.blocks, "blocks");
   diff(layout.issues, again.issues, "issues");
   diff(layout.truncated, again.truncated, "truncated");
   const reencoded = encodeLayout(again);

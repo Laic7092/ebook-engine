@@ -182,6 +182,39 @@ pub unsafe extern "C" fn eb_open(
     }
 }
 
+/// 新建一本空书（流式章节）。与 `eb_open` 返回同一种句柄；失败返回 null。
+///
+/// 章节用 postcard `Request::AppendChapter` / `ReplaceChapter` 或标量面
+/// `eb_plain_append_chapter` 推入。
+///
+/// # Safety
+/// `title` 可以为 null；否则必须是 NUL 结尾的可读字符串。
+#[no_mangle]
+pub unsafe extern "C" fn eb_engine_new_book(title: *const c_char) -> *mut EbEngine {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let title = if title.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(title) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        Engine::new_book(&title)
+    }));
+    match result {
+        Ok(engine) => {
+            set_last_error("");
+            Box::into_raw(Box::new(EbEngine {
+                inner: Mutex::new(engine),
+            }))
+        }
+        Err(_) => {
+            set_last_error("eb_engine_new_book 内部 panic");
+            std::ptr::null_mut()
+        }
+    }
+}
+
 /// # Safety
 /// `engine` 必须是 `eb_open` 的返回值，且只能关闭一次。
 #[no_mangle]
@@ -284,6 +317,26 @@ fn dispatch(engine: &mut Engine, request: Request) -> Response {
             Err(error) => Response::Error(error.to_string()),
         },
         Request::Hit { page, x, y } => Response::Hit(engine.hit(page, x, y).map(loc_wire)),
+        Request::AnchorAt { page, x, y } => Response::Anchor(engine.anchor_at(page, x, y)),
+        Request::Locate { anchor } => Response::Hit(engine.locate(&anchor).map(loc_wire)),
+        Request::AnchorRange { a, b } => {
+            Response::AnchorRange(engine.anchor_range(loc_core(a), loc_core(b)))
+        }
+        Request::Blocks => Response::Blocks(engine.blocks().to_vec()),
+        Request::BlockWindow {
+            spine,
+            from,
+            to,
+            viewport,
+            style,
+        } => {
+            let viewport = viewport_core(viewport);
+            let style = style_core(style);
+            match engine.layout_block_window(spine as usize, from, to, viewport, style) {
+                Ok(()) => Response::Pages(engine.pages().into_iter().map(page_wire).collect()),
+                Err(error) => Response::Error(error.to_string()),
+            }
+        }
         Request::LinkAt { page, x, y } => {
             Response::Link(engine.link_at(page, x, y).map(str::to_string))
         }
@@ -310,7 +363,8 @@ fn dispatch(engine: &mut Engine, request: Request) -> Response {
             let viewport = viewport_core(viewport);
             let style = style_core(style);
             match engine.scroll_begin(viewport, style) {
-                Ok(_) => match engine.scroll_chapters() {
+                // 不在这里量全书：估计表立即可用，滚到哪章再实测哪章。
+                Ok(_) => match engine.scroll_chapters_estimated() {
                     Ok(chapters) => Response::ScrollChapters(
                         chapters.into_iter().map(scroll_chapter_wire).collect(),
                     ),
@@ -325,6 +379,45 @@ fn dispatch(engine: &mut Engine, request: Request) -> Response {
             }
             Err(error) => Response::Error(error.to_string()),
         },
+        Request::ScrollChaptersEstimated => match engine.scroll_chapters_estimated() {
+            Ok(chapters) => {
+                Response::ScrollChapters(chapters.into_iter().map(scroll_chapter_wire).collect())
+            }
+            Err(error) => Response::Error(error.to_string()),
+        },
+        Request::ScrollMetrics => match engine.scroll_metrics() {
+            Ok(metrics) => Response::ScrollMetrics(protocol::ScrollMetrics {
+                total: metrics.total,
+                measured: metrics.measured,
+                count: metrics.count,
+            }),
+            Err(error) => Response::Error(error.to_string()),
+        },
+        Request::ScrollIndexExport => match engine.scroll_index_export() {
+            Ok(bytes) => Response::Index(bytes),
+            Err(error) => Response::Error(error.to_string()),
+        },
+        Request::ScrollIndexImport { bytes } => match engine.scroll_index_import(&bytes) {
+            Ok(imported) => Response::Flag(imported),
+            Err(error) => Response::Error(error.to_string()),
+        },
+        Request::AppendChapter { title, text } => match engine.append_chapter(&title, &text) {
+            Ok(count) => Response::Count(count as u32),
+            Err(error) => Response::Error(error.to_string()),
+        },
+        Request::ReplaceChapter { spine, title, text } => {
+            match engine.replace_chapter(spine as usize, &title, &text) {
+                Ok(()) => Response::Ok,
+                Err(error) => Response::Error(error.to_string()),
+            }
+        }
+        Request::ClearChapters => match engine.clear_chapters() {
+            Ok(()) => Response::Ok,
+            Err(error) => Response::Error(error.to_string()),
+        },
+        Request::ChapterRev { spine } => {
+            Response::Rev(engine.chapter_rev(spine as usize).unwrap_or(0))
+        }
         Request::ScrollChapter { index } => match engine.scroll_chapter(index as usize) {
             Ok(chapter) => Response::ScrollChapter(Some(scroll_chapter_wire(chapter))),
             Err(ebook_reader::EngineError::ChapterOutOfRange(_)) => Response::ScrollChapter(None),
@@ -429,6 +522,7 @@ fn scroll_chapter_wire(chapter: ebook_reader::ScrollChapter) -> protocol::Scroll
         top: chapter.top,
         height: chapter.height,
         ok: chapter.ok,
+        estimated: chapter.estimated,
     }
 }
 

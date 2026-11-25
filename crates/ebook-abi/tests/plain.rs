@@ -735,3 +735,90 @@ fn scroll_session_requires_a_handle_and_a_book() {
         -1
     );
 }
+
+#[test]
+fn stream_book_appends_and_replaces_without_a_file() {
+    let _guard = serial();
+    let title = CString::new("流式书").unwrap();
+    let id = eb_plain_new_book(title.as_ptr());
+    assert!(id >= 1, "new_book 失败: {}", id);
+
+    let chapter_title = CString::new("第一章").unwrap();
+    let text = CString::new("第一行\n第二行").unwrap();
+    assert_eq!(
+        eb_plain_append_chapter(id, chapter_title.as_ptr(), text.as_ptr()),
+        1
+    );
+    let rev = eb_plain_chapter_rev(id, 0);
+    assert!(rev > 0);
+
+    let replaced = CString::new("第一行\n改过的第二行").unwrap();
+    assert_eq!(
+        eb_plain_replace_chapter(id, 0, chapter_title.as_ptr(), replaced.as_ptr()),
+        0
+    );
+    assert_ne!(eb_plain_chapter_rev(id, 0), rev);
+    assert_eq!(eb_plain_spine_count(id), 1);
+
+    // 越界与空文本都是错误码，不是 panic。
+    assert_eq!(
+        eb_plain_replace_chapter(id, 9, chapter_title.as_ptr(), text.as_ptr()),
+        -2
+    );
+    let empty = CString::new("").unwrap();
+    assert_eq!(
+        eb_plain_append_chapter(id, chapter_title.as_ptr(), empty.as_ptr()),
+        -2
+    );
+
+    assert_eq!(eb_plain_clear_chapters(id), 0);
+    assert_eq!(eb_plain_spine_count(id), 0);
+    assert_eq!(eb_plain_close(id), 0);
+}
+
+#[test]
+fn a_locator_survives_a_relayout() {
+    let _guard = serial();
+    let (id, _) = open_book();
+    assert_eq!(
+        eb_plain_layout(id, 0, 400.0, 700.0, 24.0, 24.0, 24.0, 24.0, 1.0, 1.0, 0.0, 0.0, 0),
+        0
+    );
+    let hit = eb_plain_hit(id, 0, 40.0, 40.0);
+    assert!(hit.page >= 0, "第一页应该能命中正文");
+    let text = eb_plain_locator_at(id, 0, 40.0, 40.0);
+    assert!(!text.is_null());
+    let text = unsafe { std::ffi::CStr::from_ptr(text) }
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(text.split(':').count(), 3, "格式是 spine:node:offset");
+    let back = eb_plain_locate(id, CString::new(text.clone()).unwrap().as_ptr());
+    assert_eq!(back.page, hit.page);
+    assert_eq!((back.line, back.byte), (hit.line, hit.byte));
+
+    // 换页高重新排版后，同一个 locator 仍指向同一行。
+    assert_eq!(
+        eb_plain_layout(id, 0, 420.0, 760.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0),
+        0
+    );
+    let again = eb_plain_locate(id, CString::new(text).unwrap().as_ptr());
+    assert!(again.page >= 0);
+
+    let range = eb_plain_locator_range(
+        id,
+        hit.page as u32,
+        hit.line,
+        hit.byte,
+        hit.page as u32,
+        hit.line,
+        hit.byte,
+    );
+    assert!(!range.is_null());
+    let range = unsafe { std::ffi::CStr::from_ptr(range) }.to_str().unwrap();
+    assert_eq!(range.split('|').count(), 2);
+
+    let none = eb_plain_locate(id, c"not-a-locator".as_ptr());
+    assert_eq!(none.page, -1);
+    assert_eq!(eb_plain_close(id), 0);
+}

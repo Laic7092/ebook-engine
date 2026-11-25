@@ -187,6 +187,16 @@ function readDirty(r) {
   return { node: r.varint(), rect: readRect(r), reason: r.varint() };
 }
 
+function readBlock(r) {
+  return {
+    node: r.varint(),
+    rect: readRect(r),
+    anchor: r.option(readAnchor),
+    lines: r.varint(),
+    depth: r.varint(),
+  };
+}
+
 function readLayout(r) {
   return {
     version: { major: r.varint(), minor: r.varint() },
@@ -199,6 +209,7 @@ function readLayout(r) {
     runs: {
       lines: readVec(r, readLineBox),
     },
+    blocks: readVec(r, readBlock),
     dirty: readVec(r, readDirty),
     issues: readVec(r, readIssue),
     truncated: r.u8() !== 0,

@@ -182,6 +182,31 @@ int32_t eb_plain_open(const uint8_t *data, size_t len, const char *name);
 /* 关掉并释放句柄。0 好，-1 没有这个句柄。 */
 int32_t eb_plain_close(int32_t id);
 
+/* postcard 面：新建空书（流式章节），返回与 eb_open 相同的句柄；失败 NULL。 */
+EbEngine *eb_engine_new_book(const char *title);
+
+/* ---- 章节流（在线书源，G-26） ----
+ *
+ * 不传整本字节：先 eb_plain_new_book，再逐章 append/replace。
+ * 章节版本（rev）在 append/replace 后变化，宿主用它做页位图的缓存键。 */
+int32_t eb_plain_new_book(const char *title);      /* 句柄 >= 1，-1 失败 */
+/* 返回新章数（>= 1）；-1 句柄/参数错；-2 不是流式书/空文本/超单章上限。 */
+int32_t eb_plain_append_chapter(int32_t id, const char *title, const char *text);
+/* 0 成功；-1 句柄/参数错；-2 越界/空文本/超限。 */
+int32_t eb_plain_replace_chapter(int32_t id, uint32_t spine, const char *title, const char *text);
+/* 0 成功；-1 句柄错；-2 不是流式书。 */
+int32_t eb_plain_clear_chapters(int32_t id);
+/* 内容版本；0 表示没有这一章或不是流式书。 */
+uint64_t eb_plain_chapter_rev(int32_t id, uint32_t spine);
+
+/* ---- 高度索引持久化 ----
+ *
+ * 键是书指纹 + 视口 + 样式 + 字体版本；键或章数不匹配时 read 返回 0。 */
+/* 写入字节数；-1 没有滚动会话/句柄错；-3 写失败。 */
+int32_t eb_plain_scroll_index_write(int32_t id, const char *path);
+/* 1 成功；0 不匹配/不可读；-1 句柄/参数错。 */
+int32_t eb_plain_scroll_index_read(int32_t id, const char *path);
+
 /* ---- 书目 ---- */
 
 const char *eb_plain_title(int32_t id);        /* "" 没有 */
@@ -331,6 +356,12 @@ float eb_plain_scroll_progress(int32_t id, float y);
 EbLoc eb_plain_hit(int32_t id, uint32_t page, float x, float y);
 /* 位置 → 全书进度 0..1（-1 未知）。 */
 float eb_plain_progress(int32_t id, uint32_t page, uint32_t line, uint32_t byte);
+/* 稳定位置：spine:node:offset。重排/换字号后仍指向同一段原文。 */
+const char *eb_plain_locator_at(int32_t id, uint32_t page, float x, float y);
+const char *eb_plain_locator_range(int32_t id, uint32_t a_page, uint32_t a_line,
+                                   uint32_t a_byte, uint32_t b_page,
+                                   uint32_t b_line, uint32_t b_byte);
+EbLoc eb_plain_locate(int32_t id, const char *locator);
 /* 页内点 → 链接地址（"" 没有）。 */
 const char *eb_plain_link_at(int32_t id, uint32_t page, float x, float y);
 /* 当前章 "#fragment" 的行号；-1 本章没有这个锚点。 */

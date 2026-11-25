@@ -2,9 +2,9 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use ebook_ir::{
-    Anchor, BorderBox, Break, ComputedStyle, Dir, DirtyBlock, Display, Fit, FontId, Glyph, ImageId,
-    ListStyle, NodeId, NodeKind, Op, PointF, RectF, Rotate, Span, TextAlign, TextTransform,
-    Unresolved, UnresolvedReason, VerticalAlign, WhiteSpace,
+    Anchor, BlockBox, BorderBox, Break, ComputedStyle, Dir, DirtyBlock, Display, Fit, FontId,
+    Glyph, ImageId, ListStyle, NodeId, NodeKind, Op, PointF, RectF, Rotate, Span, TextAlign,
+    TextTransform, Unresolved, UnresolvedReason, VerticalAlign, WhiteSpace,
 };
 
 use crate::resolve;
@@ -77,6 +77,63 @@ pub(crate) struct Flow {
     /// 是否因为 `max_lines` 在断行阶段就停了。组装侧据此只记一条诊断，
     /// 不重复报同一个超限。
     pub(crate) truncated: bool,
+    /// 块级排版单元；父块在子块之后入表，最后由 `flow` 按 y 排序。
+    pub(crate) blocks: Vec<BlockBox>,
+}
+
+/// 窗口在文档先序里的位置。用 `[start, end)` 判断一个子树与窗口是否相交：
+/// `end <= from_start` 在窗口前，`start >= to_end` 在窗口后。
+struct NodeOrder {
+    start: Vec<u32>,
+    end: Vec<u32>,
+    from: u32,
+    to: u32,
+}
+
+impl NodeOrder {
+    fn new(doc: &ebook_ir::StyledDoc, from: NodeId, to: NodeId) -> Option<Self> {
+        let n = doc.nodes.len();
+        if from as usize >= n || to as usize >= n {
+            return None;
+        }
+        let mut start = alloc::vec![0u32; n];
+        let mut end = alloc::vec![0u32; n];
+        let mut next = 0u32;
+        let mut stack: Vec<(NodeId, bool)> = alloc::vec![(doc.root, false)];
+        while let Some((id, exit)) = stack.pop() {
+            if exit {
+                end[id as usize] = next;
+            } else {
+                start[id as usize] = next;
+                next += 1;
+                stack.push((id, true));
+                for &kid in doc.kids(id).iter().rev() {
+                    stack.push((kid, false));
+                }
+            }
+        }
+        let from = start[from as usize];
+        let to = end[to as usize];
+        // `from` 在 `to` 之后（或两棵子树不相交）不是窗口，按整章处理，
+        // 避免宿主传反了只得到一张白屏。
+        if from >= to {
+            return None;
+        }
+        Some(Self {
+            start,
+            end,
+            from,
+            to,
+        })
+    }
+
+    fn before(&self, id: NodeId) -> bool {
+        self.end[id as usize] <= self.from
+    }
+
+    fn after(&self, id: NodeId) -> bool {
+        self.start[id as usize] >= self.to
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -199,6 +256,9 @@ struct FlowCtx<'a> {
     /// 文档里是否存在任何链接。没有链接时 `line_link` 直接返回，
     /// 不必为每行、每个字符走一遍祖先链。
     has_links: bool,
+    /// 块窗口；`None` 是整章。
+    window: Option<crate::BlockWindow>,
+    order: Option<NodeOrder>,
 }
 
 pub(crate) fn flow(
@@ -206,6 +266,7 @@ pub(crate) fn flow(
     env: &LayoutEnv<'_>,
     c: &PageConstraint,
     max_lines: u32,
+    window: Option<crate::BlockWindow>,
 ) -> Flow {
     let content = c.content_size();
     let mut ctx = FlowCtx {
@@ -217,11 +278,102 @@ pub(crate) fn flow(
         next_block: 0,
         line_limit: if max_lines == 0 { u32::MAX } else { max_lines },
         has_links: doc.nodes.iter().any(|node| node.link.is_some()),
+        window,
+        order: window.and_then(|w| NodeOrder::new(doc, w.from, w.to)),
     };
     let mut y = 0.0;
     let root_w = ctx.content_w;
     let _ = ctx.block(doc.root, 0.0, &mut y, root_w, CollapsedMargin::ZERO, None);
+    if ctx.window.is_some() {
+        normalize_window(&mut ctx.flow);
+    }
     ctx.flow
+        .blocks
+        .sort_by(|a, b| a.rect.y.total_cmp(&b.rect.y).then(a.depth.cmp(&b.depth)));
+    ctx.flow
+}
+
+/// 把窗口坐标平移到 0：窗口从章中间开始时，前面的块没有排版，y 仍带着
+/// 祖先的 margin/padding。宿主拿到的 IR 应当是“这一窗从 0 开始”。
+fn normalize_window(flow: &mut Flow) {
+    let mut base = f32::INFINITY;
+    for block in &flow.blocks {
+        base = base.min(block.rect.y);
+    }
+    for item in &flow.items {
+        match item {
+            Item::Line(line) => {
+                base = base.min(line.y);
+                for run in &line.runs {
+                    base = base.min(run.origin.y);
+                }
+            }
+            Item::Op(op) => base = base.min(op_y(op)),
+        }
+    }
+    for op in &flow.decorations {
+        base = base.min(op_y(op));
+    }
+    if !base.is_finite() || base == 0.0 {
+        return;
+    }
+    shift_items(&mut flow.items, -base);
+    for op in &mut flow.decorations {
+        shift_op(op, -base);
+    }
+    for block in &mut flow.blocks {
+        block.rect.y += -base;
+    }
+    for dirty in &mut flow.dirty {
+        dirty.rect.y += -base;
+    }
+}
+
+fn shift_items(items: &mut [Item], dy: f32) {
+    for item in items {
+        match item {
+            Item::Line(line) => {
+                line.y += dy;
+                line.baseline += dy;
+                for run in &mut line.runs {
+                    run.origin.y += dy;
+                }
+                for op in &mut line.unresolved {
+                    shift_op(op, dy);
+                }
+            }
+            Item::Op(op) => shift_op(op, dy),
+        }
+    }
+}
+
+fn shift_op(op: &mut Op, dy: f32) {
+    match op {
+        Op::GlyphRun(run) => run.origin.y += dy,
+        Op::Rect { rect, .. }
+        | Op::Image { rect, .. }
+        | Op::Unresolved(Unresolved { rect, .. }) => rect.y += dy,
+        Op::Border(border) => border.rect.y += dy,
+        Op::Link { rect, .. } => rect.y += dy,
+        Op::Clip { rect, ops } => {
+            rect.y += dy;
+            for op in ops {
+                shift_op(op, dy);
+            }
+        }
+    }
+}
+
+fn op_y(op: &Op) -> f32 {
+    match op {
+        Op::GlyphRun(run) => run.origin.y,
+        Op::Rect { rect, .. }
+        | Op::Image { rect, .. }
+        | Op::Unresolved(Unresolved { rect, .. }) => rect.y,
+        Op::Border(border) => border.rect.y,
+        Op::Link { rect, .. } => rect.y,
+        Op::Clip { rect, .. } => rect.y,
+    }
 }
 
 /// 图片尺寸 = 显式 width/height，缺一项时按固有宽高比补齐；都没有就用固有尺寸。
@@ -310,6 +462,18 @@ impl<'a> FlowCtx<'a> {
         prev_mb: CollapsedMargin,
         list_pos: Option<u16>,
     ) -> BlockFlow {
+        // 窗口外的块不排版、不推进 y、不产生装饰。祖先块仍会进入，因为
+        // 目标块在它的子树里；只有完全在窗口前/后的子树才整棵跳过。
+        if let Some(order) = &self.order {
+            if order.before(id) || order.after(id) {
+                return BlockFlow {
+                    margin: CollapsedMargin::ZERO,
+                    empty: true,
+                    top: *y,
+                };
+            }
+        }
+        let block_lines = self.flow.lines;
         self.depth += 1;
         if self.depth > 128 {
             self.depth -= 1;
@@ -541,6 +705,22 @@ impl<'a> FlowCtx<'a> {
                 border_box.rect = border_rect;
             }
         }
+
+        let first_anchor = node.src.clone().or_else(|| {
+            self.flow.items[items_before..]
+                .iter()
+                .find_map(|item| match item {
+                    Item::Line(line) => line.anchor.clone(),
+                    Item::Op(_) => None,
+                })
+        });
+        self.flow.blocks.push(BlockBox {
+            node: id,
+            rect: border_rect,
+            anchor: first_anchor,
+            lines: self.flow.lines.saturating_sub(block_lines),
+            depth: self.depth.min(u16::MAX as u32) as u16,
+        });
 
         self.depth -= 1;
         BlockFlow {

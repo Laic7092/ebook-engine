@@ -64,6 +64,7 @@ fn ir() -> ebook_ir::LayoutResult {
         }],
         display: DisplayList { ops, glyphs },
         runs: RunMap { lines },
+        blocks: vec![],
         dirty: vec![],
         issues: vec![Issue {
             node: 4,
@@ -79,7 +80,7 @@ fn new_fields_survive_the_byte_contract() {
     let ir = ir();
     let bytes = codec::to_bytes(&ir).expect("encode");
     assert_eq!(&bytes[..4], &codec::MAGIC);
-    assert_eq!(&bytes[4..8], &[1, 0, 4, 0], "1.4 header");
+    assert_eq!(&bytes[4..8], &[1, 0, 5, 0], "1.5 header");
     let back: ebook_ir::LayoutResult = codec::decode(&bytes).expect("decode");
     assert_eq!(back, ir);
     assert_eq!(back.version, IR_VERSION);

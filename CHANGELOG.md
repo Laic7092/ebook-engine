@@ -7,6 +7,39 @@
 
 ### Added
 
+- **稳定位置（Locator）**：`Anchor`（章 + DOM 路径 + 字节偏移）之前只在 IR
+  内部；现在 reader/C ABI/postcard 都能用。新增 `AnchorRange`、
+  `Locator { spine, node, offset }`、`LocatorRange`，以及
+  `anchor_at` / `locate` / `anchor_range` / `locator_at` / `locate_locator` /
+  `locator_range` / `block_of_locator`。宿主可持久化书签与标注，换字号/页高
+  不失效；C 面用 `eb_plain_locator_at` / `_locator_range` / `_locate`
+  （不透明字符串 `spine:node:offset`，区间 `a|b`）。
+- **块级排版单元与窗口**：`LayoutResult.blocks: Vec<BlockBox>`（IR 1.5）记录
+  每个块节点的矩形、行数、首行锚点与深度。`LayoutOptions::window(from, to)`
+  只排指定块区间：窗口外的块直接跳过（不整形、不产 op），坐标归一化到 0；
+  `Engine::layout_block_window` + `blocks()` / `block_at_line` /
+  `block_of_anchor` 已接线。postcard 面 `Request::BlockWindow` / `Blocks`。
+- **TXT 段落锚点唯一**：段落路径 `[i]`、文本节点 `[i, 0]`，`Anchor` 不再
+  把“第 i 段”和“第 i 个文本节点”混成同一个路径。
+
+- **全书高度索引（估计 + 实测 + 持久化）**：`scroll_begin` 不再排任何章，只用章节
+  字节数 / zip 中央目录大小 + 视口 + 样式给每章一个估计高度；`scroll_chapter`
+  只实测该章，Fenwick 前缀和 O(log n) 更新。`scroll_total_height` / `scroll_progress`
+  / `scroll_spine_at` / `scroll_slice` 都只依赖当前索引，不再“先量完整本”。
+  新增 `scroll_chapters_estimated`、`scroll_metrics`、`scroll_index_export` /
+  `scroll_index_import`（键 = 书指纹 + 视口 + 样式 + 字体版本）；`ScrollChapter`
+  增加 `estimated`。字体变化只把实测值退回估计值，不再丢弃滚动会话。
+- **章节流入口（在线书源）**：`Engine::new_book` / `append_chapter` /
+  `replace_chapter` / `chapter_rev` / `clear_chapters`。不传整本字节，章节可随时
+  追加/替换；替换只让该章 IR / 高度失效。C 面 `eb_plain_new_book` /
+  `_append_chapter` / `_replace_chapter` / `_chapter_rev` / `_clear_chapters` +
+  `eb_plain_scroll_index_write` / `_read`；postcard 面 `Request::AppendChapter`
+  等；`eb_engine_new_book`。
+- **按需资源**：`EpubReader::open_lazy` / `font_bytes`（内嵌字体只留元数据）、
+  `asset_owned`（图片字节读后即丢，不再永久 `OnceCell`）、`ZipArchive::read_prefix`
+  （图片尺寸/MIME 只解压前缀）、单图 2000 万像素上限。Web 端也切到惰性字体与
+  拥有字节的资产读取。
+
 - **排版前段缓存（`Layout::layout_cached` + `FlowCache`）**：把「盒树 + 断行 +
   整形」与「分页 + 组装」切成两级。前段的键只含调用方版本号、可用宽度、行数
   预算，**刻意不含页高与 `Mode`**——分页依赖页高，断行只依赖宽度。`Engine` 已

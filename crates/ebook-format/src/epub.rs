@@ -21,6 +21,9 @@ const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PACKAGE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_NAV_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CHAPTER_BYTES: usize = 32 * 1024 * 1024;
+/// 探测图片固有尺寸/MIME 只需要文件头。避免为了一个 `image_size()` 把整张
+/// 20MB 的 JPEG 解压进内存；前缀不够时再退回全量读取。
+const IMAGE_PROBE_BYTES: usize = 512 * 1024;
 const MAX_XML_NODES: u32 = 1_000_000;
 const MAX_XML_DEPTH: usize = 128;
 /// 目录递归与条目上限。深度上限优先于 XML 解析器的节点上限，避免栈溢出。
@@ -28,6 +31,10 @@ const MAX_TOC_DEPTH: u16 = 64;
 const MAX_TOC_ENTRIES: usize = 100_000;
 const MAX_NAV_DOCS: usize = 32;
 const MAX_COVER_CANDIDATES: usize = 32;
+/// 没有章节上下文的 `#id` 解析最多扫多少章。以前是整本逐章解压+解析，
+/// 一本 500 章的书点一个无路径锚点要读完 500 章；这里给出上界，
+/// 找不到就交给宿主用带章节上下文的 `resolve_link_from`。
+const MAX_ID_SCAN: usize = 64;
 const MAX_COVER_BYTES: usize = 2 * 1024 * 1024;
 const MAX_FONTS: usize = 1_024;
 
@@ -38,12 +45,26 @@ pub struct EpubReader<'a> {
     book: Book,
     opf_path: String,
     /// 资产字节的惰性缓存。键是 manifest 里的归档路径，`None` 表示读不出来。
+    /// 只有 `open`（eager）路径会填它；`open_lazy` 的字节由宿主按需取，
+    /// 不在这里常驻。
     cells: BTreeMap<String, OnceCell<Option<Vec<u8>>>>,
     issues: RefCell<Vec<EpubIssue>>,
 }
 
 impl<'a> EpubReader<'a> {
+    /// 打开并**预读**所有内嵌字体。格式层测试/CLI 需要 `Book::fonts()[i].bytes`
+    /// 直接可用；阅读器内核请用 [`EpubReader::open_lazy`]。
     pub fn open(raw: &'a [u8]) -> Result<Self, FormatError> {
+        Self::open_with(raw, false)
+    }
+
+    /// 与 `open` 相同，但不读字体字节：`book.fonts` 先给元数据，
+    /// 需要时用 [`EpubReader::font_bytes`] 取。
+    pub fn open_lazy(raw: &'a [u8]) -> Result<Self, FormatError> {
+        Self::open_with(raw, true)
+    }
+
+    fn open_with(raw: &'a [u8], lazy_fonts: bool) -> Result<Self, FormatError> {
         let zip = ZipArchive::parse(raw).map_err(|_| FormatError::Malformed("zip"))?;
         let mut issues = Vec::new();
         for name in zip.rejected() {
@@ -91,9 +112,18 @@ impl<'a> EpubReader<'a> {
         let mut book = core::mem::take(&mut package.book);
 
         let mut cells = BTreeMap::new();
-        collect_assets(&zip, &package, &mut book, &mut cells, &mut issues);
+        // 惰性打开不需要为每个 manifest 项建一个空 OnceCell：引擎/Web 读资产走
+        // `asset_owned`，不会填这张表。eager 打开仍保留旧语义。
+        collect_assets(
+            &zip,
+            &package,
+            &mut book,
+            &mut cells,
+            &mut issues,
+            !lazy_fonts,
+        );
         book.cover_href = find_cover(&zip, &package, &book);
-        collect_fonts(&zip, &package, &mut book, &mut issues);
+        collect_fonts(&zip, &package, &mut book, &mut issues, lazy_fonts);
         collect_toc(&zip, &package, &mut book, &mut issues);
         book.issues = issues.clone();
 
@@ -190,13 +220,7 @@ impl<'a> EpubReader<'a> {
     /// 相对路径按包根目录（OPF 所在目录）解析；查找对大小写不敏感，与 zip 读取
     /// 的兜底一致。
     pub fn asset(&self, href: &str) -> Option<(&[u8], &str)> {
-        let asset = self.book.asset(href).or_else(|| {
-            if is_external(href) {
-                None
-            } else {
-                self.book.asset(&resolve_href(&self.opf_path, href))
-            }
-        })?;
+        let asset = self.asset_of(href)?;
         let key = asset.href.clone();
         let cell = self.cells.get(&key)?;
         let bytes = cell.get_or_init(|| self.zip.read(&key));
@@ -211,6 +235,52 @@ impl<'a> EpubReader<'a> {
                 None
             }
         }
+    }
+
+    /// 与 `asset` 相同，但返回**拥有**的字节，不在 `EpubReader` 里常驻。
+    /// 阅读器内核走这里：图片解码后已有自己的 RGBA 缓存，压缩字节没有必要
+    /// 留到会话结束。
+    pub fn asset_owned(&self, href: &str) -> Option<(Vec<u8>, String)> {
+        let asset = self.asset_of(href)?;
+        let key = asset.href.clone();
+        let media_type = asset.media_type.clone();
+        match self.zip.read(&key) {
+            Some(bytes) => Some((bytes, media_type)),
+            None => {
+                self.record(
+                    EpubIssueCode::MissingAsset,
+                    Some(key),
+                    "asset is missing from the archive or could not be decompressed",
+                );
+                None
+            }
+        }
+    }
+
+    fn asset_of(&self, href: &str) -> Option<&Asset> {
+        self.book.asset(href).or_else(|| {
+            if is_external(href) {
+                None
+            } else {
+                self.book.asset(&resolve_href(&self.opf_path, href))
+            }
+        })
+    }
+
+    /// 第 `index` 个内嵌字体的字节。`open_lazy` 之后才需要显式调用。
+    pub fn font_bytes(&self, index: usize) -> Option<Vec<u8>> {
+        let face = self.book.fonts.get(index)?;
+        let size = self.zip.uncompressed_size(&face.href)?;
+        if size > MAX_FONT_BYTES as u64 {
+            return None;
+        }
+        self.zip.read(&face.href)
+    }
+
+    /// 一章解压后的大小（来自 zip 中央目录，不触碰章节内容）。
+    pub fn chapter_size(&self, index: usize) -> Option<u64> {
+        let item = self.book.spine.get(index)?;
+        self.zip.uncompressed_size(&item.href)
     }
 
     /// 把书内 href 解析到 `spine` + `fragment`。没有章节上下文，因此 `#id`
@@ -290,6 +360,7 @@ impl<'a> EpubReader<'a> {
         self.book
             .spine
             .iter()
+            .take(MAX_ID_SCAN)
             .enumerate()
             .find_map(|(index, item)| {
                 let text = self.zip.read_text(&item.href)?;
@@ -415,20 +486,30 @@ fn build_chapter(
             continue;
         };
         let (size, mime) = images.entry(src.clone()).or_insert_with(|| {
-            let bytes = zip.read(&src);
             let declared = mime_exact
                 .get(src.as_str())
                 .copied()
                 .or_else(|| mime_folded.get(&src.to_ascii_lowercase()).copied());
-            let size = bytes
+            // 先拿前缀做尺寸/MIME 探测；只有前缀不够（例如 EXIF 很长）时
+            // 才退回整条解压。图片真正的字节在光栅化时按需解码。
+            let prefix = zip.read_prefix(&src, IMAGE_PROBE_BYTES);
+            let mut size = prefix
                 .as_ref()
                 .and_then(|bytes| crate::image::image_size(bytes));
-            let mime = declared.map(str::to_string).or_else(|| {
-                bytes
-                    .as_ref()
-                    .and_then(|bytes| crate::image::image_mime(bytes))
-                    .map(str::to_string)
-            });
+            let mut mime = prefix
+                .as_ref()
+                .and_then(|bytes| crate::image::image_mime(bytes));
+            if (size.is_none() || mime.is_none())
+                && !declared.is_some_and(|m| m.starts_with("image/"))
+            {
+                if let Some(bytes) = zip.read(&src) {
+                    size = size.or_else(|| crate::image::image_size(&bytes));
+                    mime = mime.or_else(|| crate::image::image_mime(&bytes));
+                }
+            }
+            let mime = declared
+                .map(str::to_string)
+                .or_else(|| mime.map(str::to_string));
             (size, mime)
         });
         if meta.size.is_none() {
@@ -734,13 +815,16 @@ fn collect_assets(
     book: &mut Book,
     cells: &mut BTreeMap<String, OnceCell<Option<Vec<u8>>>>,
     issues: &mut Vec<EpubIssue>,
+    cache_bytes: bool,
 ) {
     for item in &package.manifest {
         book.assets.push(Asset {
             href: item.href.clone(),
             media_type: item.media_type.clone(),
         });
-        cells.insert(item.href.clone(), OnceCell::new());
+        if cache_bytes {
+            cells.insert(item.href.clone(), OnceCell::new());
+        }
         if item.media_type.to_ascii_lowercase().starts_with("image/") {
             book.images.push(ImageAsset {
                 href: item.href.clone(),
@@ -836,6 +920,7 @@ fn collect_fonts(
     package: &Package,
     book: &mut Book,
     issues: &mut Vec<EpubIssue>,
+    lazy: bool,
 ) {
     let mut seen_css: BTreeMap<String, ()> = BTreeMap::new();
     for item in &package.manifest {
@@ -856,27 +941,47 @@ fn collect_fonts(
                 continue;
             }
             let href = resolve_href(&item.href, &src);
-            let Some(bytes) = zip.read(&href) else {
-                push_issue(
-                    issues,
-                    EpubIssueCode::MissingAsset,
-                    Some(href),
-                    &format!(
-                        "@font-face {} names a font that is missing from the archive",
-                        face.family
-                    ),
-                );
-                continue;
+            // 惰性模式只验证条目存在与大小，不把字节读进来。
+            let bytes = if lazy {
+                match zip.uncompressed_size(&href) {
+                    Some(size) if size <= MAX_FONT_BYTES as u64 => Vec::new(),
+                    _ => {
+                        push_issue(
+                            issues,
+                            EpubIssueCode::MissingAsset,
+                            Some(href),
+                            &format!(
+                                "@font-face {} names a font that is missing from the archive",
+                                face.family
+                            ),
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                let Some(bytes) = zip.read(&href) else {
+                    push_issue(
+                        issues,
+                        EpubIssueCode::MissingAsset,
+                        Some(href),
+                        &format!(
+                            "@font-face {} names a font that is missing from the archive",
+                            face.family
+                        ),
+                    );
+                    continue;
+                };
+                if bytes.len() > MAX_FONT_BYTES {
+                    push_issue(
+                        issues,
+                        EpubIssueCode::MissingAsset,
+                        Some(href),
+                        "embedded font is larger than the format layer accepts",
+                    );
+                    continue;
+                }
+                bytes
             };
-            if bytes.len() > MAX_FONT_BYTES {
-                push_issue(
-                    issues,
-                    EpubIssueCode::MissingAsset,
-                    Some(href),
-                    "embedded font is larger than the format layer accepts",
-                );
-                continue;
-            }
             book.fonts.push(EmbeddedFont {
                 family: face.family,
                 weight: face.weight,

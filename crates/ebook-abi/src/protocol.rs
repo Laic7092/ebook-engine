@@ -4,6 +4,7 @@
 //! 没有 JSON、没有"当前书"这种隐含状态：除了书本身，每次调用都把参数带全。
 //! 这样调用方不需要维护"我上次设置的 viewport 是什么"。
 
+use ebook_reader::{Anchor, AnchorRange, BlockBox};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -44,6 +45,16 @@ pub struct ScrollChapter {
     pub top: f32,
     pub height: f32,
     pub ok: bool,
+    /// `height` 还是估计值（还没有实测）。
+    pub estimated: bool,
+}
+
+/// 高度索引状态：总高、已实测章数、总章数。
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct ScrollMetrics {
+    pub total: f32,
+    pub measured: u32,
+    pub count: u32,
 }
 
 /// 滚动模式下的命中：章 + 章内位置 + 该行在全书流坐标里的 y。
@@ -150,6 +161,31 @@ pub enum Request {
         x: f32,
         y: f32,
     },
+    /// 页内点 → 不依赖像素的原文锚点（章 + DOM 路径 + 字节偏移）。
+    AnchorAt {
+        page: u32,
+        x: f32,
+        y: f32,
+    },
+    /// 稳定锚点 → 当前排版里的页/行/字节。
+    Locate {
+        anchor: Anchor,
+    },
+    /// 两个页内位置 → 稳定区间。
+    AnchorRange {
+        a: Loc,
+        b: Loc,
+    },
+    /// 最近一次排版的块表。
+    Blocks,
+    /// 只排一章里的一个块窗口（`from..=to` 的文档节点子树）。
+    BlockWindow {
+        spine: u32,
+        from: u32,
+        to: u32,
+        viewport: Viewport,
+        style: Style,
+    },
     LinkAt {
         page: u32,
         x: f32,
@@ -191,6 +227,33 @@ pub enum Request {
     },
     /// 全书章节表（会量完全书；想分摊开销就用 `ScrollChapter` 逐章取）。
     ScrollChapters,
+    /// 全书章节表，但不排版：未实测的章用估计高度。
+    ScrollChaptersEstimated,
+    /// 高度索引状态；不触发排版。
+    ScrollMetrics,
+    /// 导出高度索引（实测值 + 键）。
+    ScrollIndexExport,
+    /// 导入高度索引；`false` = 键/章数不匹配。
+    ScrollIndexImport {
+        bytes: Vec<u8>,
+    },
+    /// 流式书：尾部追加一章。
+    AppendChapter {
+        title: String,
+        text: String,
+    },
+    /// 流式书：替换一章。
+    ReplaceChapter {
+        spine: u32,
+        title: String,
+        text: String,
+    },
+    /// 流式书：清空所有章节。
+    ClearChapters,
+    /// 章节内容版本；`None` = 没有这一章/不是流式书。
+    ChapterRev {
+        spine: u32,
+    },
     ScrollChapter {
         index: u32,
     },
@@ -244,6 +307,9 @@ pub enum Response {
         rgba: Vec<u8>,
     },
     Hit(Option<Loc>),
+    Anchor(Option<Anchor>),
+    AnchorRange(Option<AnchorRange>),
+    Blocks(Vec<BlockBox>),
     Link(Option<String>),
     Selection(Option<Selection>),
     Progress(Option<f32>),
@@ -262,4 +328,14 @@ pub enum Response {
     ScrollHit(Option<ScrollLoc>),
     /// 位置（行/锚点）换算出的全书流坐标。
     Position(Option<f32>),
+    /// 章数（append 之后）。
+    Count(u32),
+    /// 章节内容版本。
+    Rev(u64),
+    /// 高度索引状态。
+    ScrollMetrics(ScrollMetrics),
+    /// 高度索引字节。
+    Index(Vec<u8>),
+    /// 布尔结果（例如 import 是否匹配）。
+    Flag(bool),
 }

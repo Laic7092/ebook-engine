@@ -463,10 +463,20 @@ struct Header {
     interlace: u8,
 }
 
+/// 单张图解码后的像素上限（约 80MB RGBA）。超过就返回 `None`，由宿主画
+/// 占位，而不是把 wasm/移动端线性内存一次吃穿。
+const MAX_DECODE_PIXELS: u64 = 20_000_000;
+
 /// 把支持的格式解成 RGBA8；不认识的格式返回 `None`（宿主画占位）。
 ///
 /// 分发只按魔数，不看扩展名或 MIME：书里声明的类型经常错，字节不会。
 pub fn decode_image(bytes: &[u8]) -> Option<ImageData> {
+    if let Some(size) = image_size(bytes) {
+        let pixels = (size.w.max(0.0) as u64).saturating_mul(size.h.max(0.0) as u64);
+        if pixels > MAX_DECODE_PIXELS {
+            return None;
+        }
+    }
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return decode_png(bytes);
     }

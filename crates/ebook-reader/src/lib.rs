@@ -9,15 +9,19 @@
 //! - `ebook-abi`：C ABI 静态库，给 native（iOS/Android/桌面）用。
 
 mod engine;
+mod heights;
 mod types;
 
 pub use engine::{insets, Engine};
 pub use types::{
-    Bitmap, EngineError, Limits, PageBox, ScrollChapter, ScrollLoc, SelectionResult, Style,
-    Viewport,
+    Bitmap, EngineError, Limits, Locator, LocatorRange, PageBox, ScrollChapter, ScrollLoc,
+    ScrollMetrics, SelectionResult, Style, Viewport,
 };
 
 pub use ebook_format::TocEntry;
-pub use ebook_ir::{default_text_color, EdgesF, LayoutResult, Location};
+pub use ebook_ir::{
+    default_text_color, Anchor, AnchorRange, BlockBox, EdgesF, LayoutResult, Location, NodeId,
+};
 pub use ebook_layout::SelectionRect;
+pub use ebook_layout::{BlockWindow, Mode};
 pub use ebook_render;

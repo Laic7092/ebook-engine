@@ -125,6 +125,7 @@ fn page_ir(width: f32, height: f32, ops: Vec<Op>, glyphs: Vec<Glyph>) -> LayoutR
         }],
         display: DisplayList { ops, glyphs },
         runs: RunMap::default(),
+        blocks: Vec::new(),
         dirty: Vec::new(),
         issues: Vec::new(),
         truncated: false,

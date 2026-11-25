@@ -139,12 +139,44 @@ pub struct PageBox {
 pub struct ScrollChapter {
     /// 章节在 spine 里的下标。
     pub spine: usize,
-    /// 全章在全书流坐标里的起点（等于前面所有章的高度之和）。
+    /// 全章在全书流坐标里的起点（当前高度索引里前面所有章的高度之和）。
     pub top: f32,
-    /// 本章高度：排版内容高按视口高向上取整（至少一屏）；排不出来的章是 0。
+    /// 本章高度：实测值按视口高向上取整（至少一屏）；还没实测时是估计值。
     pub height: f32,
     /// 排版成功为 `true`；失败的章高度按 0 计，不会拖垮后面的章。
     pub ok: bool,
+    /// `true` 表示 `height` 还是估计值，宿主可以再调 `scroll_chapter` 实测。
+    pub estimated: bool,
+}
+
+/// 全书高度索引的当前状态。滚动条/进度条用它决定“要不要先接受一个估计值”。
+#[derive(Clone, Copy, Debug)]
+pub struct ScrollMetrics {
+    /// 当前高度索引里的全书总高（实测 + 估计）。
+    pub total: f32,
+    /// 已经实测过的章数。
+    pub measured: u32,
+    /// 总章数。
+    pub count: u32,
+}
+
+/// 宿主可持久化的稳定位置：章 + 文档节点 + 节点内字节偏移。
+///
+/// 不依赖页号、行号、像素或滚动值；重排/换字号后仍然指向同一段原文。
+/// 章节内容变化时用 `chapter_rev` 作废。`node` 是 `Anchor.path` 解析出的
+/// 文档节点 id，C ABI 也能直接携带。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Locator {
+    pub spine: u32,
+    pub node: u32,
+    pub offset: u32,
+}
+
+/// 稳定区间：两端都是 [`Locator`]。`start == end` 时可以当点用。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LocatorRange {
+    pub start: Locator,
+    pub end: Locator,
 }
 
 /// 滚动模式下的命中结果：全书的章 + 章内位置。

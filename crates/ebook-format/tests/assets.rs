@@ -21,6 +21,19 @@ fn embedded_fonts_are_read_from_the_zip() {
 }
 
 #[test]
+fn lazy_open_keeps_font_metadata_without_the_bytes() {
+    let src = support::source(support::sample_epub3());
+    let raw = src.document().expect("document");
+    let reader = EpubReader::open_lazy(&raw).expect("reader");
+    let fonts = reader.book().fonts();
+    assert_eq!(fonts.len(), 1);
+    assert_eq!(fonts[0].family, "Book Serif");
+    assert!(fonts[0].bytes.is_empty(), "惰性打开不应预读字体字节");
+    assert_eq!(reader.font_bytes(0).as_deref(), Some(&b"FONTBYTES"[..]));
+    assert!(reader.chapter_size(0).is_some_and(|size| size > 0));
+}
+
+#[test]
 fn assets_expose_bytes_and_media_type() {
     let src = support::source(support::sample_epub3());
     let raw = src.document().expect("document");

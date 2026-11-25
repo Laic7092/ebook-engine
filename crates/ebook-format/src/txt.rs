@@ -100,7 +100,7 @@ pub fn build(bytes: &[u8]) -> StyledDoc {
     doc.root = root;
 
     let mut para_ids: Vec<NodeId> = Vec::new();
-    for block in &blocks {
+    for (i, block) in blocks.iter().enumerate() {
         // TXT 没有结构信息：认出来的章节标题行包成 H1，其余每一行各自成段。
         let heading = is_heading(block);
         let kind = if heading { Tag::H1 } else { Tag::P };
@@ -114,7 +114,11 @@ pub fn build(bytes: &[u8]) -> StyledDoc {
             parent: Some(root),
             first_child: 0,
             child_len: 0,
-            src: Some(Anchor::default()),
+            src: Some(Anchor {
+                spine: 0,
+                path: alloc::vec![i as u16],
+                offset: 0,
+            }),
             link: None,
         }));
     }
@@ -137,7 +141,7 @@ pub fn build(bytes: &[u8]) -> StyledDoc {
             child_len: 0,
             src: Some(Anchor {
                 spine: 0,
-                path: alloc::vec![i as u16],
+                path: alloc::vec![i as u16, 0],
                 offset: 0,
             }),
             link: None,
@@ -250,6 +254,11 @@ impl TxtReader {
 
     pub fn asset<'a>(&'a self, _href: &str) -> Option<(&'a [u8], &'a str)> {
         None
+    }
+
+    /// 一章的字节数（切章区间长度）。高度估计只需要这个数，不必先解析正文。
+    pub fn chapter_size(&self, index: usize) -> Option<u64> {
+        self.chapters.get(index).map(|span| span.len() as u64)
     }
 
     pub fn resolve_link_from(&self, _spine: usize, _href: &str) -> Option<LinkTarget> {
@@ -423,4 +432,168 @@ fn split_lines(raw: &str) -> Vec<String> {
         .filter(|line| !line.is_empty())
         .map(String::from)
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// 章节流（宿主在线书源）
+// ---------------------------------------------------------------------------
+
+/// 宿主按章推送的纯文本小说。没有整本字节、没有 zip：每章独立保存，
+/// 追加/替换只影响该章。`title` 由宿主给，正文按“每行一段”构建 IR。
+///
+/// 与 `TxtReader` 的区别：后者一打开就要整本解码 + 全书扫描切章；
+/// 这里 0 章起步，章可以随时 append/replace，内容版本（`rev`）用于页缓存键。
+pub struct StreamBook {
+    book: Book,
+    chapters: Vec<StreamChapter>,
+    next_rev: u64,
+    fingerprint: u64,
+}
+
+struct StreamChapter {
+    title: String,
+    text: String,
+    rev: u64,
+}
+
+impl StreamBook {
+    pub fn new(title: &str) -> Self {
+        let mut book = Book::default();
+        book.title = Some(title.to_string());
+        book.lang = Some(String::from("zh"));
+        book.language = Some(String::from("zh"));
+        let mut this = Self {
+            book,
+            chapters: Vec::new(),
+            next_rev: 1,
+            fingerprint: 0,
+        };
+        this.fingerprint = this.compute_fingerprint(title);
+        this
+    }
+
+    pub fn book(&self) -> &Book {
+        &self.book
+    }
+
+    pub fn count(&self) -> usize {
+        self.chapters.len()
+    }
+
+    pub fn fingerprint(&self) -> u64 {
+        self.fingerprint
+    }
+
+    /// 追加一章，返回新的章数。
+    pub fn append(&mut self, title: &str, text: &str) -> usize {
+        let rev = self.next_rev;
+        self.next_rev = self.next_rev.wrapping_add(1);
+        self.chapters.push(StreamChapter {
+            title: title.to_string(),
+            text: text.to_string(),
+            rev,
+        });
+        self.rebuild_meta();
+        self.fingerprint = self.compute_fingerprint(&self.book.title.clone().unwrap_or_default());
+        self.chapters.len()
+    }
+
+    /// 替换一章。章数与其它章不变；该章 `rev` 变成新值。
+    pub fn replace(&mut self, index: usize, title: &str, text: &str) -> bool {
+        let rev = self.next_rev;
+        let Some(chapter) = self.chapters.get_mut(index) else {
+            return false;
+        };
+        chapter.title = title.to_string();
+        chapter.text = text.to_string();
+        chapter.rev = rev;
+        self.next_rev = self.next_rev.wrapping_add(1);
+        self.book.toc[index].label = title.to_string();
+        self.fingerprint = self.compute_fingerprint(&self.book.title.clone().unwrap_or_default());
+        true
+    }
+
+    pub fn clear(&mut self) {
+        self.chapters.clear();
+        self.rebuild_meta();
+        self.fingerprint = self.compute_fingerprint(&self.book.title.clone().unwrap_or_default());
+    }
+
+    pub fn chapter_rev(&self, index: usize) -> Option<u64> {
+        self.chapters.get(index).map(|chapter| chapter.rev)
+    }
+
+    pub fn chapter_size(&self, index: usize) -> Option<u64> {
+        self.chapters
+            .get(index)
+            .map(|chapter| chapter.text.len() as u64)
+    }
+
+    pub fn chapter_with_anchors(
+        &self,
+        index: usize,
+    ) -> Result<(StyledDoc, Vec<ChapterLinks>, Vec<ChapterAnchor>), FormatError> {
+        let chapter = self.chapters.get(index).ok_or(FormatError::OutOfRange)?;
+        let mut doc = build(chapter.text.as_bytes());
+        doc.meta.spine = index as u32;
+        doc.meta.title = Some(chapter.title.clone());
+        doc.meta.lang = self.book.lang.clone();
+        for id in 0..doc.nodes.len() as u32 {
+            if let Some(src) = doc.node_mut(id).src.as_mut() {
+                src.spine = index as u32;
+            }
+        }
+        Ok((doc, Vec::new(), Vec::new()))
+    }
+
+    pub fn asset<'a>(&'a self, _href: &str) -> Option<(&'a [u8], &'a str)> {
+        None
+    }
+
+    pub fn resolve_link_from(&self, _spine: usize, _href: &str) -> Option<LinkTarget> {
+        None
+    }
+
+    fn rebuild_meta(&mut self) {
+        let mut spine = Vec::with_capacity(self.chapters.len());
+        let mut toc = Vec::with_capacity(self.chapters.len());
+        for (index, chapter) in self.chapters.iter().enumerate() {
+            let href = alloc::format!("stream-{index}.txt");
+            spine.push(SpineItem {
+                id: alloc::format!("s{index}"),
+                href: href.clone(),
+                media_type: String::from("text/plain"),
+                linear: true,
+            });
+            toc.push(TocEntry {
+                label: chapter.title.clone(),
+                href,
+                spine: index,
+                fragment: None,
+                depth: 0,
+            });
+        }
+        self.book.spine = spine;
+        self.book.toc = toc;
+    }
+
+    fn compute_fingerprint(&self, title: &str) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut eat = |chunk: &[u8]| {
+            for &byte in chunk {
+                hash ^= byte as u64;
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        eat(b"ebook-stream-book-v1");
+        eat(title.as_bytes());
+        eat(&(self.chapters.len() as u64).to_le_bytes());
+        for chapter in &self.chapters {
+            eat(&chapter.rev.to_le_bytes());
+            eat(&(chapter.title.len() as u64).to_le_bytes());
+            eat(chapter.title.as_bytes());
+            eat(&(chapter.text.len() as u64).to_le_bytes());
+        }
+        hash
+    }
 }
