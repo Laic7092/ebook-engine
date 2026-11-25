@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-25
+
+### Changed
+
+- 用 Rust 1.100.0 重新发布静态库：应用会把它和 legado-engine 0.2.0 一起链接，
+  两个引擎的 Rust std 必须来自同一套工具链。没有 API 变化。
+
 ### Added
 
 - **稳定位置（Locator）**：`Anchor`（章 + DOM 路径 + 字节偏移）之前只在 IR
