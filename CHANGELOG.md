@@ -5,6 +5,68 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-26
+
+C ABI 大改版：`EB_ABI_VERSION` 1 → 3。宿主需要按新头文件重编，旧句柄/旧
+`Book` 响应不兼容。
+
+### Changed
+
+- **C ABI 句柄统一为不透明指针**：`eb_open` / `eb_plain_open` 返回
+  `EbEngine *`，删掉整数句柄与进程级句柄表；两个面共用同一个句柄。
+- **字符串生命周期按句柄隔离**：删掉进程级 64 条环形缓冲，字符串存入句柄自己
+  的只增池，`eb_plain_close` 前一直有效；错误串也只增不减，旧指针不会失效。
+- **排版参数改成结构体**：`eb_plain_layout` 从 13 个裸参数改为
+  `EbLayoutOptions`，`eb_plain_scroll_slice_raw` 从 22 个参数改为
+  `EbScrollSliceOptions`；两者都带 `size` + `version`。
+- **书目与结构拆开**：postcard 面删掉把元数据、spine、fonts 混在一起的
+  `Book`，改成 `Metadata` / `Spine` / `Fonts` 三个独立请求与响应。
+- **选区改为快照**：`eb_plain_select` 返回调用方拥有的 `EbSelection *`，
+  用完 `eb_plain_selection_free`；不再有“最近一次选区”这种会被覆盖的句柄状态。
+- **链接 fragment 直接返回**：`EbLink` 增加 `fragment` 字段，删除
+  `eb_plain_resolved_fragment`；句柄上不再保存最近一次链接解析结果。
+- **图片缓存按目标像素降采样**：页面只保留缩到显示尺寸的 RGBA，点击查看原图
+  走独立的 `Engine::image_full` / `eb_plain_image_full_*`，不污染页面缓存。
+- **内存预算收紧**：图片缓存默认 24 MiB（Web 16 MiB），章节 IR 缓存 8 MB，
+  字体光栅缓存 8 MiB、整形缓存 4 MiB；新增 `trim_memory` / `memory_usage`
+  与 C 面 `eb_plain_trim_memory` / `eb_plain_memory_bytes`。
+- `eb_plain_spine` 改名为 `eb_plain_last_spine`，避免和章节数量混淆。
+
+### Added
+
+- **多作者**：内部 `Book.creators` 保留全部 `dc:creator` 的
+  `name` / `role` / `file_as`；C 面新增 `eb_plain_creator_count` /
+  `eb_plain_creator_at`，postcard 面 `Metadata.creators`。
+- **书目打包**：C 面新增 `eb_plain_metadata`（`EbMetadata`），一次取齐
+  title / creators / language / publisher / identifier / date / description /
+  cover。
+- **能力查询**：`eb_plain_capabilities` 与 `EB_CAP_EPUB/TXT/STREAM/IMAGES/FONTS`。
+- **图片枚举**：`eb_plain_image_count` / `eb_plain_image_info`，宿主终于能拿到
+  `image_id`；`eb_plain_image_full_bytes` 直接返回 EQP1 字节。
+- **内存版出图**：新增 `eb_plain_page_bytes` / `eb_plain_page_slice_bytes`，
+  不必所有位图都先落盘。
+- **零拷贝位图导出**：`RgbaSurface::into_rgba` 替代额外拷贝；`Rgba8` 标成
+  `repr(C)`，native / wasm 共享同一份缓冲布局。
+- **滚动/章节流**：`eb_plain_scroll_begin` 接收 `EbLayoutOptions`，
+  `eb_plain_scroll_slice_raw` 接收 `EbScrollSliceOptions`；
+  `eb_plain_new_book` / `_append_chapter` / `_replace_chapter` / `_chapter_rev` /
+  `_clear_chapters` 与 postcard 章节流入口。
+
+### Fixed
+
+- 修复 `ebook-cache` 布局指纹漏掉 `spacing_trim` / `hanging_punctuation` /
+  `autospacing` / `underline` / 图片来源字段，避免不同排版参数错误命中缓存。
+- 封面 MIME / 长度 / 写入共用一次解压结果，不再每次重解。
+- `eb_request` 对空指针请求做判空，避免 UB；`eb_plain_select` 对无效句柄不再
+  创建全局状态条目。
+
+### Removed
+
+- 整数句柄、全局句柄表、进程级字符串环形缓冲。
+- `eb_plain_selection_rect_count` / `_rect` / `_text` / `_start` / `_end`。
+- `eb_plain_resolved_fragment`。
+- postcard `Request::Book` / `Response::Book` / `Book` 结构体。
+
 ## [0.3.1] - 2026-11-25
 
 ### Changed
