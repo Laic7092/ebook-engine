@@ -808,9 +808,9 @@ JS 侧解码器是手写的，IR 版本、枚举 tag、字段顺序都见本文�
 并用 `_Static_assert` 对齐 Rust 侧的 `size_of`；头文件与 `pub extern "C" fn`
 的符号集合必须完全相等。
 
-### 9.1 两个面（ABI v2）
+### 9.1 两个面（ABI v3）
 
-`EB_ABI_VERSION` 已升到 2。v1 的整数句柄、进程级字符串环、13 参数
+`EB_ABI_VERSION` 已升到 3。v1 的整数句柄、进程级字符串环、13 参数
 `eb_plain_layout` 都不再保留；宿主需要按新头文件重编。
 
 | 面 | 入口 | 适合 |
@@ -834,10 +834,12 @@ JS 侧解码器是手写的，IR 版本、枚举 tag、字段顺序都见本文�
 | `eb_alloc` / `eb_request` 返回值 | 调用方 | 直到 `eb_free(ptr, len)` |
 | 其余 `const char *` | 库 | 见下 |
 | `eb_plain_open` / `eb_open` 句柄 | 调用方 | 直到 `eb_plain_close` / `eb_close` |
+| `eb_plain_select` 快照 | 调用方 | 直到 `eb_plain_selection_free` |
 
 - `eb_version` / `eb_plain_version`：静态字符串，进程生命周期。
 - `eb_last_error` / `eb_plain_last_error`：只增不减的错误历史，旧指针不会失效。
 - `eb_plain_*` 其余字符串：存在句柄自己的池里，直到 `eb_plain_close`。
+- `EbSelection` 里的 `text` / `rects` 归快照，`eb_plain_selection_free` 后失效。
 - 无效句柄（`NULL`）返回空串/`0`/`ok == 0` 的结构体；关闭后的指针不得再用。
 
 ### 9.3 版本与布局
@@ -845,7 +847,7 @@ JS 侧解码器是手写的，IR 版本、枚举 tag、字段顺序都见本文�
 - `EB_ABI_VERSION`（头文件）必须等于 `eb_abi_version()` / `eb_plain_abi_version()`。
   任何 `repr(C)` 结构体加字段、改字段顺序、改既有函数参数都要 +1；
   只加新函数不算破坏性变更。
-- `eb_struct_size(kind)` 返回各 `repr(C)` 结构体的字节数（kind 1..10），宿主可
+- `eb_struct_size(kind)` 返回各 `repr(C)` 结构体的字节数（kind 1..11），宿主可
   用来二次校验头文件与库同源。
 - `EbLayoutOptions` / `EbScrollSliceOptions` 都带 `size` + `version`；以后加字段
   只增大 `size`，不再改函数签名。
@@ -876,16 +878,18 @@ JS 侧解码器是手写的，IR 版本、枚举 tag、字段顺序都见本文�
   `eb_plain_image_full_bytes` / `_write` 用同一个 `image_id`。
 - 封面 MIME/长度/写入共用一次解压结果。
 
-### 9.6 句柄上的两份状态
+### 9.6 选区与链接的快照
 
-标量面只能返回标量/结构体，所以两样东西留在句柄上：
+- `eb_plain_select` 返回 `EbSelection *`，里面直接带 `start` / `end` /
+  `rect_count` / `text` / `rects`。快照由调用方拥有，用完调
+  `eb_plain_selection_free`；失败返回 `NULL`。不同快照互不覆盖，可以同时
+  持有。
+- `eb_plain_resolve_link` 的 `fragment` 直接放进 `EbLink`，指向句柄字符串池；
+  不再有“下一次解析覆盖”的隐藏状态。
+- 句柄上只剩封面解压缓存；选区和链接解析都没有跨调用状态。
 
-- 最近一次选区（`eb_plain_select` → `eb_plain_selection_rect` / `_text` /
-  `_start` / `_end`）。矩形数组按 `0..eb_plain_selection_rect_count` 下标取。
-- 最近一次链接解析的 fragment（`eb_plain_resolve_link` →
-  `eb_plain_resolved_fragment`）。
-
-两者都在关书时丢掉，下一次同类调用覆盖。`ok == 0` 是不存在，不是错误。
+postcard 面同样把书目和结构拆开：`Metadata` / `Spine` / `Fonts` 三个请求
+各自返回自己的响应，不再用一个 `Book` 把三样东西绑在一起。
 
 ### 9.7 错误
 

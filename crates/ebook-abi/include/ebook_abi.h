@@ -11,9 +11,9 @@
  *      `Request`/`Response` 枚举（postcard 编码，schema 见
  *      `crates/ebook-abi/src/protocol.rs`）。适合能读返回缓冲区的宿主（cgo、
  *      Swift、Rust）。
- *   2. 标量面 —— `eb_plain_*`。参数与结果都是标量/字符串/结构体，像素与封面
- *      由宿主给路径、库写文件。适合只能拿 `Pointer` 不读内存的宿主（Asuka 的
- *      `extern`，JNI 的薄包装）。
+ *   2. 标量面 —— `eb_plain_*`。参数与结果都是标量/字符串/结构体；像素与封面
+ *      既可以写文件，也可以走 `_bytes` 直接拿内存。适合只能拿 `Pointer` 不读
+ *      内存的宿主（Asuka 的 `extern`，JNI 的薄包装）。
  *
  * 两个面共用的约定：
  *
@@ -26,6 +26,8 @@
  *       * `eb_version` / `eb_plain_version`：进程生命周期
  *       * `eb_plain_last_error` / `eb_last_error`：只增不减，旧指针不会失效
  *       * 其余 `eb_plain_*` 字符串：存在句柄自己的池里，直到 `eb_plain_close`
+ *   - **选区归调用方**：`eb_plain_select` 返回 `EbSelection *`，用完必须
+ *     `eb_plain_selection_free`；快照之间互不覆盖。
  *   - **句柄是不透明指针**：`eb_open` / `eb_plain_open` 返回 `EbEngine *`，
  *     失败返回 NULL。句柄关闭后不得再使用；其余入口对 NULL 返回 0 / `-1` /
  *     空串 / `ok == 0` 的结构体，不 panic。
@@ -51,7 +53,7 @@ extern "C" {
  *     if (eb_abi_version() != EB_ABI_VERSION) { 拒绝加载 }
  *
  * 只新增函数不算破坏性变更。 */
-#define EB_ABI_VERSION 2
+#define EB_ABI_VERSION 3
 
 /* `eb_struct_size` 的 kind。宿主可用它做二次校验（头文件与库同源）。 */
 #define EB_STRUCT_PAGE_INFO 1
@@ -64,6 +66,7 @@ extern "C" {
 #define EB_STRUCT_IMAGE_INFO 8
 #define EB_STRUCT_LAYOUT_OPTIONS 9
 #define EB_STRUCT_SCROLL_SLICE_OPTIONS 10
+#define EB_STRUCT_SELECTION 11
 
 /* `eb_plain_capabilities` 的位。 */
 #define EB_CAP_EPUB 1u
@@ -108,19 +111,14 @@ const uint8_t *eb_last_error(size_t *len);
  *
  * 线格式（postcard 是 varint 长度前缀 + 字段顺序，不含字段名）：
  *
- *   Request   tag 0..15 对应
- *             Layout / Bitmap / Hit / LinkAt / Selection / Progress /
- *             FragmentLine / ResolveLink / RegisterFont / RegisterFontFace /
- *             BaseFontSize / Book / Toc / Pages / Limits / Ping
- *             tag 16..25 是连续滚动（Scroll / ScrollChapters / ScrollChapter /
- *             ScrollHeight / ScrollSpineAt / ScrollBand / ScrollHit /
- *             ScrollLineY / ScrollAnchorY / ScrollProgress），**追加在末尾**，
- *             老 tag 不变
- *   Response  tag 0..13 对应
- *             Ok / Pong / Book / Toc / Pages / Bitmap / Hit / Link /
- *             Selection / Progress / Line / Target / Font / Number / Error
- *             tag 14..18 是滚动的响应（ScrollChapters / ScrollChapter /
- *             ScrollSpine / ScrollHit / Position），同样追加在末尾
+ *   Request   前 16 个是 Layout / Bitmap / Hit / LinkAt / Selection /
+ *             Progress / FragmentLine / ResolveLink / RegisterFont /
+ *             RegisterFontFace / BaseFontSize / Metadata / Toc / Pages /
+ *             Limits / Ping；之后是连续滚动和流式章节，Spine / Fonts 追加在
+ *             枚举末尾
+ *   Response  Ok / Pong / Metadata / Toc / Pages / Bitmap / Hit / Link /
+ *             Selection / Progress / Line / Target / Font / Number / Error，
+ *             滚动响应追加在后面；Spine / Fonts 追加在枚举末尾
  *
  * 字段类型与顺序见 `crates/ebook-abi/src/protocol.rs`；同一份 schema 也被
  * `tests/ffi.rs` 逐字段走一遍。标量面能做的事这里都能做（还多一个
@@ -156,12 +154,24 @@ typedef struct EbSelectionRect {
   float h;
 } EbSelectionRect;
 
-/* 链接解析结果。ok == 0 表示解不出。外部链接也算解出（external == 1）。 */
+/* 链接解析结果。ok == 0 表示解不出。外部链接也算解出（external == 1）。
+ * fragment 指向句柄字符串池（不带 '#'），在 eb_plain_close 前有效。 */
 typedef struct EbLink {
   int32_t ok;
-  int32_t spine;     /* -1：不在阅读顺序里 */
-  int32_t external;  /* 1 外部链接，0 书内 */
+  int32_t spine;          /* -1：不在阅读顺序里 */
+  int32_t external;       /* 1 外部链接，0 书内 */
+  const char *fragment;   /* 没有 fragment 时是空串 */
 } EbLink;
+
+/* 选区快照。由 eb_plain_select 分配，调用方必须 eb_plain_selection_free。
+ * text / rects 归快照所有，不要单独 free。 */
+typedef struct EbSelection {
+  EbLoc start;
+  EbLoc end;
+  uint32_t rect_count;
+  const char *text;
+  const EbSelectionRect *rects;
+} EbSelection;
 
 /* 连续滚动会话里的一章。ok == 0 表示这一章排不出来（height 按 0 计）。 */
 typedef struct EbScrollChapter {
@@ -443,20 +453,17 @@ const char *eb_plain_link_at(EbEngine *engine, uint32_t page, float x, float y);
 int32_t eb_plain_fragment_line(EbEngine *engine, const char *fragment);
 
 /* 选区。端点按 (page, line, byte) 给，顺序无所谓（库会规范化）。
- * 返回矩形块数（>= 0）；-1 句柄/排版缺失，-2 端点越界。
- * 结果留在句柄上，用下面几个取；下一次 eb_plain_select 覆盖。 */
-int32_t eb_plain_select(EbEngine *engine, uint32_t a_page, uint32_t a_line, uint32_t a_byte,
-                        uint32_t b_page, uint32_t b_line, uint32_t b_byte);
-uint32_t eb_plain_selection_rect_count(EbEngine *engine);
-EbSelectionRect eb_plain_selection_rect(EbEngine *engine, uint32_t index);
-const char *eb_plain_selection_text(EbEngine *engine);   /* "" 没有 */
-EbLoc eb_plain_selection_start(EbEngine *engine);        /* page == -1 没有 */
-EbLoc eb_plain_selection_end(EbEngine *engine);
+ * 成功返回快照指针，失败 NULL（原因见 eb_plain_last_error）。
+ * 宿主用完必须 eb_plain_selection_free；快照之间互不覆盖。 */
+EbSelection *eb_plain_select(EbEngine *engine, uint32_t a_page, uint32_t a_line,
+                             uint32_t a_byte, uint32_t b_page, uint32_t b_line,
+                             uint32_t b_byte);
+/* 释放选区快照；NULL 安全，同一快照只能释放一次。 */
+void eb_plain_selection_free(EbSelection *selection);
 
 /* 在最近一次排版的那一章里解析书内链接。ok == 0 表示解不出。
- * fragment 单独取，在下一次解析前有效。 */
+ * fragment 就在返回值里，不带 '#'。 */
 EbLink eb_plain_resolve_link(EbEngine *engine, const char *href);
-const char *eb_plain_resolved_fragment(EbEngine *engine); /* 不带 '#'，"" 没有 */
 
 /* 资源上限：单页像素与书级图片缓存（解码后的 RGBA 字节数）。
  * 默认 4096×4096 / 24 MiB。0 好，-1 句柄无效。 */

@@ -111,8 +111,9 @@ pub struct Creator {
     pub file_as: Option<String>,
 }
 
+/// 书目元数据。和结构（spine/fonts）分开，宿主切书、更新封面时不必重传目录。
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Book {
+pub struct Metadata {
     pub title: Option<String>,
     pub language: Option<String>,
     /// 第一作者，等价于 `creators.first()`；单作者宿主直接用。
@@ -124,8 +125,6 @@ pub struct Book {
     pub date: Option<String>,
     pub description: Option<String>,
     pub cover: Option<String>,
-    pub spine: Vec<SpineItem>,
-    pub fonts: Vec<FontFace>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -222,7 +221,7 @@ pub enum Request {
         index: u32,
     },
     BaseFontSize,
-    Book,
+    Metadata,
     Toc,
     Pages,
     Limits {
@@ -302,6 +301,10 @@ pub enum Request {
     ScrollProgress {
         y: f32,
     },
+    /// 阅读顺序（manifest 过滤后的线性项）。
+    Spine,
+    /// 书内嵌字体面。
+    Fonts,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -309,7 +312,7 @@ pub enum Response {
     /// 成功但没有返回值。
     Ok,
     Pong,
-    Book(Book),
+    Metadata(Metadata),
     Toc(Vec<TocEntry>),
     Pages(Vec<Page>),
     Bitmap {
@@ -349,4 +352,8 @@ pub enum Response {
     Index(Vec<u8>),
     /// 布尔结果（例如 import 是否匹配）。
     Flag(bool),
+    /// 阅读顺序。
+    Spine(Vec<SpineItem>),
+    /// 内嵌字体面。
+    Fonts(Vec<FontFace>),
 }

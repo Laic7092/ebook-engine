@@ -76,12 +76,19 @@ fn pings() {
 fn opens_and_reports_the_book() {
     let _guard = serial();
     let engine = open();
-    match call(engine, &Request::Book) {
-        Response::Book(book) => {
-            assert!(!book.spine.is_empty());
-            assert!(book.title.is_some() || book.language.is_some());
+    match call(engine, &Request::Metadata) {
+        Response::Metadata(meta) => {
+            assert!(meta.title.is_some() || meta.language.is_some());
         }
-        other => panic!("期望 Book，拿到 {other:?}"),
+        other => panic!("期望 Metadata，拿到 {other:?}"),
+    }
+    match call(engine, &Request::Spine) {
+        Response::Spine(spine) => assert!(!spine.is_empty()),
+        other => panic!("期望 Spine，拿到 {other:?}"),
+    }
+    match call(engine, &Request::Fonts) {
+        Response::Fonts(_) => {}
+        other => panic!("期望 Fonts，拿到 {other:?}"),
     }
     match call(engine, &Request::Toc) {
         Response::Toc(entries) => {

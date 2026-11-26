@@ -616,40 +616,46 @@ fn selection_round_trip() {
     let _guard = serial();
     let (engine, _) = open_book();
     // 没排版时选不出来，但不干预。
-    assert!(eb_plain_select(engine, 0, 0, 0, 0, 1, 0) < 0);
+    assert!(eb_plain_select(engine, 0, 0, 0, 0, 1, 0).is_null());
     let rc = layout(
         engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0.0, 0,
     );
     assert_eq!(rc, 0);
 
-    let count = eb_plain_select(engine, 0, 0, 0, 0, 2, 0);
-    assert!(count > 0, "跨行选区应该有矩形块: {count}");
-    assert_eq!(eb_plain_selection_rect_count(engine), count as u32);
+    let selection = eb_plain_select(engine, 0, 0, 0, 0, 2, 0);
+    assert!(!selection.is_null(), "跨行选区应该有结果");
+    let count = unsafe { (*selection).rect_count };
+    assert!(count > 0);
 
-    let text = eb_plain_selection_text(engine);
+    let text = unsafe { (*selection).text };
     assert!(!text.is_null());
     assert!(!unsafe { std::ffi::CStr::from_ptr(text) }
         .to_bytes()
         .is_empty());
 
-    for index in 0..count as u32 {
-        let rect = eb_plain_selection_rect(engine, index);
+    for index in 0..count {
+        let rect = unsafe { *(*selection).rects.add(index as usize) };
         assert_eq!(rect.ok, 1, "第 {index} 块");
         assert!(rect.w > 0.0 && rect.h > 0.0, "第 {index} 块是空矩形");
     }
-    let out = eb_plain_selection_rect(engine, count as u32 + 5);
-    assert_eq!(out.ok, 0, "越界下标应给 ok == 0");
 
-    let start = eb_plain_selection_start(engine);
-    let end = eb_plain_selection_end(engine);
+    let start = unsafe { (*selection).start };
+    let end = unsafe { (*selection).end };
     assert_eq!(start.page, 0, "起点应在第 0 页");
     assert!(end.page >= 0);
     assert!((0.0..=1.0).contains(&start.progress));
 
-    // 端点越界：-2，且把上一份选区清掉（不留下一半新一半旧的结果）。
-    assert_eq!(eb_plain_select(engine, 0, 0, 0, 99, 0, 0), -2);
-    assert_eq!(eb_plain_selection_rect_count(engine), 0);
-    assert_eq!(eb_plain_selection_start(engine).page, -1);
+    // 两份快照互不覆盖：释放前一份，后一份仍然可读。
+    let other = eb_plain_select(engine, 0, 0, 0, 0, 1, 0);
+    assert!(!other.is_null());
+    eb_plain_selection_free(selection);
+    let other_text = unsafe { std::ffi::CStr::from_ptr((*other).text) };
+    assert!(!other_text.to_bytes().is_empty());
+    eb_plain_selection_free(other);
+    eb_plain_selection_free(std::ptr::null_mut());
+
+    // 端点越界：NULL；上一份快照早就独立释放了，不受影响。
+    assert!(eb_plain_select(engine, 0, 0, 0, 99, 0, 0).is_null());
     eb_plain_close(engine);
 }
 
@@ -680,7 +686,7 @@ fn resolves_links_and_fragments() {
     assert_eq!(link.spine, 1);
     assert_eq!(link.external, 0);
     assert_eq!(
-        unsafe { std::ffi::CStr::from_ptr(eb_plain_resolved_fragment(engine)) }.to_bytes(),
+        unsafe { std::ffi::CStr::from_ptr(link.fragment) }.to_bytes(),
         b""
     );
 
@@ -689,7 +695,7 @@ fn resolves_links_and_fragments() {
     assert_eq!(link.ok, 1);
     assert_eq!(link.spine, 1);
     assert_eq!(
-        unsafe { std::ffi::CStr::from_ptr(eb_plain_resolved_fragment(engine)) }.to_bytes(),
+        unsafe { std::ffi::CStr::from_ptr(link.fragment) }.to_bytes(),
         b"snow"
     );
 
@@ -704,13 +710,11 @@ fn resolves_links_and_fragments() {
     assert_eq!(link.external, 1);
     assert_eq!(link.spine, -1);
 
-    // 解不出的 href：ok == 0，且不留下上一次的 fragment。
+    // 解不出的 href：ok == 0，fragment 是空串，和上一次解析无关。
+    let missing = eb_plain_resolve_link(engine, c"nope.xhtml#x".as_ptr());
+    assert_eq!(missing.ok, 0);
     assert_eq!(
-        eb_plain_resolve_link(engine, c"nope.xhtml#x".as_ptr()).ok,
-        0
-    );
-    assert_eq!(
-        unsafe { std::ffi::CStr::from_ptr(eb_plain_resolved_fragment(engine)) }.to_bytes(),
+        unsafe { std::ffi::CStr::from_ptr(missing.fragment) }.to_bytes(),
         b""
     );
 

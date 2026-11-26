@@ -2,7 +2,8 @@
 //!
 //! `eb_request` 收发 postcard，适合 cgo 与 Swift（能读返回的缓冲区）；Asuka
 //! 的 `extern` 只能拿 `Pointer`（不读内存），所以这里每条能力一个函数，
-//! 参数与结果都是标量、字符串、结构体，路径由宿主给，数据写文件。
+//! 参数与结果都是标量、字符串、结构体；数据既可以写文件，也可以走 `_bytes`
+//! 直接返回内存。
 //!
 //! 书用不透明指针 `EbEngine *`：`eb_plain_open` / `eb_plain_new_book` 返回，
 //! 失败 NULL；`eb_plain_close` 释放。关闭后不得再使用。
@@ -11,9 +12,9 @@
 //! 安全。返回的字符串存在句柄自己的只增池里，A 线程取到、B 线程用也可以，
 //! 直到句柄关闭。
 //!
-//! 唯一不是「无状态」的地方：选区的矩形数组没地方返回，所以 `eb_plain_select`
-//! 把最近一次选区留在句柄上，再用 `eb_plain_selection_rect` 按下标取；
-//! `eb_plain_resolve_link` 的 fragment 同理。关书时一并丢掉。
+//! 选区是**调用方拥有的快照**：`eb_plain_select` 返回 `EbSelection *`，用完
+//! 调 `eb_plain_selection_free`；链接解析把 fragment 直接放进 `EbLink`。
+//! 句柄上只留封面解压缓存，不再留「最近一次选区/链接」。
 //!
 //! 位图落盘格式（`eb_plain_page_raw`）：
 //!
@@ -39,14 +40,14 @@
 //! 落盘先写 `{path}.{pid}.{seq}.part` 再 `rename`：宿主在别的线程用「文件存在」
 //! 判断可用，不能让它读到只写了一半的 `EQP1`。
 
-use std::ffi::{c_char, CStr};
+use std::ffi::{c_char, CStr, CString};
 use std::fs::File;
 use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use ebook_reader::{EdgesF, SelectionResult, Style, Viewport};
+use ebook_reader::{EdgesF, Style, Viewport};
 
 use crate::EbEngine;
 
@@ -64,6 +65,7 @@ pub const EB_STRUCT_METADATA: u32 = 7;
 pub const EB_STRUCT_IMAGE_INFO: u32 = 8;
 pub const EB_STRUCT_LAYOUT_OPTIONS: u32 = 9;
 pub const EB_STRUCT_SCROLL_SLICE_OPTIONS: u32 = 10;
+pub const EB_STRUCT_SELECTION: u32 = 11;
 
 pub const EB_CAP_EPUB: u32 = 1;
 pub const EB_CAP_TXT: u32 = 2;
@@ -110,7 +112,22 @@ pub struct EbSelectionRect {
     pub h: f32,
 }
 
-/// 链接解析结果（`extern struct`）。fragment 用 `eb_plain_resolved_fragment` 取。
+/// 选区快照（由 `eb_plain_select` 分配，宿主用 `eb_plain_selection_free`
+/// 释放）。`text` 是 NUL 结尾的 UTF-8；`rects` 是连续数组。
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct EbSelection {
+    pub start: EbLoc,
+    pub end: EbLoc,
+    pub rect_count: u32,
+    /// 原文，归这个快照；不要单独 free。
+    pub text: *mut c_char,
+    /// `rect_count` 块矩形，归这个快照；不要单独 free。
+    pub rects: *mut EbSelectionRect,
+}
+
+/// 链接解析结果（`extern struct`）。`fragment` 指向句柄字符串池，直到
+/// `eb_plain_close` 前有效；没有 fragment 时是空串。
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct EbLink {
@@ -120,6 +137,8 @@ pub struct EbLink {
     pub spine: i32,
     /// 1 外部链接，0 书内。
     pub external: i32,
+    /// 不带 `#`。
+    pub fragment: *const c_char,
 }
 
 /// 一次取齐的书目信息。所有字符串都指向句柄自己的池，在 `eb_plain_close`
@@ -226,14 +245,9 @@ pub struct EbScrollLoc {
     pub y: f32,
 }
 
-/// 句柄之外的状态：最近一次选区与最近一次链接解析。
-///
-/// 标量面只能返回标量/结构体，选区的矩形数组没地方放，所以在这里留一份，
-/// 由 `eb_plain_selection_rect` 按下标取。关书时一并清掉。
+/// 句柄上唯一不是「请求-响应」的状态：封面解压缓存。
 #[derive(Default)]
 pub(crate) struct Extras {
-    selection: Option<SelectionResult>,
-    link: Option<Resolved>,
     cover: CoverState,
 }
 
@@ -243,11 +257,6 @@ enum CoverState {
     Unknown,
     None,
     Some(Arc<Vec<u8>>, String),
-}
-
-/// `resolve_link` 的标量版：结构体带 `spine`/`external`，fragment 单独取。
-struct Resolved {
-    fragment: Option<String>,
 }
 
 /// 无效/空字符串统一返回这个静态指针，宿主不必判 null。
@@ -291,17 +300,6 @@ fn with_string(
     intern(engine, value.as_deref().unwrap_or(""))
 }
 
-fn with_extras<T>(engine: *mut EbEngine, f: impl FnOnce(&mut Extras) -> T) -> Option<T> {
-    if engine.is_null() {
-        return None;
-    }
-    let engine = unsafe { &*engine };
-    Some(f(&mut engine
-        .extras
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())))
-}
-
 fn c_path(path: *const c_char) -> Option<String> {
     if path.is_null() {
         return None;
@@ -332,6 +330,14 @@ fn guard(f: impl FnOnce() -> i32) -> i32 {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| {
         crate::set_last_error("内部 panic");
         -1
+    })
+}
+
+/// 返回指针的入口用这个：panic 变成 null。
+fn guard_ptr<T>(f: impl FnOnce() -> *mut T) -> *mut T {
+    catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| {
+        crate::set_last_error("内部 panic");
+        std::ptr::null_mut()
     })
 }
 
@@ -1727,11 +1733,9 @@ pub extern "C" fn eb_plain_fragment_line(engine: *mut EbEngine, fragment: *const
 
 // ---------------------------------------------------------------- 选区
 
-/// 做一次选区，端点按 (`page`, `line`, `byte`) 给。返回矩形块数（>=0）。
-///
-/// 负数是失败：-1 句柄/排版缺失，-2 端点越界或选区为空。结果留在句柄上，
-/// 用 `eb_plain_selection_rect` / `eb_plain_selection_text` 取，下一次
-/// `eb_plain_select` 覆盖。
+/// 做一次选区，端点按 (`page`, `line`, `byte`) 给。成功返回一个由调用方
+/// 拥有的快照，用完必须 `eb_plain_selection_free`；失败返回 NULL，原因见
+/// `eb_plain_last_error`。端点顺序无所谓，库会规范化。
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
 pub extern "C" fn eb_plain_select(
@@ -1742,8 +1746,8 @@ pub extern "C" fn eb_plain_select(
     b_page: u32,
     b_line: u32,
     b_byte: u32,
-) -> i32 {
-    guard(|| {
+) -> *mut EbSelection {
+    guard_ptr(|| {
         let location = |page, line, byte| ebook_reader::Location { page, line, byte };
         let selection = with_engine(engine, |core| {
             core.selection(
@@ -1751,121 +1755,95 @@ pub extern "C" fn eb_plain_select(
                 location(b_page, b_line, b_byte),
             )
         });
-        match selection {
-            Some(Some(selection)) if !selection.rects.is_empty() => {
-                let count = selection.rects.len() as i32;
-                with_extras(engine, |extras| extras.selection = Some(selection));
-                count
-            }
-            Some(_) => {
-                crate::set_last_error("端点越界，或选区为空");
-                with_extras(engine, |extras| extras.selection = None);
-                -2
-            }
-            None => {
-                crate::set_last_error("句柄无效");
-                -1
-            }
-        }
-    })
-}
-
-/// 最近一次选区的矩形块数（没选过 / 关书后 0）。
-#[no_mangle]
-pub extern "C" fn eb_plain_selection_rect_count(engine: *mut EbEngine) -> u32 {
-    with_extras(engine, |extras| {
-        extras
-            .selection
-            .as_ref()
-            .map_or(0, |selection| selection.rects.len() as u32)
-    })
-    .unwrap_or(0)
-}
-
-/// 最近一次选区的第 `index` 块矩形。`ok == 0` 表示没有这一块。
-#[no_mangle]
-pub extern "C" fn eb_plain_selection_rect(engine: *mut EbEngine, index: u32) -> EbSelectionRect {
-    let none = EbSelectionRect {
-        ok: 0,
-        page: 0,
-        x: 0.0,
-        y: 0.0,
-        w: 0.0,
-        h: 0.0,
-    };
-    let rect = with_extras(engine, |extras| {
-        extras
-            .selection
-            .as_ref()
-            .and_then(|selection| selection.rects.get(index as usize))
-            .copied()
-    })
-    .flatten();
-    match rect {
-        Some(rect) => EbSelectionRect {
-            ok: 1,
-            page: rect.page,
-            x: rect.rect.x,
-            y: rect.rect.y,
-            w: rect.rect.w,
-            h: rect.rect.h,
-        },
-        None => none,
-    }
-}
-
-/// 最近一次选区的原文（`""` 没有）。
-#[no_mangle]
-pub extern "C" fn eb_plain_selection_text(engine: *mut EbEngine) -> *const c_char {
-    let text = with_extras(engine, |extras| {
-        extras
-            .selection
-            .as_ref()
-            .map(|selection| selection.text.clone())
-    })
-    .flatten();
-    intern(engine, text.as_deref().unwrap_or(""))
-}
-
-/// 选区规范化后的起点（`page == -1` 没有）。
-#[no_mangle]
-pub extern "C" fn eb_plain_selection_start(engine: *mut EbEngine) -> EbLoc {
-    selection_endpoint(engine, true)
-}
-
-/// 选区规范化后的终点（`page == -1` 没有）。
-#[no_mangle]
-pub extern "C" fn eb_plain_selection_end(engine: *mut EbEngine) -> EbLoc {
-    selection_endpoint(engine, false)
-}
-
-fn selection_endpoint(engine: *mut EbEngine, start: bool) -> EbLoc {
-    let none = EbLoc {
-        page: -1,
-        line: 0,
-        byte: 0,
-        progress: -1.0,
-    };
-    let location = with_extras(engine, |extras| {
-        extras.selection.as_ref().map(|selection| {
-            if start {
-                selection.start
+        let Some(Some(selection)) = selection else {
+            crate::set_last_error(if selection.is_none() {
+                "句柄无效"
             } else {
-                selection.end
-            }
+                "端点越界，或选区为空"
+            });
+            return std::ptr::null_mut();
+        };
+        if selection.rects.is_empty() {
+            crate::set_last_error("端点越界，或选区为空");
+            return std::ptr::null_mut();
+        }
+
+        let endpoints = with_engine(engine, |core| {
+            let start = EbLoc {
+                page: selection.start.page as i32,
+                line: selection.start.line,
+                byte: selection.start.byte,
+                progress: core.progress(selection.start).unwrap_or(-1.0),
+            };
+            let end = EbLoc {
+                page: selection.end.page as i32,
+                line: selection.end.line,
+                byte: selection.end.byte,
+                progress: core.progress(selection.end).unwrap_or(-1.0),
+            };
+            (start, end)
         })
+        .unwrap_or_else(|| {
+            (
+                EbLoc {
+                    page: -1,
+                    line: 0,
+                    byte: 0,
+                    progress: -1.0,
+                },
+                EbLoc {
+                    page: -1,
+                    line: 0,
+                    byte: 0,
+                    progress: -1.0,
+                },
+            )
+        });
+
+        let text = CString::new(selection.text.replace('\0', ""))
+            .unwrap_or_default()
+            .into_raw();
+        let rects: Vec<EbSelectionRect> = selection
+            .rects
+            .iter()
+            .map(|rect| EbSelectionRect {
+                ok: 1,
+                page: rect.page,
+                x: rect.rect.x,
+                y: rect.rect.y,
+                w: rect.rect.w,
+                h: rect.rect.h,
+            })
+            .collect();
+        let rect_count = rects.len() as u32;
+        let rects = Box::into_raw(rects.into_boxed_slice()) as *mut EbSelectionRect;
+
+        Box::into_raw(Box::new(EbSelection {
+            start: endpoints.0,
+            end: endpoints.1,
+            rect_count,
+            text,
+            rects,
+        }))
     })
-    .flatten();
-    let Some(location) = location else {
-        return none;
-    };
-    with_engine(engine, |core| EbLoc {
-        page: location.page as i32,
-        line: location.line,
-        byte: location.byte,
-        progress: core.progress(location).unwrap_or(-1.0),
-    })
-    .unwrap_or(none)
+}
+
+/// 释放 `eb_plain_select` 返回的选区。NULL 安全；同一快照只能释放一次。
+#[no_mangle]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub extern "C" fn eb_plain_selection_free(selection: *mut EbSelection) {
+    if selection.is_null() {
+        return;
+    }
+    let selection = unsafe { Box::from_raw(selection) };
+    if !selection.text.is_null() {
+        drop(unsafe { CString::from_raw(selection.text) });
+    }
+    if !selection.rects.is_null() {
+        let rects =
+            std::ptr::slice_from_raw_parts_mut(selection.rects, selection.rect_count as usize);
+        drop(unsafe { Box::from_raw(rects) });
+    }
 }
 
 // ---------------------------------------------------------------- 链接与上限
@@ -1873,13 +1851,14 @@ fn selection_endpoint(engine: *mut EbEngine, start: bool) -> EbLoc {
 /// 在最近一次排版的那一章里解析书内链接（href 可以是相对路径或 `#fragment`）。
 ///
 /// `ok == 0` 表示解不出（外部链接也算解出：`external == 1`，`spine == -1`）。
-/// fragment 用 `eb_plain_resolved_fragment` 取，下一次解析覆盖。
+/// `fragment` 直接放在返回值里，不带 `#`，指向句柄字符串池。
 #[no_mangle]
 pub extern "C" fn eb_plain_resolve_link(engine: *mut EbEngine, href: *const c_char) -> EbLink {
     let none = EbLink {
         ok: 0,
         spine: -1,
         external: 0,
+        fragment: empty_c_str(),
     };
     let Some(href) = c_path(href) else {
         crate::set_last_error("链接为空");
@@ -1891,10 +1870,9 @@ pub extern "C" fn eb_plain_resolve_link(engine: *mut EbEngine, href: *const c_ch
     };
     let Some(target) = resolved else {
         crate::set_last_error("这本书里没有这个链接");
-        with_extras(engine, |extras| extras.link = None);
         return none;
     };
-    let wire = EbLink {
+    EbLink {
         ok: 1,
         // 外部链接在 reader 里 `spine` 是 0（相对当前章起算没意义），
         // 标量面统一说 -1，宿主不必再判 `external` 才能用 `spine`。
@@ -1904,23 +1882,8 @@ pub extern "C" fn eb_plain_resolve_link(engine: *mut EbEngine, href: *const c_ch
             target.spine as i32
         },
         external: i32::from(target.external),
-    };
-    with_extras(engine, |extras| {
-        extras.link = Some(Resolved {
-            fragment: target.fragment,
-        })
-    });
-    wire
-}
-
-/// 最近一次 `eb_plain_resolve_link` 的 fragment（不带 `#`；`""` 没有）。
-#[no_mangle]
-pub extern "C" fn eb_plain_resolved_fragment(engine: *mut EbEngine) -> *const c_char {
-    let fragment = with_extras(engine, |extras| {
-        extras.link.as_ref().and_then(|link| link.fragment.clone())
-    })
-    .flatten();
-    intern(engine, fragment.as_deref().unwrap_or(""))
+        fragment: intern(engine, target.fragment.as_deref().unwrap_or("")),
+    }
 }
 
 /// 释放可再生的缓存：跨章 IR、断行缓存、图片 RGBA、字体位图。

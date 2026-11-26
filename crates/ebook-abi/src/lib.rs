@@ -24,8 +24,8 @@ use ebook_reader::EdgesF;
 use ebook_reader::{Engine, Limits, Location, SelectionRect as CoreRect, Style, Viewport};
 
 use protocol::{
-    Book, Creator, FontFace, Insets, Link, Loc, Page, Request, Response, Selection, SelectionRect,
-    SpineItem, TocEntry,
+    Creator, FontFace, Insets, Link, Loc, Metadata, Page, Request, Response, Selection,
+    SelectionRect, SpineItem, TocEntry,
 };
 
 /// `repr(C)` 结构体与函数签名的布局版本。
@@ -36,9 +36,9 @@ use protocol::{
 ///
 /// 只加新函数、新枚举变体不算破坏（句柄、缓冲区契约不变），但结构体加字段
 /// 一定算：C 是按偏移读的。
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 
-/// 不透明句柄。所有状态都挂在书上：书、返回字符串、选区/链接结果。
+/// 不透明句柄。所有状态都挂在书上：书、返回字符串、封面缓存。
 ///
 /// 字符串是**只增不减**的 arena：同一个字符串只分配一次，指针在 `eb_close`
 /// 之前一直有效。这样宿主不需要“取完马上拷走”，也不会被另一本书的查询挤掉。
@@ -182,7 +182,7 @@ pub extern "C" fn eb_abi_version() -> u32 {
 }
 
 /// `repr(C)` 结构体的字节数，供宿主校验头文件与本库同源。`kind` 见头文件
-/// （1 `EbPageInfo`、2 `EbLoc`、3 `EbSelectionRect`、4 `EbLink`）；未知返回 0。
+/// （1..11）；未知返回 0。
 #[no_mangle]
 pub extern "C" fn eb_struct_size(kind: u32) -> usize {
     match kind {
@@ -196,6 +196,7 @@ pub extern "C" fn eb_struct_size(kind: u32) -> usize {
         plain::EB_STRUCT_IMAGE_INFO => std::mem::size_of::<plain::EbImageInfo>(),
         plain::EB_STRUCT_LAYOUT_OPTIONS => std::mem::size_of::<plain::EbLayoutOptions>(),
         plain::EB_STRUCT_SCROLL_SLICE_OPTIONS => std::mem::size_of::<plain::EbScrollSliceOptions>(),
+        plain::EB_STRUCT_SELECTION => std::mem::size_of::<plain::EbSelection>(),
         _ => 0,
     }
 }
@@ -532,7 +533,9 @@ fn dispatch(engine: &mut Engine, request: Request) -> Response {
             Err(message) => Response::Error(message),
         },
         Request::BaseFontSize => Response::Number(engine.base_font_size()),
-        Request::Book => Response::Book(book_wire(engine)),
+        Request::Metadata => Response::Metadata(metadata_wire(engine)),
+        Request::Spine => Response::Spine(spine_wire(engine)),
+        Request::Fonts => Response::Fonts(fonts_wire(engine)),
         Request::Toc => Response::Toc(engine.toc().iter().map(toc_wire).collect()),
         Request::Pages => {
             // 排版结果没变时，宿主随时可以重新要页列表（例如换了窗口大小前的兜底）。
@@ -650,9 +653,9 @@ fn toc_wire(entry: &ebook_reader::TocEntry) -> TocEntry {
     }
 }
 
-fn book_wire(engine: &Engine) -> Book {
+fn metadata_wire(engine: &Engine) -> Metadata {
     let book = engine.book();
-    Book {
+    Metadata {
         title: book.title.clone(),
         language: book.lang.clone(),
         creator: book.creator.clone(),
@@ -670,26 +673,34 @@ fn book_wire(engine: &Engine) -> Book {
         date: book.date.clone(),
         description: book.description.clone(),
         cover: book.cover_href.clone(),
-        spine: book
-            .spine
-            .iter()
-            .enumerate()
-            .map(|(index, item)| SpineItem {
-                index: index as u32,
-                id: item.id.clone(),
-                href: item.href.clone(),
-                media_type: item.media_type.clone(),
-                linear: item.linear,
-            })
-            .collect(),
-        fonts: book
-            .fonts()
-            .iter()
-            .map(|face| FontFace {
-                family: face.family.clone(),
-                weight: face.weight,
-                href: face.href.clone(),
-            })
-            .collect(),
     }
+}
+
+fn spine_wire(engine: &Engine) -> Vec<SpineItem> {
+    engine
+        .book()
+        .spine
+        .iter()
+        .enumerate()
+        .map(|(index, item)| SpineItem {
+            index: index as u32,
+            id: item.id.clone(),
+            href: item.href.clone(),
+            media_type: item.media_type.clone(),
+            linear: item.linear,
+        })
+        .collect()
+}
+
+fn fonts_wire(engine: &Engine) -> Vec<FontFace> {
+    engine
+        .book()
+        .fonts()
+        .iter()
+        .map(|face| FontFace {
+            family: face.family.clone(),
+            weight: face.weight,
+            href: face.href.clone(),
+        })
+        .collect()
 }
