@@ -36,14 +36,38 @@ runs:
         targets: ${{ inputs.targets || steps.versions.outputs.targets }}
         components: ${{ inputs.components }}
 
-    # 不收 ~/.cargo/bin：缓存里的二进制会让 `cargo install` 报
-    # "binary already exists in destination"。二进制交给各自的 install 步骤。
+    # CI 不需要调试符号，也不需要增量编译。debug=0 把测试二进制从几 GB
+    # 压到几百 MB；增量目录在 CI 里从来不命中，只是让缓存变大。
+    - name: cargo cache settings
+      shell: bash
+      run: |
+        set -euo pipefail
+        {
+          echo "CARGO_INCREMENTAL=0"
+          echo "CARGO_PROFILE_DEV_DEBUG=0"
+          echo "CARGO_PROFILE_TEST_DEBUG=0"
+        } >> "$GITHUB_ENV"
+
+    # 依赖索引单独缓存：换 Cargo.lock 时不用把 target 也重下一遍。
     - uses: actions/cache@v4
       with:
         path: |
           ~/.cargo/registry
           ~/.cargo/git
-          target
-        key: ${{ runner.os }}-${{ inputs.cache-key }}-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
-          ${{ runner.os }}-${{ inputs.cache-key }}-
+          ${{ runner.os }}-cargo-registry-
+
+    # 只缓存构建产物，不缓存 ~/.cargo/bin（缓存里的二进制会让 cargo install
+    # 报 "binary already exists in destination"）。`v3` 是缓存格式版本：
+    # 以前整包 target 会涨到 4–5 GB，换格式后从干净 cache 重新长。
+    - uses: actions/cache@v4
+      with:
+        path: |
+          target/debug
+          target/release
+          target/wasm32-unknown-unknown
+          target/xtask-lean
+        key: ${{ runner.os }}-${{ inputs.cache-key }}-v3-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ inputs.cache-key }}-v3-
