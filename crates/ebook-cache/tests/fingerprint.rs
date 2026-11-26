@@ -193,6 +193,22 @@ fn every_hashed_field_changes_the_key() {
             "vertical align",
             Box::new(|d| d.node_mut(1).style.text.vertical_align = VerticalAlign::Super),
         ),
+        (
+            "spacing trim",
+            Box::new(|d| d.node_mut(1).style.text.rules.spacing_trim = true),
+        ),
+        (
+            "hanging punctuation",
+            Box::new(|d| d.node_mut(1).style.text.rules.hanging_punctuation = true),
+        ),
+        (
+            "autospacing",
+            Box::new(|d| d.node_mut(1).style.text.rules.autospacing = true),
+        ),
+        (
+            "underline",
+            Box::new(|d| d.node_mut(1).style.text.underline = true),
+        ),
         ("color", Box::new(|d| d.node_mut(1).style.color.r = 7)),
         (
             "background",
@@ -283,6 +299,10 @@ fn every_hashed_field_changes_the_key() {
         (
             "image alt",
             Box::new(|d| d.images[0].alt = Some(String::from("cover"))),
+        ),
+        (
+            "image src",
+            Box::new(|d| d.images[0].src = Some(String::from("images/cover.jpg"))),
         ),
     ];
 

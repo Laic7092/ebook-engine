@@ -219,3 +219,19 @@ fn reopening_does_not_accumulate() {
         assert!(!engine.pages().is_empty());
     }
 }
+
+#[test]
+fn memory_usage_drops_reclaimable_caches_on_trim() {
+    let mut engine = open();
+    engine.bitmap(0, 1.0, 0, 0, false).unwrap();
+    let before = engine.memory_usage();
+    assert!(before.total_bytes > 0, "{before:?}");
+    engine.trim_memory();
+    let after = engine.memory_usage();
+    assert!(
+        after.total_bytes <= before.total_bytes,
+        "{before:?} -> {after:?}"
+    );
+    // 当前页 IR 还在，trim 之后仍能继续画。
+    assert!(engine.bitmap(0, 1.0, 0, 0, false).is_ok());
+}

@@ -1,10 +1,13 @@
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
 use ebook_font::FontBook;
-use ebook_ir::{codec, EdgesF, LayoutResult};
+use ebook_ir::{
+    codec, EdgesF, Fit, ImageData, ImageId, LayoutResult, RectF, Resources, Rgba8, Surface,
+};
 use ebook_layout::{Layout, LayoutEnv, NoImageSizes, PageConstraint, StubMeasurer};
 use ebook_raster::RgbaSurface;
 
@@ -566,6 +569,7 @@ fn run_bench() -> Result<(), String> {
     report("ir/decode", &decode);
     let raster = bench_raster()?;
     report("raster/page-480x640", &raster);
+    bench_image()?;
     Ok(())
 }
 
@@ -640,6 +644,152 @@ fn bench_raster() -> Result<Vec<u128>, String> {
         surface.render_page(&ir, 0, &mut fonts).expect("render");
         black_box(surface.pixel(0, 0));
     }))
+}
+
+struct OneImage(Arc<ImageData>);
+
+impl Resources for OneImage {
+    fn glyph_alpha(
+        &mut self,
+        _font: ebook_ir::FontId,
+        _gid: u16,
+        _px: f32,
+    ) -> Option<Arc<ebook_ir::GlyphBitmap>> {
+        None
+    }
+
+    fn image(&mut self, _id: ImageId, _target: ebook_ir::SizeF) -> Option<Arc<ImageData>> {
+        Some(self.0.clone())
+    }
+}
+
+fn bench_image() -> Result<(), String> {
+    // 3000×2000：6 MP，完整 RGBA 24 MB；页面实际只需要 1000 px 宽。
+    let bytes = bench_png(3000, 2000, |x, y| {
+        (
+            (x * 255 / 2999) as u8,
+            (y * 255 / 1999) as u8,
+            ((x + y) & 0xff) as u8,
+        )
+    });
+    let full = ebook_format::image::decode_image(&bytes)
+        .ok_or_else(|| String::from("bench png decode failed"))?;
+    let scaled = ebook_format::image::decode_image_scaled(&bytes, 1000, 667)
+        .ok_or_else(|| String::from("bench png scaled decode failed"))?;
+    println!(
+        "# image/decode-full: output={} bytes, {}x{}",
+        full.rgba.len(),
+        full.w,
+        full.h
+    );
+    println!(
+        "# image/decode-scaled: output={} bytes, {}x{}",
+        scaled.rgba.len(),
+        scaled.w,
+        scaled.h
+    );
+
+    let full_time = sample(1, || {
+        let image = ebook_format::image::decode_image(&bytes).expect("decode");
+        black_box(image.rgba.len());
+    });
+    report("image/decode-full-6mp", &full_time);
+    let scaled_time = sample(1, || {
+        let image = ebook_format::image::decode_image_scaled(&bytes, 1000, 667).expect("decode");
+        black_box(image.rgba.len());
+    });
+    report("image/decode-scaled-6mp", &scaled_time);
+
+    // 页面缓存里已经是小图时，双线性采样只面对小图；这里比较同一块
+    // 480×320 目标区域从 24 MB 原图与 2 MB 缩略图取样的成本。
+    let mut surface = RgbaSurface::new(480, 640);
+    let rect = RectF::new(0.0, 0.0, 480.0, 320.0);
+    let mut full_res = OneImage(Arc::new(full));
+    let full_draw = sample(1, || {
+        surface.clear(Rgba8::WHITE);
+        surface.image(0, rect, Fit::Contain, &mut full_res);
+        black_box(surface.pixel(240, 160));
+    });
+    report("image/draw-full-6mp", &full_draw);
+    let mut scaled_res = OneImage(Arc::new(scaled));
+    let scaled_draw = sample(1, || {
+        surface.clear(Rgba8::WHITE);
+        surface.image(0, rect, Fit::Contain, &mut scaled_res);
+        black_box(surface.pixel(240, 160));
+    });
+    report("image/draw-scaled-6mp", &scaled_draw);
+    Ok(())
+}
+
+/// 生成一张 RGB8 PNG。deflate 用 stored block，避免给 xtask 加压缩依赖；
+/// 这里只关心解码/降采样的真实像素量，不关心文件大小。
+fn bench_png(w: u32, h: u32, pixel: impl Fn(u32, u32) -> (u8, u8, u8)) -> Vec<u8> {
+    let stride = 1 + w as usize * 3;
+    let mut raw = Vec::with_capacity(stride * h as usize);
+    for y in 0..h {
+        raw.push(0);
+        for x in 0..w {
+            let (r, g, b) = pixel(x, y);
+            raw.extend_from_slice(&[r, g, b]);
+        }
+    }
+    let mut zlib = Vec::with_capacity(raw.len() + raw.len() / 65_535 * 5 + 16);
+    zlib.extend_from_slice(&[0x78, 0x01]);
+    let mut rest = &raw[..];
+    while !rest.is_empty() {
+        let n = rest.len().min(65_535);
+        let last = n == rest.len();
+        zlib.push(u8::from(last));
+        zlib.extend_from_slice(&(n as u16).to_le_bytes());
+        zlib.extend_from_slice(&(!(n as u16)).to_le_bytes());
+        zlib.extend_from_slice(&rest[..n]);
+        rest = &rest[n..];
+    }
+    zlib.extend_from_slice(&adler32(&raw).to_be_bytes());
+
+    let mut png = Vec::with_capacity(zlib.len() + 128);
+    png.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&w.to_be_bytes());
+    ihdr.extend_from_slice(&h.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+    png_chunk(&mut png, b"IHDR", &ihdr);
+    png_chunk(&mut png, b"IDAT", &zlib);
+    png_chunk(&mut png, b"IEND", &[]);
+    png
+}
+
+fn png_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    out.extend_from_slice(kind);
+    out.extend_from_slice(data);
+    let mut crc = 0xffff_ffffu32;
+    crc = crc32(crc, kind);
+    crc = crc32(crc, data);
+    out.extend_from_slice(&(crc ^ 0xffff_ffff).to_be_bytes());
+}
+
+fn crc32(mut crc: u32, bytes: &[u8]) -> u32 {
+    for &byte in bytes {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xedb8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    crc
+}
+
+fn adler32(bytes: &[u8]) -> u32 {
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in bytes {
+        a = (a + byte as u32) % 65_521;
+        b = (b + a) % 65_521;
+    }
+    (b << 16) | a
 }
 
 fn sample(reps: usize, mut run: impl FnMut()) -> Vec<u128> {

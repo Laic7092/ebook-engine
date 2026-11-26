@@ -174,6 +174,7 @@ fn hash_image(h: &mut Fnv, image: &ImageMeta) {
     }
     hash_opt_str(h, image.mime.as_deref());
     hash_opt_str(h, image.alt.as_deref());
+    hash_opt_str(h, image.src.as_deref());
 }
 
 fn hash_size(h: &mut Fnv, size: SizeF) {
@@ -289,6 +290,10 @@ fn hash_text_style(h: &mut Fnv, text: &TextStyle) {
     h.u8(text.hyphens as u8);
     h.u8(text.transform as u8);
     hash_vertical_align(h, text.vertical_align);
+    h.u8(text.rules.spacing_trim as u8);
+    h.u8(text.rules.hanging_punctuation as u8);
+    h.u8(text.rules.autospacing as u8);
+    h.u8(text.underline as u8);
 }
 
 fn hash_vertical_align(h: &mut Fnv, align: VerticalAlign) {

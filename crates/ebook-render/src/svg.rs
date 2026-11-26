@@ -125,7 +125,8 @@ impl Surface for SvgSurface {
         if rect.is_empty() {
             return;
         }
-        if res.image(id).is_some() {
+        let target = ebook_ir::SizeF::new(rect.w.max(1.0), rect.h.max(1.0));
+        if res.image(id, target).is_some() {
             let _ = write!(
                 self.out,
                 "<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" fill=\"#dddddd\" stroke=\"#999999\"/>",

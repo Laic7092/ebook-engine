@@ -1,11 +1,15 @@
 # ebook-engine benchmark baselines (median ns per iteration).
-# Captured on: Linux 6.18.33.2-microsoft-standard-WSL2 x86_64 / rustc 1.99.1 (58cf8f9c3 2026-10-13)
+# Captured on: Linux 6.18.58.1-microsoft-standard-WSL2 x86_64 / rustc 1.100.0 (0ef1bc386 2026-11-09)
 #
 # Refresh with: scripts/bench.sh --update
 # Coarse by design: absolute times depend on CPU and compiler; the
 # gate allows BENCH_TOL (default 1.15x) of slowdown.
 # Format: name<TAB>median_ns (median of 3 process medians)
-ir/decode	33224
-ir/encode	38018
-layout/en-epub-ch0	1643829
-raster/page-480x640	2216512
+image/decode-full-6mp	121155648
+image/decode-scaled-6mp	160481590
+image/draw-full-6mp	4941004
+image/draw-scaled-6mp	4779748
+ir/decode	26594
+ir/encode	36327
+layout/en-epub-ch0	387523
+raster/page-480x640	302870

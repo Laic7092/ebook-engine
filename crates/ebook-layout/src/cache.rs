@@ -37,6 +37,11 @@ impl FlowCache {
         self.misses
     }
 
+    /// 缓存中 `Flow` 的近似字节数。用于宿主内存诊断。
+    pub fn bytes(&self) -> usize {
+        self.flow.as_ref().map_or(0, Flow::approx_bytes)
+    }
+
     /// 丢掉缓存。字体或文档换掉时用它，比记着改 `rev` 更难写错。
     pub fn clear(&mut self) {
         self.key = None;

@@ -230,7 +230,9 @@ impl RgbaSurface {
             tone: None,
             ink: None,
             ink_base: None,
-            mask: vec![0; len],
+            // 只有打开字形批处理时才分配；默认逐字形混合用不到这张 1 字节/像素
+            // 的缓冲，先不占内存。
+            mask: Vec::new(),
             mask_ink_at: Vec::new(),
             mask_ink: None,
             batch: false,
@@ -370,6 +372,19 @@ impl RgbaSurface {
             out.extend_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
         }
         out
+    }
+
+    /// 消费 surface，直接把像素缓冲当作 RGBA8 字节返回。
+    ///
+    /// `Rgba8` 是 `#[repr(C)]` 的四个 `u8`，所以这里只换所有权，不做第二份
+    /// 4 字节/像素的拷贝；整页导出因此少一次页面大小的分配。
+    pub fn into_rgba(self) -> Vec<u8> {
+        let mut pixels = core::mem::ManuallyDrop::new(self.pixels);
+        let len = pixels.len().saturating_mul(4);
+        let cap = pixels.capacity().saturating_mul(4);
+        // SAFETY: `Rgba8` 是 `repr(C)`、无填充、四个 `u8`；`Vec<Rgba8>` 的
+        // 分配布局与 `Vec<u8>` 相同。`ManuallyDrop` 保证原 Vec 不再释放。
+        unsafe { Vec::from_raw_parts(pixels.as_mut_ptr() as *mut u8, len, cap) }
     }
 
     /// 当前生效的裁剪范围，已经与画布求过交。
@@ -555,6 +570,10 @@ impl RgbaSurface {
             return;
         }
         self.flush_mask();
+        if self.mask.is_empty() {
+            self.mask
+                .resize(self.width as usize * self.height as usize, 0);
+        }
         self.mask_ink = Some(color);
     }
 
@@ -883,7 +902,8 @@ impl Surface for RgbaSurface {
     }
 
     fn image(&mut self, id: ImageId, rect: RectF, fit: Fit, res: &mut dyn Resources) {
-        match res.image(id) {
+        let target = ebook_ir::SizeF::new(rect.w.max(1.0), rect.h.max(1.0));
+        match res.image(id, target) {
             Some(image) => self.draw_image(&image, rect, fit),
             None => self.draw_placeholder(rect),
         }

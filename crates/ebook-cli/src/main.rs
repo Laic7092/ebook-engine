@@ -2,6 +2,7 @@ mod svg;
 
 use std::fs;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use ebook_font::FontBook;
 use ebook_format::epub::EpubReader;
@@ -417,7 +418,12 @@ struct CliResources<'a, 'm> {
 }
 
 impl Resources for CliResources<'_, '_> {
-    fn glyph_alpha(&mut self, font: ebook_ir::FontId, gid: u16, px: f32) -> Option<GlyphBitmap> {
+    fn glyph_alpha(
+        &mut self,
+        font: ebook_ir::FontId,
+        gid: u16,
+        px: f32,
+    ) -> Option<Arc<GlyphBitmap>> {
         self.font.rasterize(font, gid, px)
     }
 
@@ -428,13 +434,15 @@ impl Resources for CliResources<'_, '_> {
         px: f32,
         dx: f32,
         dy: f32,
-    ) -> Option<GlyphBitmap> {
+    ) -> Option<Arc<GlyphBitmap>> {
         self.font.rasterize_at(font, gid, px, dx, dy)
     }
 
-    fn image(&mut self, id: ImageId) -> Option<ImageData> {
+    fn image(&mut self, id: ImageId, target: SizeF) -> Option<Arc<ImageData>> {
         let (bytes, _) = self.media.source(id)?;
-        ebook_format::image::decode_image(bytes)
+        let w = target.w.max(1.0).ceil() as u32;
+        let h = target.h.max(1.0).ceil() as u32;
+        ebook_format::image::decode_image_scaled(bytes, w, h).map(Arc::new)
     }
 }
 

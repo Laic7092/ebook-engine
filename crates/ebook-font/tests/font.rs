@@ -63,7 +63,7 @@ fn resources_uses_rasterizer() {
     let (mut book, id) = fixture();
     let gid = book.glyph_id('i', id);
     assert!(book.glyph_alpha(id, gid, 20.0).is_some());
-    assert!(book.image(0).is_none());
+    assert!(book.image(0, ebook_ir::SizeF::new(1.0, 1.0)).is_none());
 }
 
 fn bytes() -> Vec<u8> {

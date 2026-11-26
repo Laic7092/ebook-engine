@@ -81,6 +81,46 @@ pub(crate) struct Flow {
     pub(crate) blocks: Vec<BlockBox>,
 }
 
+impl Flow {
+    /// 近似堆占用，只给内存诊断/缓存预算用。
+    pub(crate) fn approx_bytes(&self) -> usize {
+        use core::mem::size_of;
+        let mut bytes = size_of::<Self>()
+            + self.glyphs.len() * size_of::<Glyph>()
+            + self.dirty.len() * size_of::<DirtyBlock>()
+            + self.blocks.len() * size_of::<BlockBox>();
+        for item in &self.items {
+            bytes += size_of::<Item>();
+            if let Item::Line(line) = item {
+                bytes += line.runs.len() * size_of::<LaidRun>()
+                    + line.stretch.len() * size_of::<u32>()
+                    + line.link.as_ref().map_or(0, String::len)
+                    + line
+                        .anchor
+                        .as_ref()
+                        .map_or(0, |anchor| anchor.path.len() * size_of::<u16>())
+                    + op_heap_bytes(&line.unresolved);
+                for run in &line.runs {
+                    bytes += run.text.len();
+                }
+            }
+        }
+        bytes + op_heap_bytes(&self.decorations)
+    }
+}
+
+fn op_heap_bytes(ops: &[Op]) -> usize {
+    use core::mem::size_of;
+    ops.iter()
+        .map(|op| match op {
+            Op::GlyphRun(run) => size_of::<Op>() + run.text.len(),
+            Op::Link { href, .. } => size_of::<Op>() + href.len(),
+            Op::Clip { ops, .. } => size_of::<Op>() + op_heap_bytes(ops),
+            _ => size_of::<Op>(),
+        })
+        .sum()
+}
+
 /// 窗口在文档先序里的位置。用 `[start, end)` 判断一个子树与窗口是否相交：
 /// `end <= from_start` 在窗口前，`start >= to_end` 在窗口后。
 struct NodeOrder {

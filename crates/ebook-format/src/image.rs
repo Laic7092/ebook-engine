@@ -490,6 +490,93 @@ pub fn decode_image(bytes: &[u8]) -> Option<ImageData> {
 /// 避免超大图把 wasm 线性内存一次吃完。
 const MAX_DECODE_SIDE: usize = 16_384;
 
+/// 解码到足够页面使用的分辨率。
+///
+/// 阅读器把一张 4000×6000 的插图缩到 1000 px 宽来显示时，完整 RGBA 是
+/// 96 MB，而页面实际只需要几 MB。这里先按原分辨率解码，再做一个确定性的
+/// 面积平均降采样；缓存和后续双线性采样都只面对小图。
+///
+/// `max_w` / `max_h` 是设备像素。任一为 0 时返回原图。
+pub fn decode_image_scaled(bytes: &[u8], max_w: u32, max_h: u32) -> Option<ImageData> {
+    let image = decode_image(bytes)?;
+    Some(downsample_image(&image, max_w, max_h))
+}
+
+/// 面积平均降采样，保持宽高比，不放大。
+///
+/// 透明像素按 alpha 预乘后参与平均，避免透明边缘把颜色拉黑；输出仍是
+/// straight RGBA。全部用整数运算，native 与 wasm 逐字节一致。
+pub fn downsample_image(image: &ImageData, max_w: u32, max_h: u32) -> ImageData {
+    let (w, h) = (image.w, image.h);
+    if w == 0 || h == 0 || max_w == 0 || max_h == 0 || (w <= max_w && h <= max_h) {
+        return image.clone();
+    }
+    // 选受限的那一边，另一边按原宽高比四舍五入。用交叉相乘比较，避免浮点。
+    let (dw, dh) = if max_w as u64 * h as u64 <= max_h as u64 * w as u64 {
+        let dw = max_w.max(1);
+        let dh =
+            ((h as u64 * dw as u64 + w as u64 / 2) / w as u64).clamp(1, max_h.max(1) as u64) as u32;
+        (dw, dh)
+    } else {
+        let dh = max_h.max(1);
+        let dw =
+            ((w as u64 * dh as u64 + h as u64 / 2) / h as u64).clamp(1, max_w.max(1) as u64) as u32;
+        (dw, dh)
+    };
+    if dw == w && dh == h {
+        return image.clone();
+    }
+
+    let mut xs = Vec::with_capacity(dw as usize);
+    for x in 0..dw {
+        let x0 = (x as u64 * w as u64 / dw as u64) as u32;
+        let x1 = (((x as u64 + 1) * w as u64).div_ceil(dw as u64)) as u32;
+        xs.push((x0.min(w - 1), x1.max(x0 + 1).min(w)));
+    }
+
+    let mut out = Vec::with_capacity(dw as usize * dh as usize * 4);
+    for y in 0..dh {
+        let y0 = (y as u64 * h as u64 / dh as u64) as u32;
+        let y1 = (((y as u64 + 1) * h as u64).div_ceil(dh as u64)) as u32;
+        let y0 = y0.min(h - 1);
+        let y1 = y1.max(y0 + 1).min(h);
+        for &(x0, x1) in &xs {
+            let mut acc_a = 0u64;
+            let mut acc = [0u64; 3];
+            let mut count = 0u64;
+            for sy in y0..y1 {
+                let row = sy as usize * w as usize * 4;
+                for sx in x0..x1 {
+                    let index = row + sx as usize * 4;
+                    let a = image.rgba[index + 3] as u64;
+                    acc_a += a;
+                    acc[0] += image.rgba[index] as u64 * a;
+                    acc[1] += image.rgba[index + 1] as u64 * a;
+                    acc[2] += image.rgba[index + 2] as u64 * a;
+                    count += 1;
+                }
+            }
+            let alpha = ((acc_a + count / 2) / count) as u8;
+            let denom = acc_a.max(1);
+            let rgb = [
+                ((acc[0] + acc_a / 2) / denom) as u8,
+                ((acc[1] + acc_a / 2) / denom) as u8,
+                ((acc[2] + acc_a / 2) / denom) as u8,
+            ];
+            if acc_a == 0 {
+                out.extend_from_slice(&[0, 0, 0, 0]);
+            } else {
+                out.extend_from_slice(&[rgb[0], rgb[1], rgb[2], alpha]);
+            }
+        }
+    }
+    ImageData {
+        w: dw,
+        h: dh,
+        rgba: out,
+    }
+}
+
 fn decode_jpeg(bytes: &[u8]) -> Option<ImageData> {
     use zune_jpeg::zune_core::bytestream::ZCursor;
     use zune_jpeg::zune_core::colorspace::ColorSpace;

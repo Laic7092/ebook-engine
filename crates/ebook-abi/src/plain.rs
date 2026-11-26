@@ -1233,6 +1233,44 @@ fn raw_bytes(bitmap: &ebook_reader::Bitmap) -> Vec<u8> {
     out
 }
 
+/// 把当前章的一张图片按原分辨率写成 `EQP1`（`"EQP1" | u32 w | u32 h | RGBA8`）。
+///
+/// 页面渲染走降采样缓存；这条路径只给“点击查看原图”用，不改变页面。
+/// 0 好，-1 图片不存在，-3 写失败。
+#[no_mangle]
+pub extern "C" fn eb_plain_image_full_write(id: i32, image_id: u32, path: *const c_char) -> i32 {
+    let Some(path) = c_path(path) else {
+        return -3;
+    };
+    let Some(image) = with_engine(id, |engine| engine.image_full(image_id as u16)).flatten() else {
+        return -1;
+    };
+    write_image_raw(&path, image.w, image.h, &image.rgba)
+}
+
+fn write_image_raw(path: &str, width: u32, height: u32, rgba: &[u8]) -> i32 {
+    use std::sync::atomic::AtomicU64;
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = format!("{path}.{}.{seq}.part", std::process::id());
+    let write = || -> std::io::Result<()> {
+        let mut file = File::create(&tmp)?;
+        file.write_all(RAW_MAGIC)?;
+        file.write_all(&width.to_le_bytes())?;
+        file.write_all(&height.to_le_bytes())?;
+        file.write_all(rgba)?;
+        Ok(())
+    };
+    let result = write().and_then(|()| std::fs::rename(&tmp, path));
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&tmp);
+        crate::set_last_error(format!("{path}: {error}"));
+        return -3;
+    }
+    0
+}
+
 /// 把位图写成 `EQP1` 文件：先写同目录下的唯一临时文件，再 `rename` 成目标路径。
 ///
 /// 宿主用「文件存在」判断瓦片可用，直接 `File::create(path)` 会让它读到只写了
@@ -1606,9 +1644,27 @@ pub extern "C" fn eb_plain_resolved_fragment(id: i32) -> *const c_char {
     scratch(fragment.as_deref().unwrap_or(""))
 }
 
+/// 释放可再生的缓存：跨章 IR、断行缓存、图片 RGBA、字体位图。
+///
+/// 当前页 IR 保留，调用后仍可继续绘制；适合 iOS/Android 的内存警告。
+/// 0 好，-1 句柄无效。
+#[no_mangle]
+pub extern "C" fn eb_plain_trim_memory(id: i32) -> i32 {
+    guard(|| match with_engine(id, |engine| engine.trim_memory()) {
+        Some(()) => 0,
+        None => -1,
+    })
+}
+
+/// 当前缓存占用的近似字节数；0 表示句柄无效或没有缓存。
+#[no_mangle]
+pub extern "C" fn eb_plain_memory_bytes(id: i32) -> u64 {
+    with_engine(id, |engine| engine.memory_usage().total_bytes as u64).unwrap_or(0)
+}
+
 /// 资源上限：单页像素与书级图片缓存（解码后的 RGBA 字节数）。0 好，-1 句柄无效。
 ///
-/// 默认 `4096×4096` / 64 MiB（见 `ebook_reader::Limits`）；手机自己知道内存时
+/// 默认 `4096×4096` / 24 MiB（见 `ebook_reader::Limits`）；手机自己知道内存时
 /// 传小一点，比事后再抓 OOM 强。
 #[no_mangle]
 pub extern "C" fn eb_plain_set_limits(

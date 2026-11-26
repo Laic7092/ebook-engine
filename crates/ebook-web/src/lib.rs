@@ -4,7 +4,7 @@ pub mod protocol;
 mod glue;
 
 use std::fmt::Write as _;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use ebook_font::FontBook;
 use ebook_format::epub::EpubReader;
@@ -12,7 +12,7 @@ use ebook_format::txt::TxtReader;
 use ebook_format::{Book, ChapterAnchor, ChapterLinks, FormatError, LinkTarget};
 use ebook_ir::{
     codec, EdgesF, FontId, GlyphBitmap, ImageData, ImageId, LayoutResult, Location, PointF,
-    Resources, Rgba8, StyledDoc,
+    Resources, Rgba8, SizeF, StyledDoc,
 };
 use ebook_layout::{Layout, LayoutEnv, NoImageSizes, PageConstraint, Reader, StubMeasurer};
 use ebook_raster::{RgbaSurface, Tone};
@@ -294,7 +294,7 @@ pub fn page_bitmap(page: u32, scale: f32, ink: u32, paper: u32, bold: bool) -> V
     let mut out = Vec::with_capacity(8 + surface.pixels().len() * 4);
     out.extend_from_slice(&w.to_le_bytes());
     out.extend_from_slice(&h.to_le_bytes());
-    out.extend_from_slice(&surface.to_rgba());
+    out.extend_from_slice(&surface.into_rgba());
     out
 }
 
@@ -304,7 +304,18 @@ const MAX_PAGE_PIXELS: u64 = 4096 * 4096;
 
 /// 书级图片缓存的上限。CJK 字体、整本 zip 已经在内存里，图片再不设上限，
 /// 移动端 wasm 很容易触顶（G-16）。
-const IMAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const IMAGE_CACHE_BYTES: usize = 16 * 1024 * 1024;
+
+fn target_pixels(target: SizeF) -> (u32, u32) {
+    let side = |value: f32| -> u32 {
+        if value.is_finite() && value > 0.0 {
+            value.ceil().min(16_384.0) as u32
+        } else {
+            0
+        }
+    };
+    (side(target.w), side(target.h))
+}
 
 fn unpack_rgba(value: u32) -> Rgba8 {
     Rgba8::new(
@@ -322,7 +333,7 @@ fn unpack_rgba(value: u32) -> Rgba8 {
 /// 也与“IR 里禁止哈希容器”的取向一致。
 #[derive(Default)]
 struct ImageCache {
-    entries: Vec<(String, Option<ImageData>)>,
+    entries: Vec<(String, u32, u32, Option<Arc<ImageData>>)>,
     bytes: usize,
 }
 
@@ -332,21 +343,21 @@ impl ImageCache {
         self.bytes = 0;
     }
 
-    fn get(&mut self, src: &str) -> Option<ImageData> {
-        if let Some((_, hit)) = self.entries.iter().find(|(cached, _)| cached == src) {
-            return hit.clone();
-        }
-        None
+    fn get(&mut self, src: &str, w: u32, h: u32) -> Option<Arc<ImageData>> {
+        self.entries
+            .iter()
+            .find(|(cached, cw, ch, _)| cached == src && *cw == w && *ch == h)
+            .and_then(|(_, _, _, hit)| hit.clone())
     }
 
-    fn insert(&mut self, src: String, data: Option<ImageData>) {
+    fn insert(&mut self, src: String, w: u32, h: u32, data: Option<Arc<ImageData>>) {
         if let Some(image) = data.as_ref() {
             self.bytes += image.rgba.len();
         }
-        self.entries.push((src, data));
+        self.entries.push((src, w, h, data));
         // 超预算就丢最旧的条目，直到回到预算内（至少留一条，避免反复解码同一张）。
         while self.bytes > IMAGE_CACHE_BYTES && self.entries.len() > 1 {
-            let (_, dropped) = self.entries.remove(0);
+            let (_, _, _, dropped) = self.entries.remove(0);
             if let Some(image) = dropped {
                 self.bytes = self.bytes.saturating_sub(image.rgba.len());
             }
@@ -387,7 +398,7 @@ impl PageResources<'_> {
 }
 
 impl Resources for PageResources<'_> {
-    fn glyph_alpha(&mut self, font: FontId, gid: u16, px: f32) -> Option<GlyphBitmap> {
+    fn glyph_alpha(&mut self, font: FontId, gid: u16, px: f32) -> Option<Arc<GlyphBitmap>> {
         self.glyph_alpha_at(font, gid, px, 0.0, 0.0)
     }
 
@@ -398,7 +409,7 @@ impl Resources for PageResources<'_> {
         px: f32,
         dx: f32,
         dy: f32,
-    ) -> Option<GlyphBitmap> {
+    ) -> Option<Arc<GlyphBitmap>> {
         let book = self.font.as_mut()?;
         // 全局加粗只影响取哪张 face，不改 IR：同一份 IR 可以按开关重画。
         let face = if self.bold {
@@ -409,18 +420,20 @@ impl Resources for PageResources<'_> {
         book.rasterize_at(face, gid, px, dx, dy)
     }
 
-    fn image(&mut self, id: ImageId) -> Option<ImageData> {
+    fn image(&mut self, id: ImageId, target: SizeF) -> Option<Arc<ImageData>> {
         let src = self.src_of(id)?;
+        let (tw, th) = target_pixels(target);
         let mut cache = IMAGES.lock().unwrap();
-        if let Some(hit) = cache.get(&src) {
+        if let Some(hit) = cache.get(&src, tw, th) {
             return Some(hit);
         }
         let decoded = self
             .book
             .asset_owned(&src)
-            .and_then(|(bytes, _)| ebook_format::image::decode_image(&bytes));
+            .and_then(|(bytes, _)| ebook_format::image::decode_image_scaled(&bytes, tw, th))
+            .map(Arc::new);
         let hit = decoded.clone();
-        cache.insert(src, decoded);
+        cache.insert(src, tw, th, decoded);
         hit
     }
 }

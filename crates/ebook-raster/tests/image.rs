@@ -10,12 +10,21 @@ use ebook_raster::RgbaSurface;
 struct Images(ImageData);
 
 impl Resources for Images {
-    fn glyph_alpha(&mut self, _font: FontId, _gid: u16, _px: f32) -> Option<GlyphBitmap> {
+    fn glyph_alpha(
+        &mut self,
+        _font: FontId,
+        _gid: u16,
+        _px: f32,
+    ) -> Option<std::sync::Arc<GlyphBitmap>> {
         None
     }
 
-    fn image(&mut self, _id: ImageId) -> Option<ImageData> {
-        Some(self.0.clone())
+    fn image(
+        &mut self,
+        _id: ImageId,
+        _target: ebook_ir::SizeF,
+    ) -> Option<std::sync::Arc<ImageData>> {
+        Some(std::sync::Arc::new(self.0.clone()))
     }
 }
 

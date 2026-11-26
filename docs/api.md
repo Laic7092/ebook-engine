@@ -311,7 +311,9 @@ fn image_size(&self, id: ImageId) -> Option<SizeF>;
 同一个查询也用于**块级与行内图片**的像素预算（`Limits::max_image_pixels`）：
 资源层不知道尺寸的图片不参与累加（它已经按 `ImagePending` 降级了）。
 `ResourceView` 不提供像素数据，只提供“固有尺寸”——真正的像素由渲染层的
-`Resources::image` 取得，两层不交叉。
+`Resources::image(id, target)` 取得，两层不交叉。`target` 是页面实际要画的
+设备像素尺寸；`ebook-reader` 会按它把大图降采样后缓存，点击查看原图时再走
+独立的 `Engine::image_full` / `eb_plain_image_full_write`。
 
 ### 4.4 `PageConstraint`
 
@@ -440,7 +442,7 @@ engine.scroll_progress(y)?;                 // 流坐标 → 0..1；不排整本
   下一章从整屏边界开始。
 - `scroll_slice` 自己找出涉及的章、分别光栅化再拼到同一张位图，章缝不会错行；
   内容之外是纸色。起点会吸到设备像素栅格。
-- 章节 IR 缓存按 12MB 字节预算淘汰（至少留 2 章）；字体换了
+- 章节 IR 缓存按 8MB 字节预算淘汰（至少留 2 章）；字体换了
   （`register_font`）不会丢会话，实测高度退回估计值，滚到哪章再重新量。
 - 章节流（在线书源）：`Engine::new_book` / `append_chapter` /
   `replace_chapter` / `chapter_rev` / `clear_chapters`。C 面是
@@ -730,6 +732,7 @@ trait Renderer {
 | Canvas2D | `web/reader.js` | 浏览器阅读器，文本可选中；wasm 在 `web/engine-worker.js` 里 |
 
 `RgbaSurface::to_ppm()` 输出 P6 PPM，`to_rgba()` 输出裸 RGBA8；
+`into_rgba()` 消费 surface 并复用像素缓冲，整页导出不再复制第二份；
 `render_page()` 会先清成白色再画。`RgbaSurface::from_page(page)` 用
 `page.box_size()` 决定画布大小。
 

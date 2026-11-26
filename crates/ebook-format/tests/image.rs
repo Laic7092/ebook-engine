@@ -1,6 +1,8 @@
 //! 图片头解析：PNG / JPEG / GIF / WebP / SVG 与截断输入。
 
-use ebook_format::image::{decode_image, decode_png, image_mime, image_size};
+use ebook_format::image::{
+    decode_image, decode_image_scaled, decode_png, downsample_image, image_mime, image_size,
+};
 
 #[test]
 fn png_ihdr_gives_the_size() {
@@ -209,4 +211,54 @@ fn unknown_image_bytes_are_not_decoded() {
     assert!(decode_image(b"GIF89a").is_none());
     assert!(decode_image(b"RIFF....WEBPVP8 ").is_none());
     assert!(decode_image(&[0xff, 0xd8, 0xff]).is_none());
+}
+
+#[test]
+fn downsample_averages_blocks_and_preserves_aspect() {
+    let raw = fixture_epub();
+    let reader = ebook_format::epub::EpubReader::open(&raw).expect("open");
+    let (bytes, _) = reader.asset("OEBPS/pics/wide.png").expect("wide.png");
+    let full = decode_png(bytes).expect("png");
+    let half = downsample_image(&full, 6, 3);
+    assert_eq!((half.w, half.h), (6, 3));
+    // 12x6 的左半红、右半蓝；缩到 6x3 后每列仍是纯色。
+    assert_eq!(&half.rgba[0..4], &[220, 40, 40, 255]);
+    let last = half.rgba.len() - 4;
+    assert_eq!(&half.rgba[last..], &[40, 60, 220, 255]);
+}
+
+#[test]
+fn downsample_does_not_upscale() {
+    let image = ebook_ir::ImageData {
+        w: 2,
+        h: 1,
+        rgba: vec![1, 2, 3, 255, 4, 5, 6, 255],
+    };
+    let same = downsample_image(&image, 100, 100);
+    assert_eq!((same.w, same.h), (2, 1));
+    assert_eq!(same.rgba, image.rgba);
+}
+
+#[test]
+fn downsample_averages_in_premultiplied_alpha() {
+    let image = ebook_ir::ImageData {
+        w: 2,
+        h: 1,
+        rgba: vec![255, 0, 0, 0, 0, 0, 255, 255],
+    };
+    let one = downsample_image(&image, 1, 1);
+    assert_eq!((one.w, one.h), (1, 1));
+    // 透明红不参与平均，结果是半透明纯蓝，而不是把背景拉成紫色。
+    assert_eq!(&one.rgba, &[0, 0, 255, 128]);
+}
+
+#[test]
+fn scaled_decode_uses_the_same_pixels_as_two_steps() {
+    let raw = fixture_epub();
+    let reader = ebook_format::epub::EpubReader::open(&raw).expect("open");
+    let (bytes, _) = reader.asset("OEBPS/pics/tall.png").expect("tall.png");
+    let full = decode_image(bytes).expect("full");
+    let scaled = decode_image_scaled(bytes, 2, 5).expect("scaled");
+    assert_eq!((scaled.w, scaled.h), (2, 5));
+    assert_eq!(scaled.rgba, downsample_image(&full, 2, 5).rgba);
 }

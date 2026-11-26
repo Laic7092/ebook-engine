@@ -1,3 +1,4 @@
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::doc::ImageId;
@@ -22,7 +23,7 @@ pub struct ImageData {
 }
 
 pub trait Resources {
-    fn glyph_alpha(&mut self, font: FontId, gid: u16, px: f32) -> Option<GlyphBitmap>;
+    fn glyph_alpha(&mut self, font: FontId, gid: u16, px: f32) -> Option<Arc<GlyphBitmap>>;
     fn glyph_alpha_at(
         &mut self,
         font: FontId,
@@ -30,22 +31,24 @@ pub trait Resources {
         px: f32,
         dx: f32,
         dy: f32,
-    ) -> Option<GlyphBitmap> {
+    ) -> Option<Arc<GlyphBitmap>> {
         let _ = (dx, dy);
         self.glyph_alpha(font, gid, px)
     }
 
-    fn image(&mut self, id: ImageId) -> Option<ImageData>;
+    /// 取一张图片的像素。`target` 是页面实际要画的设备像素尺寸；
+    /// 后端可以据此只解码/缓存够用的分辨率，而不是整张原图。
+    fn image(&mut self, id: ImageId, target: SizeF) -> Option<Arc<ImageData>>;
 }
 
 pub struct NoResources;
 
 impl Resources for NoResources {
-    fn glyph_alpha(&mut self, _font: FontId, _gid: u16, _px: f32) -> Option<GlyphBitmap> {
+    fn glyph_alpha(&mut self, _font: FontId, _gid: u16, _px: f32) -> Option<Arc<GlyphBitmap>> {
         None
     }
 
-    fn image(&mut self, _id: ImageId) -> Option<ImageData> {
+    fn image(&mut self, _id: ImageId, _target: SizeF) -> Option<Arc<ImageData>> {
         None
     }
 }

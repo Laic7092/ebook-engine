@@ -209,6 +209,24 @@ pub struct SelectionResult {
     pub text: String,
 }
 
+/// 当前引擎持有的可释放内存估算。宿主内存警告时先看这里，再决定是否
+/// 调 [`Engine::trim_memory`](crate::Engine::trim_memory)。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MemoryUsage {
+    /// 当前章 IR。
+    pub layout_bytes: usize,
+    /// 滚动会话跨章保留的 IR。
+    pub chapters_bytes: usize,
+    /// 断行/整形前段缓存。
+    pub flow_bytes: usize,
+    /// 解码后的图片 RGBA。
+    pub image_bytes: usize,
+    /// 字体光栅/整形缓存。
+    pub font_bytes: usize,
+    /// 以上之和。
+    pub total_bytes: usize,
+}
+
 /// 宿主的资源上限。native 与 wasm 的预算不同，所以是每个 `Engine` 的配置。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Limits {
@@ -223,7 +241,7 @@ impl Default for Limits {
         Self {
             // 4096×4096：1170×2532@3x ≈ 2.96M，余量足够。
             max_page_pixels: 4096 * 4096,
-            image_cache_bytes: 64 * 1024 * 1024,
+            image_cache_bytes: 24 * 1024 * 1024,
         }
     }
 }

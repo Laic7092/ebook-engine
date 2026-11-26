@@ -1,4 +1,4 @@
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
@@ -39,8 +39,15 @@ const SYNTH_SHEAR: f32 = 0.22;
 /// 长会话的内存因此有硬上限。
 const RASTER_CACHE_MAX: usize = 4096;
 
+/// 光栅缓存的字节上限。条数上限对 CJK 大字号不够：4096 张 64×64 的位图
+/// 约 16 MB，而一个 96px 的汉字就能到 100×100。超过预算整体清空，保证
+/// 长会话的内存有硬上限。
+const RASTER_CACHE_BYTES: usize = 8 * 1024 * 1024;
+
 /// 整形缓存上限。同理，整段 run 的代价高于几个键，超限整体清空。
 const SHAPE_CACHE_MAX: usize = 1024;
+/// 整形缓存的字节上限（键 + 文本 + 字形序列）。
+const SHAPE_CACHE_BYTES: usize = 4 * 1024 * 1024;
 
 /// 光栅缓存的键。`FontId` 用逻辑 id 而不是 base face：合成粗体/斜体
 /// 走同一份轮廓，但增益/切变之后的位图不同，不能共用条目。浮点按 bit
@@ -114,6 +121,13 @@ struct Metrics {
     /// 度量、cmap 与轮廓都从这份字节读取；harfrust 也共享同一个 Arc，
     /// 不会为整形再复制一遍几十 MB 的 CJK 字体。
     bytes: Arc<Vec<u8>>,
+    /// 已经解析过的 read-fonts 面。`FontRef` 只是表目录 + 切片，不复制字体
+    /// 字节；借用的数据由同一个 `Metrics` 的 `bytes` 持有。
+    ///
+    /// 这是 `'static` 延长：`Metrics` 不移动 `Arc` 的堆分配，`face` 也不会
+    /// 逃出 `Metrics`。每次光栅化重新 `FontRef::from_index` 会重复解析表目录，
+    /// 对逐字形的热路径是纯浪费。
+    face: FontRef<'static>,
     /// read-fonts 的 owning `Font`。它自带 shaping/layout 缓存，
     /// 必须在 `FontBook` 生命周期内复用；每次 `shape` 重建会丢掉这份缓存。
     /// `None` 表示 read-fonts 读不了这份数据，此时退回逐字。
@@ -129,6 +143,7 @@ impl core::fmt::Debug for Metrics {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Metrics")
             .field("desc", &self.desc)
+            .field("bytes", &self.bytes.len())
             .field("units_per_em", &self.units_per_em)
             .field("ascender", &self.ascender)
             .field("descender", &self.descender)
@@ -144,6 +159,9 @@ impl Metrics {
         let bytes = Arc::new(bytes);
         let font =
             FontRef::from_index(bytes.as_slice(), 0).map_err(|_| FontLoadError::InvalidFont)?;
+        // SAFETY: `font` 借用的 `bytes` 随后被移入 `Metrics.bytes`（`Arc` 的堆
+        // 分配不随 `Metrics` 移动），且 `face` 只在 `Metrics` 存活期间使用。
+        let face: FontRef<'static> = unsafe { core::mem::transmute(font.clone()) };
         // 与原实现一致：head/hhea/maxp 是必需表，head 的 upem 和 loca 格式
         // 还必须在合法范围内。
         let head = font.head().map_err(|_| FontLoadError::InvalidFont)?;
@@ -173,6 +191,7 @@ impl Metrics {
         Ok(Self {
             desc,
             bytes,
+            face,
             hb_font,
             units_per_em,
             ascender,
@@ -219,9 +238,13 @@ pub struct FontBook {
     english: English,
     /// 字形光栅缓存，绑定 `FontBook` 生命周期；不放进全局/`thread_local`。
     /// `RefCell` 让 `&self` 的 `Resources::glyph_alpha_at` 也能写缓存。
-    rasters: RefCell<BTreeMap<RasterKey, Option<GlyphBitmap>>>,
+    rasters: RefCell<BTreeMap<RasterKey, Option<Arc<GlyphBitmap>>>>,
+    /// 光栅缓存的近似字节数，与 `rasters` 同步维护。
+    raster_bytes: Cell<usize>,
     /// 整形缓存，值保存 `shape` 写入 `out` 的字形序列与返回的 advance。
     shapes: RefCell<BTreeMap<ShapeKey, (f32, Vec<ShapeGlyph>)>>,
+    /// 整形缓存的近似字节数，与 `shapes` 同步维护。
+    shape_bytes: Cell<usize>,
 }
 
 impl FontBook {
@@ -319,11 +342,22 @@ impl FontBook {
         // 语言进整形键，理论上换语言会自然落到新键；但旧语言的条目不再有用，
         // 而且清空后不会让长会话因为来回切语言而积累两份缓存。
         self.shapes.borrow_mut().clear();
+        self.shape_bytes.set(0);
     }
 
-    fn clear_caches(&self) {
+    /// 丢掉字形/整形缓存。宿主收到内存警告时调用；字体字节本身不动。
+    pub fn clear_caches(&self) {
         self.rasters.borrow_mut().clear();
         self.shapes.borrow_mut().clear();
+        self.raster_bytes.set(0);
+        self.shape_bytes.set(0);
+    }
+
+    /// 当前字形/整形缓存的近似字节数。
+    pub fn cache_bytes(&self) -> usize {
+        self.raster_bytes
+            .get()
+            .saturating_add(self.shape_bytes.get())
     }
 
     pub fn language(&self) -> Option<&str> {
@@ -496,10 +530,10 @@ impl FontBook {
 
     fn face(&self, id: FontId) -> Option<FontRef<'_>> {
         let metrics = self.faces.get(self.real_index(id)?)?;
-        FontRef::from_index(metrics.bytes.as_slice(), 0).ok()
+        Some(metrics.face.clone())
     }
 
-    pub fn rasterize(&self, id: FontId, gid: u16, px: f32) -> Option<GlyphBitmap> {
+    pub fn rasterize(&self, id: FontId, gid: u16, px: f32) -> Option<Arc<GlyphBitmap>> {
         self.rasterize_at(id, gid, px, 0.0, 0.0)
     }
 
@@ -510,7 +544,7 @@ impl FontBook {
         px: f32,
         dx: f32,
         dy: f32,
-    ) -> Option<GlyphBitmap> {
+    ) -> Option<Arc<GlyphBitmap>> {
         if !px.is_finite() || px <= 0.0 || !dx.is_finite() || !dy.is_finite() {
             return None;
         }
@@ -520,13 +554,21 @@ impl FontBook {
         if let Some(cached) = self.rasters.borrow().get(&key) {
             return cached.clone();
         }
-        let result = self.rasterize_uncached(FontId(index as u16), id, gid, px, dx, dy);
+        let result = self
+            .rasterize_uncached(FontId(index as u16), id, gid, px, dx, dy)
+            .map(Arc::new);
         // `None` 也缓存：缺字、越界等失败结果同样会在翻页/缩放时重复询问。
+        let entry_bytes = result.as_deref().map(glyph_bytes).unwrap_or(0);
         let mut cache = self.rasters.borrow_mut();
-        if cache.len() >= RASTER_CACHE_MAX {
+        if cache.len() >= RASTER_CACHE_MAX
+            || self.raster_bytes.get().saturating_add(entry_bytes) > RASTER_CACHE_BYTES
+        {
             cache.clear();
+            self.raster_bytes.set(0);
         }
         cache.insert(key, result.clone());
+        self.raster_bytes
+            .set(self.raster_bytes.get().saturating_add(entry_bytes));
         result
     }
 
@@ -1037,6 +1079,21 @@ fn guess_language(text: &str) -> Option<&'static str> {
     }
 }
 
+fn glyph_bytes(bitmap: &GlyphBitmap) -> usize {
+    core::mem::size_of::<GlyphBitmap>().saturating_add(bitmap.w as usize * bitmap.h as usize)
+}
+
+fn shape_bytes(key: &ShapeKey, glyphs: &[ShapeGlyph]) -> usize {
+    core::mem::size_of::<ShapeKey>()
+        .saturating_add(key.text.len())
+        .saturating_add(key.lang.as_ref().map_or(0, String::len))
+        .saturating_add(
+            glyphs
+                .len()
+                .saturating_mul(core::mem::size_of::<ShapeGlyph>()),
+        )
+}
+
 impl TextMeasurer for FontBook {
     /// 用 harfrust（HarfBuzz 的 Rust 移植）整形：kerning、ligature 默认开，
     /// script/language 从入参或文本猜。
@@ -1104,11 +1161,17 @@ impl TextMeasurer for FontBook {
             glyphs.reverse();
         }
         out.extend_from_slice(&glyphs);
+        let entry_bytes = shape_bytes(&key, &glyphs);
         let mut cache = self.shapes.borrow_mut();
-        if cache.len() >= SHAPE_CACHE_MAX {
+        if cache.len() >= SHAPE_CACHE_MAX
+            || self.shape_bytes.get().saturating_add(entry_bytes) > SHAPE_CACHE_BYTES
+        {
             cache.clear();
+            self.shape_bytes.set(0);
         }
         cache.insert(key, (total, glyphs));
+        self.shape_bytes
+            .set(self.shape_bytes.get().saturating_add(entry_bytes));
         total
     }
 
@@ -1180,7 +1243,7 @@ impl TextMeasurer for FontBook {
 }
 
 impl Resources for FontBook {
-    fn glyph_alpha(&mut self, font: FontId, gid: u16, px: f32) -> Option<GlyphBitmap> {
+    fn glyph_alpha(&mut self, font: FontId, gid: u16, px: f32) -> Option<Arc<GlyphBitmap>> {
         self.rasterize(font, gid, px)
     }
 
@@ -1191,11 +1254,11 @@ impl Resources for FontBook {
         px: f32,
         dx: f32,
         dy: f32,
-    ) -> Option<GlyphBitmap> {
+    ) -> Option<Arc<GlyphBitmap>> {
         self.rasterize_at(font, gid, px, dx, dy)
     }
 
-    fn image(&mut self, _id: ImageId) -> Option<ImageData> {
+    fn image(&mut self, _id: ImageId, _target: ebook_ir::SizeF) -> Option<Arc<ImageData>> {
         None
     }
 }

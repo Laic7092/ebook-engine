@@ -85,6 +85,7 @@ impl RectF {
     }
 }
 
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rgba8 {
     pub r: u8,

@@ -12,17 +12,26 @@ const AUTHOR_RED: Rgba8 = Rgba8::new(0xcc, 0x00, 0x00, 255);
 struct Solid;
 
 impl Resources for Solid {
-    fn glyph_alpha(&mut self, _font: FontId, _gid: u16, _px: f32) -> Option<GlyphBitmap> {
-        Some(GlyphBitmap {
+    fn glyph_alpha(
+        &mut self,
+        _font: FontId,
+        _gid: u16,
+        _px: f32,
+    ) -> Option<std::sync::Arc<GlyphBitmap>> {
+        Some(std::sync::Arc::new(GlyphBitmap {
             w: 8,
             h: 8,
             left: 0,
             top: -8,
             alpha: vec![255; 64],
-        })
+        }))
     }
 
-    fn image(&mut self, _id: ImageId) -> Option<ImageData> {
+    fn image(
+        &mut self,
+        _id: ImageId,
+        _target: ebook_ir::SizeF,
+    ) -> Option<std::sync::Arc<ImageData>> {
         None
     }
 }

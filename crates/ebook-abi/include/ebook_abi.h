@@ -384,8 +384,18 @@ EbLink eb_plain_resolve_link(int32_t id, const char *href);
 const char *eb_plain_resolved_fragment(int32_t id); /* 不带 '#'，"" 没有 */
 
 /* 资源上限：单页像素与书级图片缓存（解码后的 RGBA 字节数）。
- * 默认 4096×4096 / 64 MiB。0 好，-1 句柄无效。 */
+ * 默认 4096×4096 / 24 MiB。0 好，-1 句柄无效。 */
 int32_t eb_plain_set_limits(int32_t id, uint64_t max_page_pixels, uint64_t image_cache_bytes);
+
+/* 释放可再生的缓存（跨章 IR、断行缓存、图片 RGBA、字体位图），保留当前页。
+ * 0 好，-1 句柄无效。 */
+int32_t eb_plain_trim_memory(int32_t id);
+/* 当前缓存占用的近似字节数；0 表示句柄无效或没有缓存。 */
+uint64_t eb_plain_memory_bytes(int32_t id);
+
+/* 当前章一张图片的原分辨率 RGBA，写成 EQP1 文件（点击查看原图用）。
+ * 0 好，-1 图片不存在，-3 写失败。 */
+int32_t eb_plain_image_full_write(int32_t id, uint32_t image_id, const char *path);
 
 #ifdef __cplusplus
 } /* extern "C" */

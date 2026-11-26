@@ -34,12 +34,21 @@ impl FixedResources {
 }
 
 impl Resources for FixedResources {
-    fn glyph_alpha(&mut self, _font: FontId, _gid: u16, _px: f32) -> Option<GlyphBitmap> {
-        Some(self.glyph.clone())
+    fn glyph_alpha(
+        &mut self,
+        _font: FontId,
+        _gid: u16,
+        _px: f32,
+    ) -> Option<std::sync::Arc<GlyphBitmap>> {
+        Some(std::sync::Arc::new(self.glyph.clone()))
     }
 
-    fn image(&mut self, _id: ImageId) -> Option<ImageData> {
-        Some(self.image.clone())
+    fn image(
+        &mut self,
+        _id: ImageId,
+        _target: ebook_ir::SizeF,
+    ) -> Option<std::sync::Arc<ImageData>> {
+        Some(std::sync::Arc::new(self.image.clone()))
     }
 }
 

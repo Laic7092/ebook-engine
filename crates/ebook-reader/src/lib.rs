@@ -14,8 +14,8 @@ mod types;
 
 pub use engine::{insets, Engine};
 pub use types::{
-    Bitmap, EngineError, Limits, Locator, LocatorRange, PageBox, ScrollChapter, ScrollLoc,
-    ScrollMetrics, SelectionResult, Style, Viewport,
+    Bitmap, EngineError, Limits, Locator, LocatorRange, MemoryUsage, PageBox, ScrollChapter,
+    ScrollLoc, ScrollMetrics, SelectionResult, Style, Viewport,
 };
 
 pub use ebook_format::TocEntry;

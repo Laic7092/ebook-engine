@@ -13,17 +13,26 @@ use ebook_raster::RgbaSurface;
 struct FixedResources;
 
 impl Resources for FixedResources {
-    fn glyph_alpha(&mut self, _font: FontId, _gid: u16, _px: f32) -> Option<GlyphBitmap> {
-        Some(GlyphBitmap {
+    fn glyph_alpha(
+        &mut self,
+        _font: FontId,
+        _gid: u16,
+        _px: f32,
+    ) -> Option<std::sync::Arc<GlyphBitmap>> {
+        Some(std::sync::Arc::new(GlyphBitmap {
             w: 8,
             h: 8,
             left: 0,
             top: -8,
             alpha: vec![128; 64],
-        })
+        }))
     }
 
-    fn image(&mut self, _id: ImageId) -> Option<ImageData> {
+    fn image(
+        &mut self,
+        _id: ImageId,
+        _target: ebook_ir::SizeF,
+    ) -> Option<std::sync::Arc<ImageData>> {
         None
     }
 }
@@ -110,18 +119,27 @@ struct Counting {
 }
 
 impl Resources for Counting {
-    fn glyph_alpha(&mut self, _font: FontId, _gid: u16, _px: f32) -> Option<GlyphBitmap> {
+    fn glyph_alpha(
+        &mut self,
+        _font: FontId,
+        _gid: u16,
+        _px: f32,
+    ) -> Option<std::sync::Arc<GlyphBitmap>> {
         self.calls.set(self.calls.get() + 1);
-        Some(GlyphBitmap {
+        Some(std::sync::Arc::new(GlyphBitmap {
             w: 8,
             h: 8,
             left: 0,
             top: -8,
             alpha: vec![128; 64],
-        })
+        }))
     }
 
-    fn image(&mut self, _id: ImageId) -> Option<ImageData> {
+    fn image(
+        &mut self,
+        _id: ImageId,
+        _target: ebook_ir::SizeF,
+    ) -> Option<std::sync::Arc<ImageData>> {
         None
     }
 }

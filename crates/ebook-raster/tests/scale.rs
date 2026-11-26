@@ -17,18 +17,27 @@ struct Probe {
 }
 
 impl Resources for Probe {
-    fn glyph_alpha(&mut self, _font: ebook_ir::FontId, _gid: u16, px: f32) -> Option<GlyphBitmap> {
+    fn glyph_alpha(
+        &mut self,
+        _font: ebook_ir::FontId,
+        _gid: u16,
+        px: f32,
+    ) -> Option<std::sync::Arc<GlyphBitmap>> {
         self.sizes.push(px);
-        Some(GlyphBitmap {
+        Some(std::sync::Arc::new(GlyphBitmap {
             w: 8,
             h: 8,
             left: 0,
             top: -8,
             alpha: vec![255; 64],
-        })
+        }))
     }
 
-    fn image(&mut self, _id: ImageId) -> Option<ebook_ir::ImageData> {
+    fn image(
+        &mut self,
+        _id: ImageId,
+        _target: ebook_ir::SizeF,
+    ) -> Option<std::sync::Arc<ebook_ir::ImageData>> {
         None
     }
 }

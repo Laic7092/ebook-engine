@@ -12,9 +12,11 @@ use ebook_font::FontBook;
 use ebook_format::epub::EpubReader;
 use ebook_format::txt::{StreamBook, TxtReader};
 use ebook_format::{Book, ChapterAnchor, FormatError, LinkTarget, TocEntry};
+use std::sync::Arc;
+
 use ebook_ir::{
     Anchor, AnchorRange, BlockBox, EdgesF, FontId, GlyphBitmap, ImageData, ImageId, LayoutResult,
-    Location, NodeId, PointF, Resources, Rgba8, StyledDoc,
+    Location, NodeId, PointF, Resources, Rgba8, SizeF, StyledDoc,
 };
 use ebook_layout::{
     BlockWindow, FlowCache, Layout, LayoutEnv, LayoutOptions, Mode, NoImageSizes, PageConstraint,
@@ -25,8 +27,8 @@ use ebook_render::ScaledSurface;
 
 use crate::heights::{estimate_height, index_key, HeightIndex};
 use crate::types::{
-    Bitmap, EngineError, Limits, Locator, LocatorRange, PageBox, ScrollChapter, ScrollLoc,
-    ScrollMetrics, SelectionResult, Style, Viewport,
+    Bitmap, EngineError, Limits, Locator, LocatorRange, MemoryUsage, PageBox, ScrollChapter,
+    ScrollLoc, ScrollMetrics, SelectionResult, Style, Viewport,
 };
 
 /// 最近一次排版的产物。交互查询（命中/选区/进度/锚点）只认这一份。
@@ -46,21 +48,87 @@ struct LastLayout {
     window: Option<BlockWindow>,
 }
 
+fn op_bytes(ops: &[ebook_ir::Op]) -> usize {
+    use core::mem::size_of;
+    ops.iter()
+        .map(|op| match op {
+            ebook_ir::Op::GlyphRun(run) => size_of::<ebook_ir::Op>() + run.text.len(),
+            ebook_ir::Op::Link { href, .. } => size_of::<ebook_ir::Op>() + href.len(),
+            ebook_ir::Op::Clip { ops, .. } => size_of::<ebook_ir::Op>() + op_bytes(ops),
+            _ => size_of::<ebook_ir::Op>(),
+        })
+        .sum()
+}
+
 impl LastLayout {
     fn reader(&self) -> Reader<'_> {
         Reader::new(&self.ir)
     }
 
     /// 粗略字节数：只用于缓存淘汰，不需要精确到分配器粒度。
+    ///
+    /// 这里必须把 `Vec`/`String` 的堆分配算进去：只数结构体本身会让 8 MB
+    /// 的预算实际留下几倍的内存。`Op` 里的 run 文本、链接、嵌套 clip，
+    /// 以及锚点路径，都是实打实的堆数据。
     fn approx_bytes(&self) -> usize {
         use core::mem::size_of;
+        let nodes = self.doc.nodes.len() * size_of::<ebook_ir::Node>();
+        let links = self
+            .doc
+            .nodes
+            .iter()
+            .map(|node| {
+                node.link.as_ref().map_or(0, String::len)
+                    + node
+                        .src
+                        .as_ref()
+                        .map_or(0, |anchor| anchor.path.len() * size_of::<u16>())
+            })
+            .sum::<usize>();
+        let images = self
+            .doc
+            .images
+            .iter()
+            .map(|image| {
+                size_of::<ebook_ir::ImageMeta>()
+                    + image.mime.as_ref().map_or(0, String::len)
+                    + image.alt.as_ref().map_or(0, String::len)
+                    + image.src.as_ref().map_or(0, String::len)
+            })
+            .sum::<usize>();
+        let ops = op_bytes(&self.ir.display.ops);
+        let lines = self
+            .ir
+            .runs
+            .lines
+            .iter()
+            .map(|line| {
+                size_of::<ebook_ir::LineBox>()
+                    + line
+                        .anchor
+                        .as_ref()
+                        .map_or(0, |anchor| anchor.path.len() * size_of::<u16>())
+            })
+            .sum::<usize>();
+        let issues = self
+            .ir
+            .issues
+            .iter()
+            .map(|issue| {
+                size_of::<ebook_ir::Issue>() + issue.detail.as_ref().map_or(0, String::len)
+            })
+            .sum::<usize>();
         self.doc.text.len()
-            + self.doc.nodes.len() * size_of::<ebook_ir::Node>()
-            + self.ir.display.ops.len() * size_of::<ebook_ir::Op>()
+            + self.doc.children.len() * size_of::<NodeId>()
+            + nodes
+            + links
+            + images
+            + ops
             + self.ir.display.glyphs.len() * size_of::<ebook_ir::Glyph>()
-            + self.ir.runs.lines.len() * size_of::<ebook_ir::LineBox>()
+            + lines
             + self.ir.blocks.len() * size_of::<ebook_ir::BlockBox>()
             + self.anchors.len() * size_of::<ChapterAnchor>()
+            + issues
     }
 
     /// 这份排版结果是不是这些输入排出来的。
@@ -87,7 +155,7 @@ impl LastLayout {
 
 /// 排版结果缓存的字节预算。滚动时当前章 + 前后各一章通常就够；按字节而不是
 /// 按章数淘汰，小章节可以多留几份，大章节不会把四份整章 IR 同时留在内存里。
-const CHAPTER_CACHE_BYTES: usize = 12 * 1024 * 1024;
+const CHAPTER_CACHE_BYTES: usize = 8 * 1024 * 1024;
 /// 至少保留这么多份，保证跨章瓦片不用反复重排。
 const CHAPTER_CACHE_MIN: usize = 2;
 
@@ -774,6 +842,66 @@ impl Engine {
     /// 前段缓存的命中/未命中次数。宿主可以据此观察「换页高」有没有真的省下断行。
     pub fn flow_cache_stats(&self) -> (u64, u64) {
         (self.flow_cache.hits(), self.flow_cache.misses())
+    }
+
+    /// 当前缓存的近似内存占用。用于宿主内存警告时的决策，不要求逐字节精确。
+    pub fn memory_usage(&self) -> MemoryUsage {
+        let layout_bytes = self.last.as_ref().map_or(0, LastLayout::approx_bytes);
+        let chapters_bytes = self.chapters.iter().map(LastLayout::approx_bytes).sum();
+        let flow_bytes = self.flow_cache.bytes();
+        let image_bytes = self.images.bytes();
+        let font_bytes = self.font.as_ref().map_or(0, FontBook::cache_bytes);
+        MemoryUsage {
+            layout_bytes,
+            chapters_bytes,
+            flow_bytes,
+            image_bytes,
+            font_bytes,
+            total_bytes: layout_bytes
+                .saturating_add(chapters_bytes)
+                .saturating_add(flow_bytes)
+                .saturating_add(image_bytes)
+                .saturating_add(font_bytes),
+        }
+    }
+
+    /// 丢掉可再生的缓存，保留当前页 IR。
+    ///
+    /// 适合 iOS/Android 的内存警告：跨章 IR、断行缓存、图片 RGBA、字体位图
+    /// 全部释放；当前页仍能继续画。宿主若还需要更多，可以重新
+    /// [`layout`](Self::layout) 或直接 drop `Engine`。
+    pub fn trim_memory(&mut self) {
+        self.chapters.clear();
+        self.flow_cache.clear();
+        self.images.clear();
+        if let Some(font) = self.font.as_ref() {
+            font.clear_caches();
+        }
+    }
+
+    /// 全分辨率预览一张当前章图片。页面渲染走降采样缓存，这条路径给宿主
+    /// 的“点击查看原图”用；两者缓存键不同，互不污染。
+    pub fn image_full(&mut self, id: ImageId) -> Option<Arc<ImageData>> {
+        let src = self
+            .last
+            .as_ref()?
+            .doc
+            .images
+            .get(id as usize)?
+            .src
+            .clone()?;
+        if let Some(hit) = self.images.get(&src, 0, 0) {
+            return Some(hit);
+        }
+        let decoded = self
+            .backend
+            .asset_owned(&src)
+            .and_then(|(bytes, _)| ebook_format::image::decode_image(&bytes))
+            .map(Arc::new);
+        let hit = decoded.clone();
+        self.images
+            .insert(src, 0, 0, decoded, self.limits.image_cache_bytes);
+        hit
     }
 
     /// 最近一次排版的 IR。适配层拿它编码成 postcard / 别的形状。
@@ -1677,7 +1805,7 @@ fn render_bitmap(
     Ok(Bitmap {
         width,
         height,
-        rgba: surface.to_rgba(),
+        rgba: surface.into_rgba(),
     })
 }
 
@@ -1708,7 +1836,7 @@ impl PageResources<'_> {
 }
 
 impl Resources for PageResources<'_> {
-    fn glyph_alpha(&mut self, font: FontId, gid: u16, px: f32) -> Option<GlyphBitmap> {
+    fn glyph_alpha(&mut self, font: FontId, gid: u16, px: f32) -> Option<Arc<GlyphBitmap>> {
         self.glyph_alpha_at(font, gid, px, 0.0, 0.0)
     }
 
@@ -1719,7 +1847,7 @@ impl Resources for PageResources<'_> {
         px: f32,
         dx: f32,
         dy: f32,
-    ) -> Option<GlyphBitmap> {
+    ) -> Option<Arc<GlyphBitmap>> {
         let book = self.font.as_mut()?;
         // 全局加粗只影响取哪张 face，不改 IR：同一份 IR 可以按开关重画。
         let face = if self.bold {
@@ -1730,51 +1858,91 @@ impl Resources for PageResources<'_> {
         book.rasterize_at(face, gid, px, dx, dy)
     }
 
-    fn image(&mut self, id: ImageId) -> Option<ImageData> {
+    fn image(&mut self, id: ImageId, target: SizeF) -> Option<Arc<ImageData>> {
         let src = self.src_of(id)?;
-        if let Some(hit) = self.cache.get(&src) {
+        let (tw, th) = target_pixels(target);
+        if let Some(hit) = self.cache.get(&src, tw, th) {
             return Some(hit);
         }
         let decoded = self
             .book
             .asset_owned(&src)
-            .and_then(|(bytes, _)| ebook_format::image::decode_image(&bytes));
+            .and_then(|(bytes, _)| ebook_format::image::decode_image_scaled(&bytes, tw, th))
+            .map(Arc::new);
         let hit = decoded.clone();
-        self.cache.insert(src, decoded, self.budget);
+        self.cache.insert(src, tw, th, decoded, self.budget);
         hit
     }
 }
 
-/// 解码后的图片按归档路径缓存。图片字节本身在书里，这里只留 RGBA。
+fn target_pixels(target: SizeF) -> (u32, u32) {
+    let side = |value: f32| -> u32 {
+        if value.is_finite() && value > 0.0 {
+            value.ceil().min(16_384.0) as u32
+        } else {
+            0
+        }
+    };
+    (side(target.w), side(target.h))
+}
+
+/// 解码后的图片按 `(归档路径, 目标像素)` 缓存。同一张图在页面和
+/// “点击看原图”下会各有一份，互不覆盖。
 ///
 /// 用 `Vec` 而不是哈希表：一页涉及的图很少，线性查找更省内存，
-/// 也与"IR 里禁止哈希容器"的取向一致。
+/// 也与“IR 里禁止哈希容器”的取向一致。
 #[derive(Default)]
 struct ImageCache {
-    entries: Vec<(String, Option<ImageData>)>,
+    entries: Vec<ImageEntry>,
     bytes: usize,
 }
 
+struct ImageEntry {
+    src: String,
+    w: u32,
+    h: u32,
+    data: Option<Arc<ImageData>>,
+}
+
 impl ImageCache {
-    fn get(&mut self, src: &str) -> Option<ImageData> {
+    fn get(&mut self, src: &str, w: u32, h: u32) -> Option<Arc<ImageData>> {
         self.entries
             .iter()
-            .find(|(cached, _)| cached == src)
-            .and_then(|(_, hit)| hit.clone())
+            .find(|entry| entry.src == src && entry.w == w && entry.h == h)
+            .and_then(|entry| entry.data.clone())
     }
 
-    fn insert(&mut self, src: String, data: Option<ImageData>, budget: usize) {
-        if let Some(image) = data.as_ref() {
-            self.bytes += image.rgba.len();
+    fn insert(&mut self, src: String, w: u32, h: u32, data: Option<Arc<ImageData>>, budget: usize) {
+        let entry_bytes = |entry: &ImageEntry| -> usize {
+            core::mem::size_of::<ImageEntry>()
+                + entry.src.len()
+                + entry.data.as_ref().map_or(0, |image| image.rgba.len())
+        };
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.src == src && entry.w == w && entry.h == h)
+        {
+            let old = self.entries.remove(index);
+            self.bytes = self.bytes.saturating_sub(entry_bytes(&old));
         }
-        self.entries.push((src, data));
+        let entry = ImageEntry { src, w, h, data };
+        self.bytes = self.bytes.saturating_add(entry_bytes(&entry));
+        self.entries.push(entry);
         // 超预算就丢最旧的条目，直到回到预算内（至少留一条，避免反复解码同一张）。
         while self.bytes > budget && self.entries.len() > 1 {
-            let (_, dropped) = self.entries.remove(0);
-            if let Some(image) = dropped {
-                self.bytes = self.bytes.saturating_sub(image.rgba.len());
-            }
+            let dropped = self.entries.remove(0);
+            self.bytes = self.bytes.saturating_sub(entry_bytes(&dropped));
         }
+    }
+
+    fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
     }
 }
 
