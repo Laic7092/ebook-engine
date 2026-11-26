@@ -48,6 +48,72 @@ struct LastLayout {
     window: Option<BlockWindow>,
 }
 
+/// The line an anchor names: its own text when it has one, else the first
+/// line below it (a `<p id>` sits above its text nodes), else the last line
+/// that starts there (a byte offset inside one text node).
+fn line_of_anchor(ir: &LayoutResult, anchor: &Anchor) -> Option<u32> {
+    let mut fallback = None;
+    for (index, line) in ir.runs.lines.iter().enumerate() {
+        let Some(line_anchor) = line.anchor.as_ref() else {
+            continue;
+        };
+        if line_anchor.spine != anchor.spine || !line_anchor.path.starts_with(&anchor.path) {
+            continue;
+        }
+        if line_anchor.path.len() > anchor.path.len() {
+            return Some(index as u32);
+        }
+        if anchor.offset >= line_anchor.offset && anchor.offset - line_anchor.offset <= line.src.len
+        {
+            return Some(index as u32);
+        }
+        fallback = Some(index as u32);
+    }
+    fallback
+}
+
+/// The first text node after `anchor` in document order: nodes are pushed in
+/// that order, so the node with the anchor's path, then the next text, is it.
+fn next_text_after<'a>(doc: &'a StyledDoc, anchor: &Anchor) -> Option<&'a Anchor> {
+    let mut seen = false;
+    for node in &doc.nodes {
+        let Some(src) = node.src.as_ref() else {
+            continue;
+        };
+        if src.spine != anchor.spine {
+            continue;
+        }
+        if !seen {
+            if src.path == anchor.path {
+                seen = true;
+            }
+            continue;
+        }
+        if node.kind.is_text() {
+            return Some(src);
+        }
+    }
+    None
+}
+
+/// The last line of the block an empty anchor sits in: its parent's lines.
+fn last_line_in_block(ir: &LayoutResult, anchor: &Anchor) -> Option<u32> {
+    if anchor.path.len() < 2 {
+        return None;
+    }
+    let parent = &anchor.path[..anchor.path.len() - 1];
+    let mut fallback = None;
+    for (index, line) in ir.runs.lines.iter().enumerate() {
+        let Some(line_anchor) = line.anchor.as_ref() else {
+            continue;
+        };
+        if line_anchor.spine == anchor.spine && line_anchor.path.starts_with(parent) {
+            fallback = Some(index as u32);
+        }
+    }
+    fallback
+}
+
 fn op_bytes(ops: &[ebook_ir::Op]) -> usize {
     use core::mem::size_of;
     ops.iter()
@@ -1563,27 +1629,21 @@ impl Engine {
             .iter()
             .find(|entry| entry.id == fragment)
             .map(|entry| &entry.anchor)?;
-        let mut fallback = None;
-        for (index, line) in last.ir.runs.lines.iter().enumerate() {
-            let Some(line_anchor) = line.anchor.as_ref() else {
-                continue;
-            };
-            if line_anchor.spine != anchor.spine || !line_anchor.path.starts_with(&anchor.path) {
-                continue;
-            }
-            // 元素级锚点（`<p id>`）落在更深的文本节点路径上：定位到该元素的
-            // 第一行。同一层路径才谈得上字节偏移。
-            if line_anchor.path.len() > anchor.path.len() {
-                return Some(index as u32);
-            }
-            if anchor.offset >= line_anchor.offset
-                && anchor.offset - line_anchor.offset <= line.src.len
-            {
-                return Some(index as u32);
-            }
-            fallback = Some(index as u32);
+        if let Some(line) = line_of_anchor(&last.ir, anchor) {
+            return Some(line);
         }
-        fallback
+        // 空的内联锚点（`<a id="m1"></a>`，Calibre 的脚注就是这样）自己不成
+        // 行：它的位置是它后面第一个文本节点。锚点在块尾、后面没有同一块里
+        // 的文本时，落在该块的最后一行。
+        if let Some(next) = next_text_after(&last.doc, anchor) {
+            let parent = &anchor.path[..anchor.path.len().saturating_sub(1)];
+            if next.path.starts_with(parent) {
+                if let Some(line) = line_of_anchor(&last.ir, next) {
+                    return Some(line);
+                }
+            }
+        }
+        last_line_in_block(&last.ir, anchor)
     }
 
     /// 在**当前章**上下文里解析书内链接。

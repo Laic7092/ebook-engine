@@ -425,7 +425,14 @@ fn resolve_image_size(
 ) -> Option<ebook_ir::SizeF> {
     let em = style.font.size;
     let w = style.width.resolve(avail_w, em);
-    let h = style.height.resolve(0.0, em);
+    // A percentage height has no definite containing height here (the block's
+    // height is auto), and CSS says it then computes to auto: use the image's
+    // own ratio instead of a zero-size box. Calibre writes `height: 96%;
+    // width: auto` on whole-page images, which would otherwise render blank.
+    let h = match style.height {
+        ebook_ir::Len::Pct(_) => None,
+        height => height.resolve(0.0, em),
+    };
     let size = match (w, h) {
         (Some(w), Some(h)) => ebook_ir::SizeF::new(w, h),
         (Some(w), None) => {
