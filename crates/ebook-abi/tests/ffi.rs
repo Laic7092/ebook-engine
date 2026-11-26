@@ -220,8 +220,8 @@ fn version_and_the_error_buffer_contract() {
     );
     assert_eq!(eb_abi_version(), ebook_abi::ABI_VERSION);
 
-    // 失败后：指针 + len 指向库内缓冲（不在调用方，不需要 eb_free），
-    // 紧跟的字节是结尾 0。连调两次不会换地址——没有 mem::forget 漏出去的旧串。
+    // 失败后：指针 + len 指向库内缓冲（不在调用方，不需要 eb_free）。
+    // 错误串只增不减，所以旧指针在新失败之后仍然有效。
     let mut first = 0usize;
     let mut second = 0usize;
     let first_ptr = unsafe {
@@ -233,12 +233,15 @@ fn version_and_the_error_buffer_contract() {
         eb_last_error(&mut second)
     };
     assert_eq!(first, second);
-    assert_eq!(first_ptr, second_ptr);
     assert!(!first_ptr.is_null());
+    assert!(!second_ptr.is_null());
     assert!(first > 0, "失败应该留下原因");
-    let bytes = unsafe { std::slice::from_raw_parts(first_ptr, first) };
-    assert!(std::str::from_utf8(bytes).is_ok(), "错误串应是 UTF-8");
+    let first_bytes = unsafe { std::slice::from_raw_parts(first_ptr, first) };
+    assert!(std::str::from_utf8(first_bytes).is_ok(), "错误串应是 UTF-8");
     assert_eq!(unsafe { *first_ptr.add(first) }, 0, "len 不含结尾 0");
+    // 第二次失败追加了新串；第一次拿到的指针仍然可读。
+    let second_bytes = unsafe { std::slice::from_raw_parts(second_ptr, second) };
+    assert_eq!(first_bytes, second_bytes);
 }
 
 #[test]

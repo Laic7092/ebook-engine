@@ -53,6 +53,8 @@ fn metadata_is_filled_beyond_title_and_lang() {
     let book = &opened.book;
     assert_eq!(book.title.as_deref(), Some("Toc Book"));
     assert_eq!(book.creator.as_deref(), Some("Ada Lovelace"));
+    assert_eq!(book.creators.len(), 1);
+    assert_eq!(book.creators[0].name, "Ada Lovelace");
     assert_eq!(book.publisher.as_deref(), Some("Analytical Press"));
     assert_eq!(book.identifier.as_deref(), Some("urn:uuid:toc-book"));
     assert_eq!(book.language.as_deref(), Some("en"));
@@ -63,6 +65,34 @@ fn metadata_is_filled_beyond_title_and_lang() {
         Some("A book about a table of contents.")
     );
     assert_eq!(book.cover_href.as_deref(), Some("OEBPS/img/cover.png"));
+}
+
+#[test]
+fn multiple_creators_keep_order_and_roles() {
+    let opf = r##"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="id">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+    <dc:title>Many Authors</dc:title>
+    <dc:creator opf:role="aut" opf:file-as="Lovelace, Ada">Ada Lovelace</dc:creator>
+    <dc:creator opf:role="edt" opf:file-as="Babbage, Charles">Charles Babbage</dc:creator>
+    <dc:identifier id="id">many-authors</dc:identifier>
+    <dc:language>en</dc:language>
+  </metadata>
+  <manifest>
+    <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"##;
+    let src = support::source(support::epub("OEBPS/content.opf", opf, &[]));
+    let opened = open(&src).expect("open");
+    let book = &opened.book;
+    assert_eq!(book.creator.as_deref(), Some("Ada Lovelace"));
+    assert_eq!(book.creators.len(), 2);
+    assert_eq!(book.creators[0].name, "Ada Lovelace");
+    assert_eq!(book.creators[0].role.as_deref(), Some("aut"));
+    assert_eq!(book.creators[0].file_as.as_deref(), Some("Lovelace, Ada"));
+    assert_eq!(book.creators[1].name, "Charles Babbage");
+    assert_eq!(book.creators[1].role.as_deref(), Some("edt"));
 }
 
 #[test]

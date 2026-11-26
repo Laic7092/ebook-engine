@@ -400,7 +400,7 @@ pub fn paint_window(ir: &LayoutResult, page: u32, top: f32,
 - 命中仍用 `Reader::hit(0, x, y)`（`inset.top == 0` 时 `y` 就是流坐标）；
   `Reader::progress` 按行计算，滚动模式不需要新公式。
 - 单章入口：`Engine::layout_scroll`、`content_height`、`bitmap_window`；
-  C ABI：`eb_plain_layout_scroll`、`eb_plain_content_height`、
+  C ABI：`eb_plain_layout`（`scroll = 1`）、`eb_plain_content_height`、
   `eb_plain_page_slice_raw`。
 
 #### 4.7.1 连续滚动会话（跨章）
@@ -808,7 +808,10 @@ JS 侧解码器是手写的，IR 版本、枚举 tag、字段顺序都见本文�
 并用 `_Static_assert` 对齐 Rust 侧的 `size_of`；头文件与 `pub extern "C" fn`
 的符号集合必须完全相等。
 
-### 9.1 两个面
+### 9.1 两个面（ABI v2）
+
+`EB_ABI_VERSION` 已升到 2。v1 的整数句柄、进程级字符串环、13 参数
+`eb_plain_layout` 都不再保留；宿主需要按新头文件重编。
 
 | 面 | 入口 | 适合 |
 |---|---|---|
@@ -817,10 +820,12 @@ JS 侧解码器是手写的，IR 版本、枚举 tag、字段顺序都见本文�
 
 - postcard 面的 `Request` / `Response` 枚举与 wasm 侧同思路，schema 就是
   `crates/ebook-abi/src/protocol.rs`；新增能力只加枚举变体，不往 C 面加函数。
-- 标量面每条能力一个函数，参数与结果都是标量/字符串/`repr(C)` 结构体，
-  像素与封面由宿主给路径、库写文件。
-- 两面共用一个 `Engine`：postcard 面是 `Mutex<Engine>` 的不透明指针，
-  标量面是整数句柄 + 进程级句柄表。
+- 标量面每条能力一个函数，参数与结果都是标量/字符串/`repr(C)` 结构体；
+  像素与封面既可以写文件，也可以走 `_bytes` 直接返回内存。
+- 排版参数走 `EbLayoutOptions` / `EbScrollSliceOptions`（带 `size` + `version`），
+  不再用 13/22 个裸参数。
+- 两面共用同一个不透明句柄 `EbEngine *`：句柄内部是 `Mutex<Engine>`，标量面
+  不再有整数句柄表，也不再有进程级字符串环。
 
 ### 9.2 所有权与生命周期
 
@@ -828,23 +833,22 @@ JS 侧解码器是手写的，IR 版本、枚举 tag、字段顺序都见本文�
 |---|---|---|
 | `eb_alloc` / `eb_request` 返回值 | 调用方 | 直到 `eb_free(ptr, len)` |
 | 其余 `const char *` | 库 | 见下 |
-| `eb_plain_open` 句柄 | 调用方 | 直到 `eb_plain_close` |
+| `eb_plain_open` / `eb_open` 句柄 | 调用方 | 直到 `eb_plain_close` / `eb_close` |
 
 - `eb_version` / `eb_plain_version`：静态字符串，进程生命周期。
-- `eb_last_error` / `eb_plain_last_error`：库内缓冲，直到**下一次失败的调用**
-  （原地复用，连续失败不换地址，也不泄漏）。
-- `eb_plain_*` 其余字符串：进程级环形缓冲（最近 64 条），直到后续 64 次取字符串。
-  要长期保存就当场 `strdup`。
-- 无效句柄不返回 `NULL` 而是空串/`0`/`ok == 0` 的结构体；关掉的句柄同理。
-  `NULL` 只表示“参数错”（例如空的路径）。
+- `eb_last_error` / `eb_plain_last_error`：只增不减的错误历史，旧指针不会失效。
+- `eb_plain_*` 其余字符串：存在句柄自己的池里，直到 `eb_plain_close`。
+- 无效句柄（`NULL`）返回空串/`0`/`ok == 0` 的结构体；关闭后的指针不得再用。
 
 ### 9.3 版本与布局
 
 - `EB_ABI_VERSION`（头文件）必须等于 `eb_abi_version()` / `eb_plain_abi_version()`。
   任何 `repr(C)` 结构体加字段、改字段顺序、改既有函数参数都要 +1；
   只加新函数不算破坏性变更。
-- `eb_struct_size(kind)` 返回 `EbPageInfo` / `EbLoc` / `EbSelectionRect` /
-  `EbLink` 的字节数（kind 1..4），宿主可用来二次校验头文件与库同源。
+- `eb_struct_size(kind)` 返回各 `repr(C)` 结构体的字节数（kind 1..10），宿主可
+  用来二次校验头文件与库同源。
+- `EbLayoutOptions` / `EbScrollSliceOptions` 都带 `size` + `version`；以后加字段
+  只增大 `size`，不再改函数签名。
 - 库版本串由 `CARGO_PKG_VERSION` 编进来（不再手写）。
 
 ### 9.4 位图落盘格式（`EQP1`）
@@ -856,13 +860,23 @@ JS 侧解码器是手写的，IR 版本、枚举 tag、字段顺序都见本文�
 行优先、直通 alpha（非预乘）。位图覆盖整个视口（含留白），不是内容盒。
 写文件是原子的：先写同目录的 `{path}.{pid}.{seq}.part`，再 `rename` 到目标
 路径；宿主用「文件存在」判断可用时不会读到半张位图。
-`eb_plain_page_raw` 出一页；`eb_plain_page_slice_raw` 出滚动流的一片
-（`y`/`height` 是点，`y` 在 `[0, eb_plain_content_height)` 里，同一 `y`
-逐字节可复现）。`eb_plain_scroll_band_raw` 出**跨章**的一段（`y` 在
+`eb_plain_page_raw` / `eb_plain_page_bytes` 出一页；`eb_plain_page_slice_raw` /
+`eb_plain_page_slice_bytes` 出滚动流的一片（`y`/`height` 是点，`y` 在
+`[0, eb_plain_content_height)` 里，同一 `y` 逐字节可复现）。`eb_plain_scroll_band_raw` 出**跨章**的一段（`y` 在
 `[0, eb_plain_scroll_total_height)` 里），`eb_plain_scroll_band_bytes` 是它的
 内存版（`eb_free` 释放）——能读内存的宿主不必为瓦片落盘。平台侧只读它：iOS 包成 `CGImage`，GTK 包成 `GdkMemoryTexture`。
 
-### 9.5 句柄上的两份状态
+### 9.5 书目与图片
+
+- `eb_plain_metadata` 一次取齐 `EbMetadata`（title / creators / language /
+  publisher / identifier / date / description / cover）。
+- 多作者不再截断：`eb_plain_creator_count` + `eb_plain_creator_at`；`eb_plain_creator`
+  仍返回第一作者。
+- 图片可枚举：`eb_plain_image_count` + `eb_plain_image_info`；
+  `eb_plain_image_full_bytes` / `_write` 用同一个 `image_id`。
+- 封面 MIME/长度/写入共用一次解压结果。
+
+### 9.6 句柄上的两份状态
 
 标量面只能返回标量/结构体，所以两样东西留在句柄上：
 
@@ -873,7 +887,7 @@ JS 侧解码器是手写的，IR 版本、枚举 tag、字段顺序都见本文�
 
 两者都在关书时丢掉，下一次同类调用覆盖。`ok == 0` 是不存在，不是错误。
 
-### 9.6 错误
+### 9.7 错误
 
 所有入口都 `catch_unwind`：panic 变成 `Response::Error` 或负返回值 + 错误串，
 不会让宿主 abort。这条依赖 `native` profile 的 `panic = "unwind"`

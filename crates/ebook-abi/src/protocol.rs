@@ -103,11 +103,22 @@ pub struct TocEntry {
     pub depth: u16,
 }
 
+/// 一个 `dc:creator`。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Creator {
+    pub name: String,
+    pub role: Option<String>,
+    pub file_as: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Book {
     pub title: Option<String>,
     pub language: Option<String>,
+    /// 第一作者，等价于 `creators.first()`；单作者宿主直接用。
     pub creator: Option<String>,
+    /// 全部作者，按 OPF 顺序。
+    pub creators: Vec<Creator>,
     pub publisher: Option<String>,
     pub identifier: Option<String>,
     pub date: Option<String>,

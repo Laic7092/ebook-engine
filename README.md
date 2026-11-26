@@ -144,21 +144,31 @@ Windows）链接它而不是自己编 Rust：
 ```c
 #include "ebook_abi.h"
 
-int32_t book = eb_plain_open(bytes, len, "demo.epub");
-eb_plain_layout(book, 0, 390, 760, 26, 30, 26, 30, 1.0, 1.6, 0, 0, 0);
+EbEngine *book = eb_plain_open(bytes, len, "demo.epub");
+EbLayoutOptions opts = {
+  .size = sizeof(EbLayoutOptions),
+  .version = EB_LAYOUT_OPTIONS_VERSION,
+  .spine = 0,
+  .width = 390, .height = 760,
+  .top = 26, .right = 30, .bottom = 26, .left = 30,
+  .font_scale = 1.0, .line_scale = 1.6,
+};
+eb_plain_layout(book, &opts);
 eb_plain_page_raw(book, 0, 3.0, ink, paper, false, "/tmp/page0.eqp");
+eb_plain_close(book);
 ```
 
 `ink` / `paper` 是 `0xRRGGBBAA`（`0` = 不修正 / 白纸）；`ink` 只替换默认字色，
 书里显式写的链接色、强调色保留。出图先写临时文件再 `rename`，宿主按「文件存在」
 判断可用不会读到半张位图。
 
-两个面：`eb_open` / `eb_request`（postcard 请求响应，适合 cgo / Swift）与
-`eb_plain_*`（标量 + 整数句柄 + 文件出图，适合只能拿 `Pointer` 的宿主）。
-像素是 `EQP1` 文件（`"EQP1" | u32 w | u32 h | RGBA8`）；单章滚动用
-`eb_plain_layout_scroll` + `eb_plain_content_height` + `eb_plain_page_slice_raw`，
-跨章连续滚动用 `eb_plain_scroll_begin` + `eb_plain_scroll_band_raw`（或
-`_band_bytes` 直接拿内存位图，不必落盘）。契约与所有权见 [docs/api.md 第 9 节](docs/api.md)，头文件是
+两个面共用同一个不透明句柄 `EbEngine *`：`eb_open` / `eb_request`（postcard
+请求响应，适合 cgo / Swift）与 `eb_plain_*`（标量 + 字符串 + 结构体，适合只能
+拿 `Pointer` 的宿主）。像素是 `EQP1` 文件（`"EQP1" | u32 w | u32 h | RGBA8`），
+也可以走 `_bytes` 直接拿内存；单章滚动用 `eb_plain_layout` 的 `scroll = 1` +
+`eb_plain_content_height` + `eb_plain_page_slice_raw`，跨章连续滚动用
+`eb_plain_scroll_begin` + `eb_plain_scroll_band_raw`（或 `_band_bytes`）。
+契约与所有权见 [docs/api.md 第 9 节](docs/api.md)，头文件是
 `crates/ebook-abi/include/ebook_abi.h`，打 tag 时每个 target 一个
 `libebook_abi-<target>.tar.gz`（静态库 + 头文件 + `SHA256SUMS`）。
 

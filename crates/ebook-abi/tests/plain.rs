@@ -3,6 +3,7 @@
 use std::ffi::CString;
 
 use ebook_abi::plain::*;
+use ebook_abi::EbEngine;
 
 /// `eb_last_error` / `eb_plain_last_error` 是进程级缓冲：成功开书会清空它。
 /// 测试默认并行，任何一次成功的 `open` 都能把另一个测试刚设的错误擦掉。
@@ -35,11 +36,11 @@ fn font() -> Vec<u8> {
 
 /// 打开示例书，返回句柄和「注册上字体了吗」：CI 的机器上可能没有中文字体，
 /// 没有字体时页照样出，位图上没有字。
-fn open_book() -> (i32, bool) {
+fn open_book() -> (*mut EbEngine, bool) {
     let bytes = demo();
     let name = c"demo.txt";
     let engine = unsafe { eb_plain_open(bytes.as_ptr(), bytes.len(), name.as_ptr()) };
-    assert!(engine >= 0, "eb_plain_open 失败");
+    assert!(!engine.is_null(), "eb_plain_open 失败");
     let font = font();
     let mut has_font = false;
     if !font.is_empty() {
@@ -50,13 +51,156 @@ fn open_book() -> (i32, bool) {
     (engine, has_font)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn layout_options(
+    spine: u32,
+    scroll: u32,
+    width: f32,
+    height: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    left: f32,
+    font_scale: f32,
+    line_scale: f32,
+    letter_px: f32,
+    word_px: f32,
+    align: u32,
+) -> EbLayoutOptions {
+    EbLayoutOptions {
+        size: std::mem::size_of::<EbLayoutOptions>() as u32,
+        version: EB_LAYOUT_OPTIONS_VERSION,
+        spine,
+        scroll,
+        width,
+        height,
+        top,
+        right,
+        bottom,
+        left,
+        font_scale,
+        line_scale,
+        letter_px,
+        word_px,
+        align,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout(
+    engine: *mut EbEngine,
+    spine: u32,
+    width: f32,
+    height: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    left: f32,
+    font_scale: f32,
+    line_scale: f32,
+    letter_px: f32,
+    word_px: f32,
+    align: u32,
+) -> i32 {
+    let options = layout_options(
+        spine, 0, width, height, top, right, bottom, left, font_scale, line_scale, letter_px,
+        word_px, align,
+    );
+    unsafe { eb_plain_layout(engine, &options) }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_scroll(
+    engine: *mut EbEngine,
+    spine: u32,
+    width: f32,
+    height: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    left: f32,
+    font_scale: f32,
+    line_scale: f32,
+    letter_px: f32,
+    word_px: f32,
+    align: u32,
+) -> i32 {
+    let options = layout_options(
+        spine, 1, width, height, top, right, bottom, left, font_scale, line_scale, letter_px,
+        word_px, align,
+    );
+    unsafe { eb_plain_layout(engine, &options) }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scroll_begin(
+    engine: *mut EbEngine,
+    width: f32,
+    height: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    left: f32,
+    font_scale: f32,
+    line_scale: f32,
+    letter_px: f32,
+    word_px: f32,
+    align: u32,
+) -> i32 {
+    let options = layout_options(
+        0, 0, width, height, top, right, bottom, left, font_scale, line_scale, letter_px, word_px,
+        align,
+    );
+    unsafe { eb_plain_scroll_begin(engine, &options) }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scroll_slice_raw(
+    engine: *mut EbEngine,
+    spine: u32,
+    width: f32,
+    height: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    left: f32,
+    font_scale: f32,
+    line_scale: f32,
+    letter_px: f32,
+    word_px: f32,
+    align: u32,
+    y: f32,
+    slice_height: f32,
+    scale: f32,
+    ink: u32,
+    paper: u32,
+    bold: bool,
+    path: *const std::ffi::c_char,
+) -> i32 {
+    let options = EbScrollSliceOptions {
+        size: std::mem::size_of::<EbScrollSliceOptions>() as u32,
+        version: EB_SCROLL_SLICE_OPTIONS_VERSION,
+        layout: layout_options(
+            spine, 1, width, height, top, right, bottom, left, font_scale, line_scale, letter_px,
+            word_px, align,
+        ),
+        y,
+        slice_height,
+        scale,
+        ink,
+        paper,
+        bold,
+    };
+    unsafe { eb_plain_scroll_slice_raw(engine, &options, path) }
+}
+
 #[test]
 fn lays_out_and_writes_a_raw_page() {
     let _guard = serial();
     let (engine, has_font) = open_book();
     assert!(eb_plain_spine_count(engine) > 0);
     assert!(eb_plain_page_count(engine) == 0, "排版前没有页");
-    let rc = eb_plain_layout(
+    let rc = layout(
         engine, 0, 400.0, 700.0, 24.0, 24.0, 24.0, 24.0, 1.0, 1.0, 0.0, 0.0, 0,
     );
     assert_eq!(rc, 0, "排版失败");
@@ -104,7 +248,7 @@ fn raw_writes_are_atomic_and_leave_no_parts() {
     let _guard = serial();
     let (engine, _) = open_book();
     assert_eq!(
-        eb_plain_layout(engine, 0, 400.0, 700.0, 24.0, 24.0, 24.0, 24.0, 1.0, 1.0, 0.0, 0.0, 0,),
+        layout(engine, 0, 400.0, 700.0, 24.0, 24.0, 24.0, 24.0, 1.0, 1.0, 0.0, 0.0, 0,),
         0
     );
 
@@ -158,7 +302,7 @@ fn lays_out_scroll_and_writes_a_slice() {
     let _guard = serial();
     let (engine, has_font) = open_book();
     // 滚动：上下留白 0，左右 24；height 只是视口高，不参与切页。
-    let rc = eb_plain_layout_scroll(
+    let rc = layout_scroll(
         engine, 0, 400.0, 700.0, 0.0, 24.0, 0.0, 24.0, 1.0, 1.0, 0.0, 0.0, 0,
     );
     assert_eq!(rc, 0, "滚动排版失败");
@@ -221,7 +365,7 @@ fn lays_out_scroll_and_writes_a_slice() {
     let one = std::env::temp_dir().join("eb-plain-scroll-one-call.raw");
     let c_one = CString::new(one.to_str().unwrap()).unwrap();
     assert_eq!(
-        eb_plain_scroll_slice_raw(
+        scroll_slice_raw(
             engine,
             0,
             400.0,
@@ -265,8 +409,8 @@ fn no_font_makes_blank_pages() {
     let bytes = demo();
     let name = c"demo.txt";
     let engine = unsafe { eb_plain_open(bytes.as_ptr(), bytes.len(), name.as_ptr()) };
-    assert!(engine >= 0);
-    let _ = eb_plain_layout(
+    assert!(!engine.is_null());
+    let _ = layout(
         engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0.0, 0,
     );
     let pages = eb_plain_page_count(engine);
@@ -295,7 +439,7 @@ fn the_ink_colors_the_glyphs() {
         eb_plain_close(engine);
         return;
     }
-    let _ = eb_plain_layout(
+    let _ = layout(
         engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0.0, 0,
     );
     let path = std::env::temp_dir().join("eb-night.eqp");
@@ -329,6 +473,74 @@ fn the_ink_colors_the_glyphs() {
 }
 
 #[test]
+fn metadata_bundle_matches_single_field_getters() {
+    let _guard = serial();
+    let (engine, _) = open_book();
+    let meta = eb_plain_metadata(engine);
+    assert_eq!(meta.ok, 1);
+    assert!(!meta.title.is_null());
+    let bundle_title = unsafe { std::ffi::CStr::from_ptr(meta.title) };
+    let single_title = unsafe { std::ffi::CStr::from_ptr(eb_plain_title(engine)) };
+    assert_eq!(bundle_title, single_title);
+    assert_eq!(meta.creator_count, eb_plain_creator_count(engine));
+    assert_ne!(eb_plain_capabilities(engine) & EB_CAP_TXT, 0);
+    assert_eq!(eb_plain_metadata(std::ptr::null_mut()).ok, 0);
+    eb_plain_close(engine);
+}
+
+#[test]
+fn page_bytes_match_the_raw_file_format() {
+    let _guard = serial();
+    let (engine, _) = open_book();
+    assert_eq!(
+        layout(engine, 0, 400.0, 700.0, 24.0, 24.0, 24.0, 24.0, 1.0, 1.0, 0.0, 0.0, 0),
+        0
+    );
+    let mut len = 0usize;
+    let ptr = eb_plain_page_bytes(engine, 0, 1.0, 0, 0, false, &mut len);
+    assert!(!ptr.is_null());
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
+    unsafe { ebook_abi::eb_free(ptr, len) };
+    assert_eq!(&bytes[..4], b"EQP1");
+    let width = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+    let height = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+    assert_eq!(bytes.len(), 12 + (width * height * 4) as usize);
+    eb_plain_close(engine);
+}
+
+#[test]
+fn enumerates_images_and_returns_full_resolution_bytes() {
+    let _guard = serial();
+    let Ok(bytes) = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/images.epub"
+    )) else {
+        eprintln!("fixtures/images.epub 不在，跳过图片枚举测试");
+        return;
+    };
+    let engine = unsafe { eb_plain_open(bytes.as_ptr(), bytes.len(), c"images.epub".as_ptr()) };
+    assert!(!engine.is_null());
+    assert_eq!(
+        layout(engine, 0, 400.0, 700.0, 24.0, 24.0, 24.0, 24.0, 1.0, 1.0, 0.0, 0.0, 0),
+        0
+    );
+    let count = eb_plain_image_count(engine);
+    assert!(count > 0, "images.epub 应该有图");
+    let info = eb_plain_image_info(engine, 0);
+    assert_eq!(info.ok, 1);
+    assert_eq!(info.id, 0);
+    assert!(info.width > 0 && info.height > 0);
+    assert!(!info.src.is_null());
+    let mut len = 0usize;
+    let ptr = eb_plain_image_full_bytes(engine, 0, &mut len);
+    assert!(!ptr.is_null());
+    let image = unsafe { std::slice::from_raw_parts(ptr, len) }.to_vec();
+    unsafe { ebook_abi::eb_free(ptr, len) };
+    assert_eq!(&image[..4], b"EQP1");
+    eb_plain_close(engine);
+}
+
+#[test]
 fn word_spacing_reaches_the_layout() {
     let _guard = serial();
     // 词距是西文的事：同样的字，词与词之间放宽一点，一行就装不下了。
@@ -337,9 +549,9 @@ fn word_spacing_reaches_the_layout() {
     let bytes = text.into_bytes();
     let name = c"english.txt";
     let engine = unsafe { eb_plain_open(bytes.as_ptr(), bytes.len(), name.as_ptr()) };
-    assert!(engine >= 0);
+    assert!(!engine.is_null());
     let pages = |word: f32| {
-        let _ = eb_plain_layout(
+        let _ = layout(
             engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, word, 0,
         );
         eb_plain_page_count(engine)
@@ -375,11 +587,11 @@ fn reports_book_and_toc() {
     ] {
         assert!(!getter(engine).is_null(), "句柄有效时不该返回 null");
         assert!(
-            !getter(engine + 1000).is_null(),
+            !getter(std::ptr::null_mut()).is_null(),
             "无效句柄时也不该返回 null"
         );
     }
-    assert_eq!(eb_plain_cover_len(engine + 1000), 0);
+    assert_eq!(eb_plain_cover_len(std::ptr::null_mut()), 0);
     // TXT 没有封面：-1 而不是写一个空文件。
     let path = std::env::temp_dir().join("eb-no-cover.png");
     let c_path = CString::new(path.to_str().unwrap()).unwrap();
@@ -397,13 +609,6 @@ fn reports_book_and_toc() {
     assert!(!eb_plain_toc_fragment(engine, 0).is_null());
 
     eb_plain_close(engine);
-
-    // 关掉以后：句柄不再有效，但不 panic。
-    assert_eq!(eb_plain_spine_count(engine), 0);
-    assert_eq!(eb_plain_page_count(engine), 0);
-    assert_eq!(eb_plain_set_limits(engine, 1024, 1024), -1);
-    assert_eq!(eb_plain_select(engine, 0, 0, 0, 0, 1, 0), -1);
-    assert_eq!(eb_plain_selection_rect_count(engine), 0);
 }
 
 #[test]
@@ -412,7 +617,7 @@ fn selection_round_trip() {
     let (engine, _) = open_book();
     // 没排版时选不出来，但不干预。
     assert!(eb_plain_select(engine, 0, 0, 0, 0, 1, 0) < 0);
-    let rc = eb_plain_layout(
+    let rc = layout(
         engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0.0, 0,
     );
     assert_eq!(rc, 0);
@@ -462,9 +667,9 @@ fn resolves_links_and_fragments() {
         return;
     };
     let engine = unsafe { eb_plain_open(bytes.as_ptr(), bytes.len(), c"demo.epub".as_ptr()) };
-    assert!(engine >= 0, "打开 demo.epub 失败");
+    assert!(!engine.is_null(), "打开 demo.epub 失败");
     assert_eq!(eb_plain_spine_count(engine), 2);
-    let rc = eb_plain_layout(
+    let rc = layout(
         engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0.0, 0,
     );
     assert_eq!(rc, 0);
@@ -522,7 +727,7 @@ fn resolves_links_and_fragments() {
 fn limits_are_enforced() {
     let _guard = serial();
     let (engine, _) = open_book();
-    let rc = eb_plain_layout(
+    let rc = layout(
         engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0.0, 0,
     );
     assert_eq!(rc, 0);
@@ -550,7 +755,7 @@ fn the_error_string_is_a_pointer_not_a_leak() {
     let _guard = serial();
     // 失败一次：错误串就在库内的缓冲里，指针不归调用方、也不该每次漏一份。
     let engine = unsafe { eb_plain_open(std::ptr::null(), 0, std::ptr::null()) };
-    assert_eq!(engine, -1);
+    assert!(engine.is_null());
     let first = eb_plain_last_error();
     assert!(!first.is_null());
     let message = unsafe { std::ffi::CStr::from_ptr(first) }
@@ -560,7 +765,7 @@ fn the_error_string_is_a_pointer_not_a_leak() {
 
     // 再失败一次：还是同一块缓冲（没有 mem::forget 漏出去的旧串），内容不变。
     let engine = unsafe { eb_plain_open(std::ptr::null(), 0, std::ptr::null()) };
-    assert_eq!(engine, -1);
+    assert!(engine.is_null());
     let second = unsafe { std::ffi::CStr::from_ptr(eb_plain_last_error()) }
         .to_string_lossy()
         .into_owned();
@@ -569,7 +774,7 @@ fn the_error_string_is_a_pointer_not_a_leak() {
     // 成功一次就清空。
     let bytes = demo();
     let engine = unsafe { eb_plain_open(bytes.as_ptr(), bytes.len(), c"demo.txt".as_ptr()) };
-    assert!(engine >= 0);
+    assert!(!engine.is_null());
     assert_eq!(
         unsafe { std::ffi::CStr::from_ptr(eb_plain_last_error()) }.to_bytes(),
         b""
@@ -591,7 +796,7 @@ fn version_is_not_hard_coded_to_an_old_release() {
 fn timings() {
     let _guard = serial();
     let (engine, _) = open_book();
-    let _ = eb_plain_layout(
+    let _ = layout(
         engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0.0, 0,
     );
     let pages = eb_plain_page_count(engine);
@@ -611,7 +816,7 @@ fn timings() {
         start.elapsed().as_millis() / u128::from(run)
     );
     let start = std::time::Instant::now();
-    let _ = eb_plain_layout(
+    let _ = layout(
         engine, 0, 390.0, 760.0, 26.0, 30.0, 26.0, 30.0, 1.0, 1.6, 0.0, 0.0, 0,
     );
     eprintln!("one chapter layout: {:?}", start.elapsed());
@@ -630,7 +835,7 @@ fn scroll_session_is_cross_chapter_and_band_rendering_works() {
         return;
     };
     let engine = unsafe { eb_plain_open(bytes.as_ptr(), bytes.len(), c"demo.epub".as_ptr()) };
-    assert!(engine >= 0);
+    assert!(!engine.is_null());
 
     // 没开始会话：滚动入口给明确错误，而不是看起来像 0 的值。
     assert_eq!(eb_plain_scroll_total_height(engine), -1.0);
@@ -638,7 +843,7 @@ fn scroll_session_is_cross_chapter_and_band_rendering_works() {
     assert_eq!(eb_plain_scroll_hit(engine, 0.0, 0.0).spine, -1);
 
     assert_eq!(
-        eb_plain_scroll_begin(engine, 400.0, 700.0, 0.0, 24.0, 0.0, 24.0, 1.0, 1.0, 0.0, 0.0, 0,),
+        scroll_begin(engine, 400.0, 700.0, 0.0, 24.0, 0.0, 24.0, 1.0, 1.0, 0.0, 0.0, 0,),
         2,
         "demo.epub 应有两章"
     );
@@ -712,26 +917,64 @@ fn scroll_session_requires_a_handle_and_a_book() {
     let _guard = serial();
     // -1 句柄：不 panic，给错误码。
     assert_eq!(
-        eb_plain_scroll_begin(-1, 400.0, 700.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0),
+        scroll_begin(
+            std::ptr::null_mut(),
+            400.0,
+            700.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            0
+        ),
         -1
     );
-    assert_eq!(eb_plain_scroll_chapter_count(-1), 0);
-    assert_eq!(eb_plain_scroll_chapter(-1, 0).ok, 0);
-    assert_eq!(eb_plain_scroll_total_height(-1), -1.0);
-    assert_eq!(eb_plain_scroll_spine_at(-1, 0.0), -1);
-    assert_eq!(eb_plain_scroll_chapter_top(-1, 0), -1.0);
-    assert_eq!(eb_plain_scroll_hit(-1, 0.0, 0.0).spine, -1);
-    assert_eq!(eb_plain_scroll_line_y(-1, 0, 0), -1.0);
-    assert_eq!(eb_plain_scroll_anchor_y(-1, 0, c"x".as_ptr()), -1.0);
-    assert_eq!(eb_plain_scroll_progress(-1, 0.0), -1.0);
+    assert_eq!(eb_plain_scroll_chapter_count(std::ptr::null_mut()), 0);
+    assert_eq!(eb_plain_scroll_chapter(std::ptr::null_mut(), 0).ok, 0);
+    assert_eq!(eb_plain_scroll_total_height(std::ptr::null_mut()), -1.0);
+    assert_eq!(eb_plain_scroll_spine_at(std::ptr::null_mut(), 0.0), -1);
+    assert_eq!(eb_plain_scroll_chapter_top(std::ptr::null_mut(), 0), -1.0);
+    assert_eq!(
+        eb_plain_scroll_hit(std::ptr::null_mut(), 0.0, 0.0).spine,
+        -1
+    );
+    assert_eq!(eb_plain_scroll_line_y(std::ptr::null_mut(), 0, 0), -1.0);
+    assert_eq!(
+        eb_plain_scroll_anchor_y(std::ptr::null_mut(), 0, c"x".as_ptr()),
+        -1.0
+    );
+    assert_eq!(eb_plain_scroll_progress(std::ptr::null_mut(), 0.0), -1.0);
     let mut len = 123usize;
-    assert!(eb_plain_scroll_band_bytes(-1, 0.0, 10.0, 1.0, 0, 0, false, &mut len).is_null());
+    assert!(eb_plain_scroll_band_bytes(
+        std::ptr::null_mut(),
+        0.0,
+        10.0,
+        1.0,
+        0,
+        0,
+        false,
+        &mut len
+    )
+    .is_null());
     assert_eq!(len, 0, "失败时 out_len 要清 0");
 
     let path = std::env::temp_dir().join("eb-plain-scroll-none.eqp");
     let c_path = CString::new(path.to_str().unwrap()).unwrap();
     assert_eq!(
-        eb_plain_scroll_band_raw(-1, 0.0, 10.0, 1.0, 0, 0, false, c_path.as_ptr()),
+        eb_plain_scroll_band_raw(
+            std::ptr::null_mut(),
+            0.0,
+            10.0,
+            1.0,
+            0,
+            0,
+            false,
+            c_path.as_ptr()
+        ),
         -1
     );
 }
@@ -740,8 +983,8 @@ fn scroll_session_requires_a_handle_and_a_book() {
 fn stream_book_appends_and_replaces_without_a_file() {
     let _guard = serial();
     let title = CString::new("流式书").unwrap();
-    let id = eb_plain_new_book(title.as_ptr());
-    assert!(id >= 1, "new_book 失败: {}", id);
+    let id = unsafe { eb_plain_new_book(title.as_ptr()) };
+    assert!(!id.is_null(), "new_book 失败");
 
     let chapter_title = CString::new("第一章").unwrap();
     let text = CString::new("第一行\n第二行").unwrap();
@@ -781,7 +1024,7 @@ fn a_locator_survives_a_relayout() {
     let _guard = serial();
     let (id, _) = open_book();
     assert_eq!(
-        eb_plain_layout(id, 0, 400.0, 700.0, 24.0, 24.0, 24.0, 24.0, 1.0, 1.0, 0.0, 0.0, 0),
+        layout(id, 0, 400.0, 700.0, 24.0, 24.0, 24.0, 24.0, 1.0, 1.0, 0.0, 0.0, 0),
         0
     );
     let hit = eb_plain_hit(id, 0, 40.0, 40.0);
@@ -799,7 +1042,7 @@ fn a_locator_survives_a_relayout() {
 
     // 换页高重新排版后，同一个 locator 仍指向同一行。
     assert_eq!(
-        eb_plain_layout(id, 0, 420.0, 760.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0),
+        layout(id, 0, 420.0, 760.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0),
         0
     );
     let again = eb_plain_locate(id, CString::new(text).unwrap().as_ptr());

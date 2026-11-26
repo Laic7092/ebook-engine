@@ -1020,6 +1020,20 @@ fn book_json(book: &Book) -> String {
     push_json_opt(&mut out, book.lang.as_deref());
     out.push_str(",\"creator\":");
     push_json_opt(&mut out, book.creator.as_deref());
+    out.push_str(",\"creators\":[");
+    for (index, creator) in book.creators.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"name\":");
+        push_json_str(&mut out, &creator.name);
+        out.push_str(",\"role\":");
+        push_json_opt(&mut out, creator.role.as_deref());
+        out.push_str(",\"fileAs\":");
+        push_json_opt(&mut out, creator.file_as.as_deref());
+        out.push('}');
+    }
+    out.push(']');
     out.push_str(",\"publisher\":");
     push_json_opt(&mut out, book.publisher.as_deref());
     out.push_str(",\"identifier\":");

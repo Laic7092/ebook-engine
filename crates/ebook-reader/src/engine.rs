@@ -543,6 +543,15 @@ impl Engine {
         self.backend.book()
     }
 
+    /// 当前后端：`"epub"` / `"txt"` / `"stream"`。只给适配层做能力查询。
+    pub fn format(&self) -> &'static str {
+        match self.backend {
+            Backend::Epub(_) => "epub",
+            Backend::Txt(_) => "txt",
+            Backend::Stream(_) => "stream",
+        }
+    }
+
     pub fn toc(&self) -> &[TocEntry] {
         self.backend.book().toc()
     }
@@ -877,6 +886,13 @@ impl Engine {
         if let Some(font) = self.font.as_ref() {
             font.clear_caches();
         }
+    }
+
+    /// 当前章图片表。`image_id` 就是这里的下标；没排版时为空。
+    pub fn images(&self) -> &[ebook_ir::ImageMeta] {
+        self.last
+            .as_ref()
+            .map_or(&[], |layout| layout.doc.images.as_slice())
     }
 
     /// 全分辨率预览一张当前章图片。页面渲染走降采样缓存，这条路径给宿主

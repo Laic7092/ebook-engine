@@ -15,7 +15,8 @@
 pub mod plain;
 pub mod protocol;
 
-use std::ffi::{c_char, CStr};
+use std::collections::HashMap;
+use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{LazyLock, Mutex};
 
@@ -23,7 +24,7 @@ use ebook_reader::EdgesF;
 use ebook_reader::{Engine, Limits, Location, SelectionRect as CoreRect, Style, Viewport};
 
 use protocol::{
-    Book, FontFace, Insets, Link, Loc, Page, Request, Response, Selection, SelectionRect,
+    Book, Creator, FontFace, Insets, Link, Loc, Page, Request, Response, Selection, SelectionRect,
     SpineItem, TocEntry,
 };
 
@@ -35,47 +36,101 @@ use protocol::{
 ///
 /// 只加新函数、新枚举变体不算破坏（句柄、缓冲区契约不变），但结构体加字段
 /// 一定算：C 是按偏移读的。
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
-/// 不透明句柄。内部加锁，因为 Go/Swift 侧不保证所有调用都在同一个线程上。
+/// 不透明句柄。所有状态都挂在书上：书、返回字符串、选区/链接结果。
+///
+/// 字符串是**只增不减**的 arena：同一个字符串只分配一次，指针在 `eb_close`
+/// 之前一直有效。这样宿主不需要“取完马上拷走”，也不会被另一本书的查询挤掉。
 pub struct EbEngine {
-    inner: Mutex<Engine>,
+    pub(crate) inner: Mutex<Engine>,
+    pub(crate) strings: Mutex<StringArena>,
+    pub(crate) extras: Mutex<plain::Extras>,
 }
 
-/// 最后一个错误的细节。进程级、UTF-8、以结尾 0 收尾的 `Vec<u8>`。
-///
-/// 用 `Vec` 而不是 `CString`：`set_last_error` 复用容量，连续失败不会每次
-/// 换一块内存（早期版本对 `Vec` 做 `mem::forget`，每次失败漏一条字符串）。
-/// 指针在**下一次失败的调用**前有效；不归调用方释放。
-static LAST_ERROR: LazyLock<Mutex<Vec<u8>>> = LazyLock::new(|| Mutex::new(vec![0]));
+impl EbEngine {
+    fn new(engine: Engine) -> Self {
+        Self {
+            inner: Mutex::new(engine),
+            strings: Mutex::new(StringArena::default()),
+            extras: Mutex::new(plain::Extras::default()),
+        }
+    }
+
+    pub(crate) fn intern(&self, text: &str) -> *const c_char {
+        let mut strings = self
+            .strings
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        strings.intern(text)
+    }
+}
+
+/// 句柄内的字符串池。`HashMap` 只移动 `CString` 结构体，不移动堆上的字节，
+/// 所以已经返回的指针在扩容后仍然有效。
+#[derive(Default)]
+pub(crate) struct StringArena {
+    strings: HashMap<String, CString>,
+}
+
+impl StringArena {
+    pub(crate) fn intern(&mut self, text: &str) -> *const c_char {
+        let clean = if text.contains('\0') {
+            text.replace('\0', " ")
+        } else {
+            text.to_string()
+        };
+        if let Some(value) = self.strings.get(&clean) {
+            return value.as_ptr();
+        }
+        let value = CString::new(clean.clone()).unwrap_or_default();
+        let ptr = value.as_ptr();
+        self.strings.insert(clean, value);
+        ptr
+    }
+}
+
+/// 最后一个错误的细节。只增不减：旧指针永远不失效，新错误也不会覆盖旧内存。
+/// 仍然是进程级（`eb_open` 失败时还没有句柄），但并发下不再有 use-after-free。
+struct ErrorLog {
+    history: Vec<CString>,
+    last: usize,
+}
+
+static LAST_ERROR: LazyLock<Mutex<ErrorLog>> = LazyLock::new(|| {
+    Mutex::new(ErrorLog {
+        history: vec![CString::default()],
+        last: 0,
+    })
+});
 
 pub(crate) fn set_last_error(message: impl AsRef<str>) {
-    let text = message.as_ref();
-    let mut buffer = LAST_ERROR
+    let text = message.as_ref().replace('\0', " ");
+    let mut log = LAST_ERROR
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    buffer.clear();
-    buffer.extend_from_slice(text.replace('\0', " ").as_bytes());
-    buffer.push(0);
+    if log.history[log.last].as_bytes() == text.as_bytes() {
+        return;
+    }
+    log.history.push(CString::new(text).unwrap_or_default());
+    log.last = log.history.len() - 1;
 }
 
-/// 错误串的裸指针（含结尾 0）。原地复用缓冲，所以可以随便返回。
+/// 错误串的裸指针（含结尾 0）。历史只增不减，返回后一直有效。
 pub(crate) fn last_error_ptr() -> *const c_char {
-    let buffer = LAST_ERROR
+    let log = LAST_ERROR
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    buffer.as_ptr() as *const c_char
+    log.history[log.last].as_ptr()
 }
 
-/// 同上，外加不含结尾 0 的长度，一次加锁取齐（长度与指针必须同源）。
+/// 同上，外加不含结尾 0 的长度，一次加锁取齐。
 pub(crate) fn last_error_with_len() -> (*const c_char, usize) {
-    let buffer = LAST_ERROR
+    let log = LAST_ERROR
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    (
-        buffer.as_ptr() as *const c_char,
-        buffer.len().saturating_sub(1),
-    )
+    let value = &log.history[log.last];
+    (value.as_ptr(), value.as_bytes().len())
 }
 
 // ---------------------------------------------------------------- 缓冲区
@@ -137,6 +192,10 @@ pub extern "C" fn eb_struct_size(kind: u32) -> usize {
         plain::EB_STRUCT_LINK => std::mem::size_of::<plain::EbLink>(),
         plain::EB_STRUCT_SCROLL_CHAPTER => std::mem::size_of::<plain::EbScrollChapter>(),
         plain::EB_STRUCT_SCROLL_LOC => std::mem::size_of::<plain::EbScrollLoc>(),
+        plain::EB_STRUCT_METADATA => std::mem::size_of::<plain::EbMetadata>(),
+        plain::EB_STRUCT_IMAGE_INFO => std::mem::size_of::<plain::EbImageInfo>(),
+        plain::EB_STRUCT_LAYOUT_OPTIONS => std::mem::size_of::<plain::EbLayoutOptions>(),
+        plain::EB_STRUCT_SCROLL_SLICE_OPTIONS => std::mem::size_of::<plain::EbScrollSliceOptions>(),
         _ => 0,
     }
 }
@@ -167,9 +226,7 @@ pub unsafe extern "C" fn eb_open(
     match result {
         Ok(Ok(engine)) => {
             set_last_error("");
-            Box::into_raw(Box::new(EbEngine {
-                inner: Mutex::new(engine),
-            }))
+            Box::into_raw(Box::new(EbEngine::new(engine)))
         }
         Ok(Err(message)) => {
             set_last_error(message);
@@ -204,9 +261,7 @@ pub unsafe extern "C" fn eb_engine_new_book(title: *const c_char) -> *mut EbEngi
     match result {
         Ok(engine) => {
             set_last_error("");
-            Box::into_raw(Box::new(EbEngine {
-                inner: Mutex::new(engine),
-            }))
+            Box::into_raw(Box::new(EbEngine::new(engine)))
         }
         Err(_) => {
             set_last_error("eb_engine_new_book 内部 panic");
@@ -229,7 +284,7 @@ pub unsafe extern "C" fn eb_close(engine: *mut EbEngine) {
 /// 空串表示没有错误。
 ///
 /// `len` 由 C 调用方给出：本函数写它，调用方保证可写（clippy 只能看到裸指针）。
-/// 指针指向库内的错误缓冲，**下一次失败的调用**前有效；不归调用方释放。
+/// 错误串只增不减，返回后一直有效；不归调用方释放。
 /// 需要 `C string` 的宿主用 `eb_plain_last_error`（同一块内存，带结尾 0）。
 #[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[no_mangle]
@@ -263,12 +318,16 @@ pub unsafe extern "C" fn eb_request(
         return std::ptr::null_mut();
     }
     *out_len = 0;
-    if engine.is_null() {
+    if engine.is_null() || (req.is_null() && len != 0) {
         return std::ptr::null_mut();
     }
 
     let response = catch_unwind(AssertUnwindSafe(|| {
-        let bytes = std::slice::from_raw_parts(req, len);
+        let bytes = if len == 0 {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(req, len)
+        };
         let request: Request = match postcard::from_bytes(bytes) {
             Ok(request) => request,
             Err(error) => return Response::Error(format!("解码请求失败: {error}")),
@@ -597,6 +656,15 @@ fn book_wire(engine: &Engine) -> Book {
         title: book.title.clone(),
         language: book.lang.clone(),
         creator: book.creator.clone(),
+        creators: book
+            .creators
+            .iter()
+            .map(|creator| Creator {
+                name: creator.name.clone(),
+                role: creator.role.clone(),
+                file_as: creator.file_as.clone(),
+            })
+            .collect(),
         publisher: book.publisher.clone(),
         identifier: book.identifier.clone(),
         date: book.date.clone(),

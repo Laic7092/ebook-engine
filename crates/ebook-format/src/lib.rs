@@ -132,12 +132,25 @@ pub struct EpubIssue {
     pub detail: String,
 }
 
+/// 一个 `dc:creator`。`name` 是显示名；`role`/`file_as` 保留 OPF 的
+/// `opf:role` / `opf:file-as`，没有就是 `None`。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Creator {
+    pub name: String,
+    pub role: Option<String>,
+    pub file_as: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Book {
     pub title: Option<String>,
     pub lang: Option<String>,
     pub spine: Vec<SpineItem>,
+    /// 第一作者，等价于 `creators.first().map(|c| &c.name)`；保留它是为了
+    /// 单作者宿主不必先取数组。
     pub creator: Option<String>,
+    /// 全部 `dc:creator`，按 OPF 出现顺序。
+    pub creators: Vec<Creator>,
     pub publisher: Option<String>,
     pub identifier: Option<String>,
     /// 与 `lang` 同义，保留 `dc:language` 的原始字段名。

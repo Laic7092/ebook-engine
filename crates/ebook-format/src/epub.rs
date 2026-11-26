@@ -10,8 +10,8 @@ use crate::css;
 use crate::xhtml::{self, AssetResolver};
 use crate::zip::ZipArchive;
 use crate::{
-    Asset, Book, ByteSource, ChapterAnchor, ChapterLinks, EmbeddedFont, EpubIssue, EpubIssueCode,
-    FormatAdapter, FormatError, ImageAsset, LinkTarget, Probe, SpineItem, TocEntry,
+    Asset, Book, ByteSource, ChapterAnchor, ChapterLinks, Creator, EmbeddedFont, EpubIssue,
+    EpubIssueCode, FormatAdapter, FormatError, ImageAsset, LinkTarget, Probe, SpineItem, TocEntry,
 };
 
 /// 单个字体文件的上限。内嵌字体是排版入参，过大就直接当坏资产报告。
@@ -767,7 +767,8 @@ fn parse_package(
         .or_else(|| meta_text(&doc, &["identifier"]));
     let title = meta_text(&doc, &["title"]);
     let language = meta_text(&doc, &["language", "lang"]);
-    let creator = meta_text(&doc, &["creator"]);
+    let creators = meta_creators(&doc);
+    let creator = creators.first().map(|creator| creator.name.clone());
     let publisher = meta_text(&doc, &["publisher"]);
     let date = meta_text(&doc, &["date"]);
     let description = meta_text(&doc, &["description"]);
@@ -778,6 +779,7 @@ fn parse_package(
             lang: language.clone(),
             language,
             creator,
+            creators,
             publisher,
             identifier,
             date,
@@ -790,6 +792,20 @@ fn parse_package(
         guide,
         meta_cover,
     })
+}
+
+fn meta_creators(doc: &roxmltree::Document<'_>) -> alloc::vec::Vec<Creator> {
+    doc.descendants()
+        .filter(|node| node.is_element() && tag_is(*node, "creator"))
+        .filter_map(|node| {
+            let name = text_of(node)?;
+            Some(Creator {
+                name,
+                role: attr(node, "role").map(str::to_string),
+                file_as: attr(node, "file-as").map(str::to_string),
+            })
+        })
+        .collect()
 }
 
 fn meta_text(doc: &roxmltree::Document<'_>, names: &[&str]) -> Option<String> {
