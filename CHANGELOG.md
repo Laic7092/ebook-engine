@@ -5,6 +5,19 @@
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-27
+
+搜索命中的定位修复。C ABI 不变（`EB_ABI_VERSION` 仍是 3），宿主不需要重编。
+
+### Fixed
+
+- **行锚点的字节偏移改成原文的绝对偏移**：`LineBox.anchor.offset` 之前是文本
+  节点内的偏移，而 `LineBox.src`、`Locator.offset` 和搜索命中的
+  `source_start` 都是整章 `StyledDoc.text` 的绝对字节，两者不一致。结果是
+  段落折行时 `locate_locator` 把命中定位到该段的**最后一行**（可能还是另
+  一页）；`locator_at` 与 `locate` 因为两头都是节点内偏移而看不出这个错。
+  现在行锚点与 `src_start` 用同一个数，搜索命中能落到它真正所在的行。
+
 ## [0.5.0] - 2026-11-27
 
 全文搜索。`.version` 升到 0.5.0；C ABI 版本仍为 3，`Request::Search` /
