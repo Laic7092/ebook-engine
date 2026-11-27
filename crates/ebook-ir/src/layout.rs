@@ -484,25 +484,38 @@ impl LayoutResult {
     /// 所以同一 `spine + path` 下用 offset 落在哪一行的 `src` 长度内来判断。
     pub fn location_of(&self, a: &Anchor) -> Option<Location> {
         let mut last: Option<(u32, u32)> = None;
+        // 行锚点只记住行首节点；同一行的第二个文本节点（`hello <em>world</em>`
+        // 的 `world`）路径不同，但绝对字节偏移仍落在这一行的 src 区间里。
+        // 搜索结果、宿主书签都可能给出这种锚点，所以这里补一条按偏移的回退。
+        let mut by_offset: Option<(u32, u32)> = None;
         for (index, line) in self.runs.lines.iter().enumerate() {
             let Some(anchor) = line.anchor.as_ref() else {
                 continue;
             };
-            if anchor.spine != a.spine || anchor.path != a.path {
+            if anchor.spine != a.spine {
                 continue;
             }
-            let byte = a.offset.saturating_sub(anchor.offset);
-            if byte <= line.src.len {
-                let page = self.page_of_line(index as u32)?;
-                return Some(Location {
-                    page: page.index,
-                    line: index as u32,
-                    byte,
-                });
+            if anchor.path == a.path {
+                let byte = a.offset.saturating_sub(anchor.offset);
+                if byte <= line.src.len {
+                    let page = self.page_of_line(index as u32)?;
+                    return Some(Location {
+                        page: page.index,
+                        line: index as u32,
+                        byte,
+                    });
+                }
+                last = Some((index as u32, line.src.len));
+                continue;
             }
-            last = Some((index as u32, line.src.len));
+            if by_offset.is_none()
+                && a.offset >= anchor.offset
+                && a.offset < anchor.offset.saturating_add(line.src.len)
+            {
+                by_offset = Some((index as u32, a.offset - anchor.offset));
+            }
         }
-        let (line, byte) = last?;
+        let (line, byte) = by_offset.or(last)?;
         let page = self.page_of_line(line)?;
         Some(Location {
             page: page.index,

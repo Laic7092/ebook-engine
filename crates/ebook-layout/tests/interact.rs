@@ -628,3 +628,60 @@ fn link_at_hits_link_rect_only() {
     let reader = Reader::new(&ir);
     assert_eq!(reader.link_at(0, PointF::new(10.0, 10.0)), None);
 }
+
+#[test]
+fn locate_second_text_node_on_a_line() {
+    // `hello` 与 `world` 是同一行的两个文本节点；行锚点只记第一个节点的路径。
+    // 第二个节点里的位置仍要能靠绝对字节偏移回到同一行。
+    let mut doc = StyledDoc::default();
+    doc.meta.spine = 0;
+    let root = body(&mut doc, Dir::Ltr);
+    let p = push(
+        &mut doc,
+        NodeKind::Element(Tag::P),
+        block_style(Dir::Ltr),
+        None,
+    );
+    let a = text(&mut doc, "hello", Dir::Ltr);
+    let b = text(&mut doc, "world", Dir::Ltr);
+    set_kids(&mut doc, p, &[a, b]);
+    doc.node_mut(a).src = Some(Anchor {
+        spine: 0,
+        path: vec![0, 0],
+        offset: 0,
+    });
+    doc.node_mut(b).src = Some(Anchor {
+        spine: 0,
+        path: vec![0, 1],
+        offset: 5,
+    });
+    set_kids(&mut doc, root, &[p]);
+    let ir = build(&doc);
+    assert_eq!(ir.runs.lines.len(), 1);
+    let want = Location {
+        page: 0,
+        line: 0,
+        byte: 5,
+    };
+    assert_eq!(
+        ir.location_of(&Anchor {
+            spine: 0,
+            path: vec![0, 1],
+            offset: 5,
+        }),
+        Some(want)
+    );
+    // 行内第二个字符。
+    assert_eq!(
+        ir.location_of(&Anchor {
+            spine: 0,
+            path: vec![0, 1],
+            offset: 7,
+        }),
+        Some(Location {
+            page: 0,
+            line: 0,
+            byte: 7,
+        })
+    );
+}

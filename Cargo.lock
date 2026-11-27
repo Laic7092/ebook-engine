@@ -204,10 +204,18 @@ dependencies = [
  "ebook-layout",
  "ebook-raster",
  "ebook-render",
+ "ebook-search",
 ]
 
 [[package]]
 name = "ebook-render"
+version = "0.4.1"
+dependencies = [
+ "ebook-ir",
+]
+
+[[package]]
+name = "ebook-search"
 version = "0.4.1"
 dependencies = [
  "ebook-ir",
@@ -223,6 +231,7 @@ dependencies = [
  "ebook-layout",
  "ebook-raster",
  "ebook-render",
+ "ebook-search",
  "postcard",
  "serde",
  "wasm-bindgen",

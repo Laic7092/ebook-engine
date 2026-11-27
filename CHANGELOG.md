@@ -5,6 +5,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- **全文搜索**：新增 `ebook-search`（纯文本索引 + 命中上下文 + 有界章缓存），
+  `Engine::search` 扫全书并返回与排版无关的 `LocatorRange`；同章解析失败不
+  中断其余章，流式书 `replace_chapter` 只失效被替换的章。
+- Web 阅读器新增搜索面板（顶部放大镜 / `F` 或 `/`），结果带章名与高亮上下文，
+  点击后排目标章并跳到命中行。
+- C ABI postcard 面新增 `Request::Search` → `Response::Search`；wasm 新增
+  `eb_search` / `eb_search_locate`。
+
 ## [0.4.1] - 2026-11-26
 
 排版与锚点的修复。C ABI 不变（`EB_ABI_VERSION` 仍是 3），宿主不需要重编。

@@ -8,6 +8,7 @@
 - `ebook-layout`：纯排版入口、字体度量与图片尺寸注入、限额、命中/选区/阅读器外观
 - `ebook-cache`：以输入指纹为键的有界 LRU 排版缓存
 - `ebook-format`：字节源、格式适配器、章节读取与诊断
+- `ebook-search`：正文索引、命中与上下文
 - `ebook-font`：真实字体度量与光栅化
 - `ebook-render`：op 遍历、SVG 后端
 - `ebook-raster`：整数混合光栅后端
@@ -610,6 +611,82 @@ pub struct English; // ushyphmax（hyph-utf8）的 Liang 算法实现
 `Location` 也不含 href，它只描述“第几行、行内第几字节”。两者能互相定位，
 因为 `Op::Link.rect` 与 `LineBox.rect` 同形。
 
+### 4.12 `ebook-search`：全文索引
+
+```rust
+pub struct SearchOptions {
+    pub case_sensitive: bool, // 默认 false
+    pub max_hits: u32,        // 默认 100
+    pub context_chars: u16,   // 默认 36
+}
+
+pub struct SearchText { /* private */ }
+impl SearchText {
+    pub fn build(doc: &StyledDoc) -> Self;
+    pub fn text(&self) -> &str;
+    pub fn find(&self, query: &str, opts: &SearchOptions,
+                out: &mut Vec<Hit>) -> bool; // true = 达到上限，可能被截断
+    pub fn locate(&self, pos: u32) -> Option<(NodeId, u32)>;
+}
+
+pub struct SearchCache { /* private */ }
+impl SearchCache {
+    pub const fn new(cap: usize) -> Self;
+    pub fn get(&self, spine: u32, rev: u64) -> Option<&SearchText>;
+    pub fn insert(&mut self, spine: u32, rev: u64, text: SearchText) -> &SearchText;
+    pub fn invalidate(&mut self, spine: u32);
+    pub fn clear(&mut self);
+    pub fn bytes(&self) -> usize;
+}
+```
+
+索引规则是确定的，不依赖宿主：
+
+- 只收 `NodeKind::Text` 与 ruby 的基文（注音不进正文）；`Display::None`、
+  `<head>` / `<style>` / `<script>` / `<title>` 跳过。
+- 行内节点直接拼接（`hello <em>world</em>` → `hello world`）；块级边界变成
+  `\n`，跨段落不会误命中。连续空白折叠成一个空格。
+- 大小写不敏感时按 Unicode 小写比较；只有小写展开改变字符数/字节数时才建
+  逐字符映射，普通 ASCII/CJK 文本没有额外映射表。
+- 英文/数字查询要求 ASCII 词边界（`the` 不命中 `theatre`）；CJK 查询按子串。
+- `Hit { start, end, node, source_start, source_end, before, text, after, .. }`
+  里的 `node + source_start/source_end` 是 `StyledDoc.text` 的绝对偏移，可直接
+  变成 `Locator`。
+
+`ebook-reader` 的入口：
+
+```rust
+pub struct SearchHit {
+    pub range: LocatorRange,
+    pub spine: usize,
+    pub chapter: Option<String>, // 目录里的章名
+    pub before: String,
+    pub text: String,
+    pub after: String,
+    pub ellipsis_before: bool,
+    pub ellipsis_after: bool,
+}
+pub struct SearchResults {
+    pub hits: Vec<SearchHit>,
+    pub truncated: bool,
+    pub scanned: u32,
+    pub skipped: u32,
+}
+
+impl Engine {
+    pub fn search(&mut self, query: &str, max_hits: u32) -> SearchResults;
+}
+```
+
+- 索引按 `(spine, rev)` 缓存；流式书 `replace_chapter` 只失效该章。
+- 单章解析失败计入 `skipped`，其余章继续；空查询返回空结果，不扫任何章。
+- 命中不依赖字号、页高、滚动位置。宿主对 `hit.spine` 排版后，用
+  `Engine::locate_locator(&hit.range.start)` 得到当前页/行；`hit.range.end`
+  可以用于高亮原文区间。
+- wasm 面：`eb_search(query, limit)` 返回 JSON，`eb_search_locate(node, offset)`
+  返回当前排版里的行号（`u32::MAX` = 定位不到）。postcard ABI 是
+  `Request::Search { query, limit }` → `Response::Search(SearchResults)`。
+
 ---
 
 ## 5. `ebook-format`：格式适配器
@@ -787,6 +864,8 @@ advance 与**字号**一起乘 `scale`，因此字形按设备像素光栅化，
 | `eb_selection(a_page,a_line,a_byte,b_page,b_line,b_byte)` | 任意 | 选区：`{start,end,rects:[{page,rect}],text}` |
 | `eb_progress(page, line, byte)` | 任意 | 全书进度：`{"progress":0..1}` |
 | `eb_toc()` | 任意 | 目录：`[{label,spine,fragment,depth}]`，`spine` 可为 `null` |
+| `eb_search(query, limit)` | 任意 | 全书搜索：`{hits:[{spine,node,offset,end,chapter,before,text,after,ellipsis_before,ellipsis_after}],truncated,scanned,skipped}`；`limit == 0` 用默认上限 |
+| `eb_search_locate(node, offset)` | 任意 | 搜索命中 → 当前排版里的行号（`u32::MAX` = 定位不到）；调用前先排版命中章 |
 | `eb_resolve_link(href)` | 任意 | 在当前章上下文里解析书内链接：`{target:{spine,fragment,external}}` |
 | `eb_version()` | 任意 | `(major << 16) | minor` |
 

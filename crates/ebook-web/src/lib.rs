@@ -17,6 +17,7 @@ use ebook_ir::{
 use ebook_layout::{Layout, LayoutEnv, NoImageSizes, PageConstraint, Reader, StubMeasurer};
 use ebook_raster::{RgbaSurface, Tone};
 use ebook_render::ScaledSurface;
+use ebook_search::{SearchCache, SearchOptions, SearchText};
 
 static BOOK: Mutex<Option<Backend>> = Mutex::new(None);
 /// `open_book` 把字节借给 `EpubReader<'static>` 之后，这里记下同一块分配的
@@ -33,6 +34,8 @@ static LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
 /// 最近一次字体加载失败的原因。字体加载接口保留 `u32` 返回值的兼容性，
 /// 诊断单独暴露，避免坏 WOFF/WOFF2 被静默跳过。
 static FONT_ERROR: Mutex<Option<String>> = Mutex::new(None);
+/// 全文搜索索引。wasm 内存比 native 紧，预算比 `ebook-reader` 小。
+static SEARCH: Mutex<SearchCache> = Mutex::new(SearchCache::new(8 * 1024 * 1024));
 
 pub fn last_error() -> String {
     LAST_ERROR.lock().unwrap().clone().unwrap_or_default()
@@ -156,6 +159,7 @@ fn reset_session() {
     *BOOK.lock().unwrap() = None;
     *LAST.lock().unwrap() = None;
     IMAGES.lock().unwrap().clear();
+    SEARCH.lock().unwrap().clear();
 }
 
 fn release_book_bytes() {
@@ -205,6 +209,7 @@ fn install(backend: Backend) -> String {
     *BOOK.lock().unwrap() = Some(backend);
     // 图片缓存属于上一本书：href 空间会变，留着只会浪费内存。
     IMAGES.lock().unwrap().clear();
+    SEARCH.lock().unwrap().clear();
     json
 }
 
@@ -691,6 +696,122 @@ fn apply_doc_text_options(
     }
 }
 
+/// 全书全文搜索：`{"hits":[...],"truncated":false,"scanned":N,"skipped":M}`。
+///
+/// 索引按章缓存，重复搜索不会重新解析整本书。命中里的 `node + offset`
+/// 是原文绝对位置；排版目标章后用 [`search_locate`] 换成行号。
+pub fn search_json(query: &str, limit: u32) -> String {
+    let books = BOOK.lock().unwrap();
+    let Some(reader) = books.as_ref() else {
+        return String::from("{\"hits\":[],\"truncated\":false,\"scanned\":0,\"skipped\":0}");
+    };
+    let count = reader.book().spine.len();
+    let limit = if limit == 0 {
+        ebook_search::DEFAULT_MAX_HITS
+    } else {
+        limit
+    };
+    if count == 0 || query.trim().is_empty() {
+        return String::from("{\"hits\":[],\"truncated\":false,\"scanned\":0,\"skipped\":0}");
+    }
+    let titles: Vec<Option<String>> = (0..count)
+        .map(|spine| {
+            reader
+                .book()
+                .toc
+                .iter()
+                .find(|entry| entry.spine == spine)
+                .map(|entry| entry.label.clone())
+        })
+        .collect();
+
+    let mut cache = SEARCH.lock().unwrap();
+    let mut out = String::from("{\"hits\":[");
+    let mut pushed = 0u32;
+    let mut scanned = 0u32;
+    let mut skipped = 0u32;
+    let mut truncated = false;
+    for (spine, title) in titles.iter().enumerate() {
+        scanned = scanned.saturating_add(1);
+        if cache.get(spine as u32, 0).is_none() {
+            match reader.chapter_with_anchors(spine) {
+                Ok((doc, _, _)) => {
+                    let text = SearchText::build(&doc);
+                    cache.insert(spine as u32, 0, text);
+                }
+                Err(_) => {
+                    skipped = skipped.saturating_add(1);
+                    continue;
+                }
+            }
+        }
+        let remaining = limit.saturating_sub(pushed);
+        if remaining == 0 {
+            truncated = true;
+            break;
+        }
+        let options = SearchOptions {
+            max_hits: remaining,
+            ..SearchOptions::default()
+        };
+        let mut found = Vec::new();
+        let chapter_truncated = match cache.get(spine as u32, 0) {
+            Some(index) => index.find(query, &options, &mut found),
+            None => false,
+        };
+        for hit in found {
+            if pushed > 0 {
+                out.push(',');
+            }
+            out.push_str("{\"spine\":");
+            let _ = write!(out, "{}", spine);
+            out.push_str(",\"node\":");
+            let _ = write!(out, "{}", hit.node);
+            out.push_str(",\"offset\":");
+            let _ = write!(out, "{}", hit.source_start);
+            out.push_str(",\"end\":");
+            let _ = write!(out, "{}", hit.source_end);
+            out.push_str(",\"chapter\":");
+            push_json_opt(&mut out, title.as_deref());
+            out.push_str(",\"before\":");
+            push_json_str(&mut out, &hit.before);
+            out.push_str(",\"text\":");
+            push_json_str(&mut out, &hit.text);
+            out.push_str(",\"after\":");
+            push_json_str(&mut out, &hit.after);
+            out.push_str(",\"ellipsis_before\":");
+            out.push_str(if hit.ellipsis_before { "true" } else { "false" });
+            out.push_str(",\"ellipsis_after\":");
+            out.push_str(if hit.ellipsis_after { "true" } else { "false" });
+            out.push('}');
+            pushed = pushed.saturating_add(1);
+        }
+        if chapter_truncated {
+            truncated = true;
+            break;
+        }
+    }
+    out.push_str("],\"truncated\":");
+    out.push_str(if truncated { "true" } else { "false" });
+    out.push_str(",\"scanned\":");
+    let _ = write!(out, "{scanned}");
+    out.push_str(",\"skipped\":");
+    let _ = write!(out, "{skipped}");
+    out.push('}');
+    out
+}
+
+/// 搜索命中（原文节点 + 绝对字节偏移）→ 当前排版里的行号。
+/// 目标章还没排版、节点不属于当前章或偏移越界时返回 `u32::MAX`。
+pub fn search_locate(node: u32, offset: u32) -> u32 {
+    with_last(|last| {
+        let anchor = last.doc.anchor_of(node)?.with_offset(offset);
+        last.ir.location_of(&anchor).map(|location| location.line)
+    })
+    .flatten()
+    .unwrap_or(u32::MAX)
+}
+
 /// 当前书第一章根节点的字号；网页用它把“18px”换算成文档内的缩放比例。
 pub fn base_font_size() -> f32 {
     let books = BOOK.lock().unwrap();
@@ -1173,6 +1294,19 @@ mod tests {
         let ir: LayoutResult = ebook_ir::decode(&chapter).unwrap();
         assert_eq!(ir.spine, 1);
         assert_eq!(ir.runs.lines[0].anchor.as_ref().unwrap().spine, 1);
+
+        // 全文搜索：两章各有一条“正文”，命中带章名与可跳转的 node/offset。
+        let found = search_json("正文", 10);
+        assert!(found.contains("\"hits\":["), "{found}");
+        assert!(found.contains("\"spine\":0"), "{found}");
+        assert!(found.contains("\"spine\":1"), "{found}");
+        assert!(found.contains("\"chapter\":\"第一章 一\""), "{found}");
+        assert!(!found.contains("\"truncated\":true"), "{found}");
+        assert_eq!(
+            search_json("不存在的词", 10),
+            "{\"hits\":[],\"truncated\":false,\"scanned\":2,\"skipped\":0}"
+        );
+        assert_eq!(search_locate(u32::MAX, 0), u32::MAX);
 
         // 四边独立页边距：覆盖式工具栏靠它让正文避开顶栏/底栏。
         let inset = layout_cached_insets(0, 520.0, 300.0, 30.0, 40.0, 80.0, 50.0, 1.0);

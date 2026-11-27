@@ -204,6 +204,20 @@ pub fn eb_fragment_line(fragment: &str) -> u32 {
     crate::fragment_line(fragment)
 }
 
+/// 全书全文搜索：`{hits:[{spine,node,offset,end,chapter,before,text,after,...}],...}`。
+/// `limit == 0` 用默认上限。
+#[wasm_bindgen]
+pub fn eb_search(query: &str, limit: u32) -> String {
+    crate::search_json(query, limit)
+}
+
+/// 搜索命中（`node + offset`）→ 当前排版里的行号（`u32::MAX` = 定位不到）。
+/// 调用前必须先排版命中所在的章。
+#[wasm_bindgen]
+pub fn eb_search_locate(node: u32, offset: u32) -> u32 {
+    crate::search_locate(node, offset)
+}
+
 /// 按当前章节解析书内链接：`{target:{spine,fragment,external}}`。
 #[wasm_bindgen]
 pub fn eb_resolve_link(href: &str) -> String {

@@ -532,6 +532,30 @@ fn dispatch(engine: &mut Engine, request: Request) -> Response {
             Ok(id) => Response::Font(id.0 as u32),
             Err(message) => Response::Error(message),
         },
+        Request::Search { query, limit } => {
+            let results = engine.search(&query, limit);
+            Response::Search(protocol::SearchResults {
+                hits: results
+                    .hits
+                    .into_iter()
+                    .map(|hit| protocol::SearchHit {
+                        spine: hit.spine as u32,
+                        node: hit.range.start.node,
+                        offset: hit.range.start.offset,
+                        end: hit.range.end.offset,
+                        chapter: hit.chapter,
+                        before: hit.before,
+                        text: hit.text,
+                        after: hit.after,
+                        ellipsis_before: hit.ellipsis_before,
+                        ellipsis_after: hit.ellipsis_after,
+                    })
+                    .collect(),
+                truncated: results.truncated,
+                scanned: results.scanned,
+                skipped: results.skipped,
+            })
+        }
         Request::BaseFontSize => Response::Number(engine.base_font_size()),
         Request::Metadata => Response::Metadata(metadata_wire(engine)),
         Request::Spine => Response::Spine(spine_wire(engine)),

@@ -103,6 +103,7 @@ op 坐标是**排版流坐标**，不是页面内坐标。`Page.origin` 表示�
 | 契约 | IR 1.5：`Glyph.ch`、`Op::Link`、`GlyphRun.weight/style/underline`、`Issue`/`IssueCode`、`LayoutResult.truncated`、`LayoutStats`、`LayoutResult.blocks` |
 | 限额 | `Limits` 六个字段（节点/深度/文本字节/页数/行数/图片像素），超限返回合法截断 IR |
 | 交互 | `Reader`（命中、锚点、进度、链接、夹取）、`Selection`/`SelectionRect`（分页矩形与原文）、wasm 侧 JSON 查询 |
+| 搜索 | `ebook-search`：文本节点拼接、块边界、空白折叠、Unicode 小写、英文/数字词边界；按章 `(spine, rev)` 缓存。`Engine::search` 扫全书，返回与排版无关的 `LocatorRange`，排版后用 `locate_locator` 换页/行；Web 搜索面板、C ABI `Request::Search` |
 | 缓存 | `ebook-cache`：输入指纹为键的有界 LRU，命中/未命中/淘汰统计 |
 | 并发 | `Layout::layout_parallel`：一次调用内的 `thread::scope`，输出与串行逐字节相同；wasm 走串行 |
 | 渲染 | RGBA8 整数光栅（tone/线性光、嵌套裁剪、双线性图片、PNG+JPEG 图片）、同色字形批处理（可选，`Surface::finish` 收尾）、SVG 预览导出（CLI）、Canvas2D 阅读器（只搬位图） |
@@ -187,7 +188,7 @@ eb_plain_close(book);
 | 像素基线 | `xtask pixel` | 渲染结果变了。逐页 FNV 摘要，`pixel-bless` 显式更新。 |
 | 跨目标比对 | `xtask parity` | native 与 wasm 不再逐字节相同。 |
 | 浏览器应用 | `xtask app` | 读者 App 的翻页/打开/字体路径坏了。用 bun + DOM stub 跑端到端。 |
-| 体积预算 | `xtask size` | core 或 core+epub 的 wasm gzip 超过 680 KiB。 |
+| 体积预算 | `xtask size` | core 或 core+epub 的 wasm gzip 超过 700 KiB。 |
 | 性能回归 | `scripts/bench.sh` | layout / raster / IR codec 的中位耗时超过基线 1.15×。 |
 | 排版 fuzz | `cargo test -p ebook-layout --test fuzz` | 1000 份随机文档（结构/文本/样式/页面尺寸）：页覆盖、行不越界、y 与 src 单调、重复排版幂等、编解码往返不变。 |
 | 格式 fuzz | `cargo test -p ebook-format --test fuzz_like` | 真实样书 1000 次确定性变异（截断/翻字节/搬块/插入/抹零），`open` 与 `chapter` 都不 panic。 |

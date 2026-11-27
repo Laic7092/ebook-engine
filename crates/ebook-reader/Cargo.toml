@@ -18,6 +18,7 @@ parallel = ["ebook-layout/parallel"]
 ebook-ir.workspace = true
 ebook-layout.workspace = true
 ebook-format.workspace = true
+ebook-search.workspace = true
 ebook-font.workspace = true
 ebook-raster.workspace = true
 ebook-render.workspace = true

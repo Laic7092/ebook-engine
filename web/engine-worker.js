@@ -26,6 +26,8 @@ import init, {
   eb_page_meta,
   eb_progress,
   eb_resolve_link,
+  eb_search,
+  eb_search_locate,
   eb_selection,
   eb_toc,
 } from "./pkg/ebook_web.js";
@@ -34,6 +36,7 @@ import {
   decodeLink,
   decodeProgress,
   decodeResolvedLink,
+  decodeSearch,
   decodeSelection,
   decodeToc,
 } from "./decode.js";
@@ -207,6 +210,13 @@ const handlers = {
   },
   fragmentLine(msg) {
     const line = eb_fragment_line(msg.fragment);
+    return { value: line === 0xffffffff ? null : line };
+  },
+  search(msg) {
+    return { value: decodeSearch(eb_search(msg.query || "", msg.limit || 0)) };
+  },
+  searchLocate(msg) {
+    const line = eb_search_locate(msg.node, msg.offset);
     return { value: line === 0xffffffff ? null : line };
   },
   resolveLink(msg) {

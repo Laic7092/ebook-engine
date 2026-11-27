@@ -102,6 +102,11 @@ export function createReader(options) {
   const tocEl = element("toc");
   const tocToggleEl = element("toc-toggle");
   const tocCloseEl = element("toc-close");
+  const searchToggleEl = element("search-toggle");
+  const searchCloseEl = element("search-close");
+  const searchInputEl = element("search-input");
+  const searchResultsEl = element("search-results");
+  const searchSummaryEl = element("search-summary");
   const settingsToggleEl = element("settings-toggle");
   const settingsCloseEl = element("settings-close");
   const backEl = element("back");
@@ -157,6 +162,9 @@ export function createReader(options) {
   // 页面位图缓存：当前页 ±1 的离屏 canvas，翻页/滑动直接搬图，不再重画字形。
   const pageSnapshots = new Map();
   let prefetchTimer = 0;
+  // 全文搜索：输入防抖 + 令牌防止晚到的结果盖掉新查询。
+  let searchTimer = 0;
+  let searchToken = 0;
   // 引擎在 worker 里：开书、字体、排版、光栅、查询都只发生在那边。
   // 主线程只拿页元数据、位图和查询结果。
   const engine = createEngine(options.engine);
@@ -577,7 +585,7 @@ export function createReader(options) {
 
   function closePanels() {
     if (document.body) {
-      document.body.classList.remove("toc-open", "settings-open");
+      document.body.classList.remove("toc-open", "settings-open", "search-open");
     }
   }
 
@@ -622,7 +630,12 @@ export function createReader(options) {
     }
     chromeTimer = setTimeout(() => {
       chromeTimer = 0;
-      if (hasClass("chrome-hidden") || hasClass("toc-open") || hasClass("settings-open")) {
+      if (
+        hasClass("chrome-hidden") ||
+        hasClass("toc-open") ||
+        hasClass("settings-open") ||
+        hasClass("search-open")
+      ) {
         return;
       }
       setChromeHidden(true);
@@ -656,6 +669,149 @@ export function createReader(options) {
     if (book && isNarrowView()) {
       setChromeHidden(true);
     }
+  }
+
+  // ---- 全文搜索 -----------------------------------------------------------
+
+  function searchQuery() {
+    return searchInputEl ? String(searchInputEl.value || "").trim() : "";
+  }
+
+  function setSearchOpen(open) {
+    if (!document.body) {
+      return;
+    }
+    document.body.classList.toggle("search-open", Boolean(open));
+    if (open) {
+      document.body.classList.remove("toc-open", "settings-open");
+      if (searchInputEl) {
+        searchInputEl.focus();
+      }
+      if (!searchQuery() && searchSummaryEl) {
+        searchSummaryEl.textContent = "输入关键词，搜索整本书";
+      }
+    }
+  }
+
+  function scheduleSearch() {
+    if (searchTimer) {
+      clearTimeout(searchTimer);
+      searchTimer = 0;
+    }
+    const query = searchQuery();
+    if (!query) {
+      searchToken += 1;
+      renderSearchResults("", null);
+      return;
+    }
+    searchTimer = setTimeout(() => {
+      searchTimer = 0;
+      runSearch(query).catch((error) => setStatus(String(error.message || error)));
+    }, 220);
+  }
+
+  async function runSearch(query) {
+    const token = ++searchToken;
+    if (searchSummaryEl) {
+      searchSummaryEl.textContent = "正在搜索…";
+    }
+    const result = await engine.search(query, 80);
+    if (token !== searchToken) {
+      return;
+    }
+    renderSearchResults(query, result);
+  }
+
+  function searchResultPart(before, text, after, ellipsisBefore, ellipsisAfter) {
+    const line = document.createElement("span");
+    if (ellipsisBefore) {
+      line.append("…");
+    }
+    if (before) {
+      line.append(before);
+    }
+    const mark = document.createElement("mark");
+    mark.textContent = text;
+    line.append(mark);
+    if (after) {
+      line.append(after);
+    }
+    if (ellipsisAfter) {
+      line.append("…");
+    }
+    return line;
+  }
+
+  function renderSearchResults(query, result) {
+    if (!searchResultsEl) {
+      return;
+    }
+    searchResultsEl.replaceChildren();
+    const hits = (result && result.hits) || [];
+    if (!query) {
+      if (searchSummaryEl) {
+        searchSummaryEl.textContent = "输入关键词，搜索整本书";
+      }
+      return;
+    }
+    if (!hits.length) {
+      const empty = document.createElement("p");
+      empty.className = "search-empty";
+      empty.textContent = result && result.skipped ? "没有找到匹配；有章节解析失败。" : "没有找到匹配。";
+      searchResultsEl.append(empty);
+      if (searchSummaryEl) {
+        searchSummaryEl.textContent = "0 条结果";
+      }
+      return;
+    }
+    for (const hit of hits) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "search-result";
+      if (typeof button.setAttribute === "function") {
+        button.setAttribute("role", "listitem");
+      }
+      const title = document.createElement("strong");
+      title.textContent = hit.chapter || `第 ${hit.spine + 1} 章`;
+      button.append(title);
+      button.append(
+        searchResultPart(
+          hit.before,
+          hit.text,
+          hit.after,
+          hit.ellipsisBefore,
+          hit.ellipsisAfter,
+        ),
+      );
+      button.addEventListener("click", () => {
+        goToSearchHit(hit).catch((error) => setStatus(String(error.message || error)));
+      });
+      searchResultsEl.append(button);
+    }
+    if (searchSummaryEl) {
+      let text = `${hits.length} 条结果`;
+      if (result && result.truncated) {
+        text += "（只显示前 80 条）";
+      }
+      if (result && result.skipped) {
+        text += ` · ${result.skipped} 章无法解析`;
+      }
+      searchSummaryEl.textContent = text;
+    }
+  }
+
+  async function goToSearchHit(hit) {
+    if (!book || !hit) {
+      return;
+    }
+    await layoutChapter(hit.spine, 0);
+    const line = await engine.searchLocate(hit.node, hit.offset);
+    if (line === null || line === undefined) {
+      setStatus("命中位置不在这一章");
+      return;
+    }
+    await jumpToLine(line);
+    closePanelsAndRead();
   }
 
   // ---- 章节 / 页码 ---------------------------------------------------------
@@ -1586,12 +1742,37 @@ export function createReader(options) {
     tocToggleEl.addEventListener("click", () => {
       if (document.body) {
         document.body.classList.toggle("toc-open");
-        document.body.classList.remove("settings-open");
+        document.body.classList.remove("settings-open", "search-open");
       }
     });
   }
   if (tocCloseEl) {
     tocCloseEl.addEventListener("click", closePanelsAndRead);
+  }
+  if (searchToggleEl) {
+    searchToggleEl.addEventListener("click", () => {
+      setSearchOpen(!hasClass("search-open"));
+    });
+  }
+  if (searchCloseEl) {
+    searchCloseEl.addEventListener("click", closePanelsAndRead);
+  }
+  if (searchInputEl) {
+    searchInputEl.addEventListener("input", scheduleSearch);
+    searchInputEl.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+      event.preventDefault();
+      if (searchTimer) {
+        clearTimeout(searchTimer);
+        searchTimer = 0;
+      }
+      const query = searchQuery();
+      if (query) {
+        runSearch(query).catch((error) => setStatus(String(error.message || error)));
+      }
+    });
   }
   if (backdropEl) {
     backdropEl.addEventListener("click", closePanelsAndRead);
@@ -1600,7 +1781,7 @@ export function createReader(options) {
     settingsToggleEl.addEventListener("click", () => {
       if (document.body) {
         document.body.classList.toggle("settings-open");
-        document.body.classList.remove("toc-open");
+        document.body.classList.remove("toc-open", "search-open");
       }
     });
   }
@@ -1784,6 +1965,15 @@ export function createReader(options) {
       page = 0;
       layout = null;
       layoutDimsUsed = null;
+      searchToken += 1;
+      if (searchTimer) {
+        clearTimeout(searchTimer);
+        searchTimer = 0;
+      }
+      if (searchInputEl) {
+        searchInputEl.value = "";
+      }
+      renderSearchResults("", null);
       setChromeHidden(isNarrowView());
       const plan = await planFonts(info, record);
       // 字体和首章排版并行：缓存命中通常能在 FONT_WAIT_MS 内完成，直接等；
@@ -1861,6 +2051,11 @@ export function createReader(options) {
     book = null;
     currentRecord = null;
     layout = null;
+    searchToken += 1;
+    if (searchTimer) {
+      clearTimeout(searchTimer);
+      searchTimer = 0;
+    }
     clearPageCache();
     layoutDimsUsed = null;
   }

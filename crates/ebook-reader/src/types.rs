@@ -209,6 +209,37 @@ pub struct SelectionResult {
     pub text: String,
 }
 
+/// 全文搜索的一条命中。位置是稳定的 [`LocatorRange`]，与字号、页高无关；
+/// 宿主先排版目标章，再用 [`Engine::locate_locator`](crate::Engine::locate_locator)
+/// 换算成页/行。`before` / `text` / `after` 是已经做空白折叠的上下文，
+/// 可以直接拼给 UI 高亮。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchHit {
+    /// 命中在原文里的区间；`start.node` 就是命中所在的文本节点。
+    pub range: LocatorRange,
+    /// 命中所在章在 spine 里的下标。
+    pub spine: usize,
+    /// 目录里的章名（该章没有独立目录项时为 `None`）。
+    pub chapter: Option<String>,
+    pub before: String,
+    pub text: String,
+    pub after: String,
+    pub ellipsis_before: bool,
+    pub ellipsis_after: bool,
+}
+
+/// 一次全文搜索的结果。单章解析失败不会中断整本书：计入 `skipped` 后继续。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SearchResults {
+    pub hits: Vec<SearchHit>,
+    /// 命中数超过 `max_hits`，尾部没有返回。
+    pub truncated: bool,
+    /// 实际扫过的章数（含解析失败的章）。
+    pub scanned: u32,
+    /// 解析失败、无法搜索的章数。
+    pub skipped: u32,
+}
+
 /// 当前引擎持有的可释放内存估算。宿主内存警告时先看这里，再决定是否
 /// 调 [`Engine::trim_memory`](crate::Engine::trim_memory)。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -221,6 +252,8 @@ pub struct MemoryUsage {
     pub flow_bytes: usize,
     /// 解码后的图片 RGBA。
     pub image_bytes: usize,
+    /// 全文搜索索引。
+    pub search_bytes: usize,
     /// 字体光栅/整形缓存。
     pub font_bytes: usize,
     /// 以上之和。

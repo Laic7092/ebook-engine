@@ -9,6 +9,7 @@ members = [
   "crates/ebook-cli",
   "crates/ebook-web",
   "crates/ebook-reader",
+  "crates/ebook-search",
   "crates/ebook-abi",
   "crates/ebook-font",
   "crates/ebook-raster",
@@ -26,6 +27,7 @@ ebook-layout = { path = "crates/ebook-layout", default-features = false }
 ebook-format = { path = "crates/ebook-format" }
 ebook-render = { path = "crates/ebook-render" }
 ebook-reader = { path = "crates/ebook-reader" }
+ebook-search = { path = "crates/ebook-search" }
 ebook-font = { path = "crates/ebook-font", default-features = false }
 ebook-raster = { path = "crates/ebook-raster" }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }

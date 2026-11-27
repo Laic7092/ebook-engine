@@ -364,3 +364,34 @@ export function decodeResolvedLink(input) {
     external: target.external === true,
   };
 }
+
+export function decodeSearch(input) {
+  const value = parseJson(input, "search");
+  if (!Array.isArray(value.hits)) {
+    throw new Error("search: hits is not an array");
+  }
+  const stringField = (item, key, index) => {
+    if (typeof item[key] !== "string") {
+      throw new Error(`search[${index}]: bad ${key}`);
+    }
+    return item[key];
+  };
+  const hits = value.hits.map((hit, index) => ({
+    spine: nonNegativeInt(hit.spine, `search[${index}]`, "spine"),
+    node: nonNegativeInt(hit.node, `search[${index}]`, "node"),
+    offset: nonNegativeInt(hit.offset, `search[${index}]`, "offset"),
+    end: nonNegativeInt(hit.end, `search[${index}]`, "end"),
+    chapter: optionalString(hit.chapter, `search[${index}]`, "chapter"),
+    before: stringField(hit, "before", index),
+    text: stringField(hit, "text", index),
+    after: stringField(hit, "after", index),
+    ellipsisBefore: hit.ellipsis_before === true,
+    ellipsisAfter: hit.ellipsis_after === true,
+  }));
+  return {
+    hits,
+    truncated: value.truncated === true,
+    scanned: nonNegativeInt(value.scanned, "search", "scanned"),
+    skipped: nonNegativeInt(value.skipped, "search", "skipped"),
+  };
+}

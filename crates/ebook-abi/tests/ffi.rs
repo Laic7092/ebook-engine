@@ -361,3 +361,29 @@ fn scroll_requests_round_trip() {
     ));
     unsafe { eb_close(bare) };
 }
+
+#[test]
+fn searches_the_whole_book() {
+    let _guard = serial();
+    let engine = open();
+    match call(
+        engine,
+        &Request::Search {
+            query: "雪".to_string(),
+            limit: 5,
+        },
+    ) {
+        Response::Search(results) => {
+            assert!(!results.hits.is_empty(), "demo.txt 应该有“雪”");
+            assert!(results.hits.len() <= 5);
+            assert_eq!(results.skipped, 0);
+            assert!(results.scanned > 0);
+            let hit = &results.hits[0];
+            assert_eq!(hit.spine, 0);
+            assert!(hit.end >= hit.offset);
+            assert!(hit.text.contains('雪'));
+        }
+        other => panic!("期望 Search，拿到 {other:?}"),
+    }
+    unsafe { eb_close(engine) };
+}

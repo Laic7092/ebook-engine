@@ -24,11 +24,12 @@ use ebook_layout::{
 };
 use ebook_raster::{RgbaSurface, Tone};
 use ebook_render::ScaledSurface;
+use ebook_search::{SearchCache, SearchOptions, SearchText};
 
 use crate::heights::{estimate_height, index_key, HeightIndex};
 use crate::types::{
     Bitmap, EngineError, Limits, Locator, LocatorRange, MemoryUsage, PageBox, ScrollChapter,
-    ScrollLoc, ScrollMetrics, SelectionResult, Style, Viewport,
+    ScrollLoc, ScrollMetrics, SearchHit, SearchResults, SelectionResult, Style, Viewport,
 };
 
 /// 最近一次排版的产物。交互查询（命中/选区/进度/锚点）只认这一份。
@@ -224,6 +225,9 @@ impl LastLayout {
 const CHAPTER_CACHE_BYTES: usize = 8 * 1024 * 1024;
 /// 至少保留这么多份，保证跨章瓦片不用反复重排。
 const CHAPTER_CACHE_MIN: usize = 2;
+/// 全文搜索索引的字节预算。搜索会扫全书；小的章保留下来，
+/// 重复搜索同一个词时不必重新解析。超出预算按 FIFO 淘汰。
+const SEARCH_CACHE_BYTES: usize = 32 * 1024 * 1024;
 
 /// 连续滚动会话：全书高度索引 + 视口/样式。
 ///
@@ -378,6 +382,8 @@ pub struct Engine {
     flow_rev: u64,
     /// 上一次用过的版本号输入。用它判断要不要递增 `flow_rev`，比手写哈希稳。
     flow_inputs: Option<(usize, Style, u32)>,
+    /// 按章缓存的纯文本索引；不参与排版，只给搜索用。
+    search_cache: SearchCache,
 }
 
 impl Engine {
@@ -417,6 +423,7 @@ impl Engine {
             flow_cache: FlowCache::new(),
             flow_rev: 0,
             flow_inputs: None,
+            search_cache: SearchCache::new(SEARCH_CACHE_BYTES),
         })
     }
 
@@ -442,6 +449,7 @@ impl Engine {
             flow_cache: FlowCache::new(),
             flow_rev: 0,
             flow_inputs: None,
+            search_cache: SearchCache::new(SEARCH_CACHE_BYTES),
         }
     }
 
@@ -573,6 +581,10 @@ impl Engine {
     fn invalidate_stream_caches(&mut self, spine: Option<usize>) {
         self.flow_cache.clear();
         self.flow_inputs = None;
+        match spine {
+            Some(index) => self.search_cache.invalidate(index as u32),
+            None => self.search_cache.clear(),
+        }
         match spine {
             Some(index) => {
                 if self.last.as_ref().is_some_and(|last| last.spine == index) {
@@ -925,17 +937,20 @@ impl Engine {
         let chapters_bytes = self.chapters.iter().map(LastLayout::approx_bytes).sum();
         let flow_bytes = self.flow_cache.bytes();
         let image_bytes = self.images.bytes();
+        let search_bytes = self.search_cache.bytes();
         let font_bytes = self.font.as_ref().map_or(0, FontBook::cache_bytes);
         MemoryUsage {
             layout_bytes,
             chapters_bytes,
             flow_bytes,
             image_bytes,
+            search_bytes,
             font_bytes,
             total_bytes: layout_bytes
                 .saturating_add(chapters_bytes)
                 .saturating_add(flow_bytes)
                 .saturating_add(image_bytes)
+                .saturating_add(search_bytes)
                 .saturating_add(font_bytes),
         }
     }
@@ -948,6 +963,7 @@ impl Engine {
     pub fn trim_memory(&mut self) {
         self.chapters.clear();
         self.flow_cache.clear();
+        self.search_cache.clear();
         self.images.clear();
         if let Some(font) = self.font.as_ref() {
             font.clear_caches();
@@ -1644,6 +1660,95 @@ impl Engine {
             }
         }
         last_line_in_block(&last.ir, anchor)
+    }
+
+    /// 全书全文搜索。默认大小写不敏感、按 Unicode 小写比较；中文按子串，
+    /// 英文/数字查询要求词边界（`the` 不会命中 `theatre`）。
+    ///
+    /// 索引按章缓存，`(spine, rev)` 是键：流式书 `replace_chapter` 后只失效
+    /// 那一章。解析失败的章计入 `skipped`，不中断其余章。`max_hits == 0`
+    /// 时用 `ebook_search::DEFAULT_MAX_HITS`。
+    ///
+    /// 命中是 `LocatorRange`，和字号、页高、滚动位置无关；宿主对目标章调用
+    /// [`Engine::layout`] 后再用 [`Engine::locate_locator`] 换算页/行。
+    pub fn search(&mut self, query: &str, max_hits: u32) -> SearchResults {
+        let count = self.chapter_count();
+        let max_hits = if max_hits == 0 {
+            ebook_search::DEFAULT_MAX_HITS
+        } else {
+            max_hits
+        };
+        let mut out = SearchResults::default();
+        if count == 0 || query.trim().is_empty() {
+            return out;
+        }
+        let titles: Vec<Option<String>> = (0..count)
+            .map(|spine| {
+                self.toc()
+                    .iter()
+                    .find(|entry| entry.spine == spine)
+                    .map(|entry| entry.label.clone())
+            })
+            .collect();
+
+        for (spine, title) in titles.iter().enumerate() {
+            out.scanned = out.scanned.saturating_add(1);
+            let rev = self.backend.chapter_rev(spine).unwrap_or(0);
+            if self.search_cache.get(spine as u32, rev).is_none() {
+                match self.backend.chapter(spine) {
+                    Ok((doc, _)) => {
+                        let text = SearchText::build(&doc);
+                        self.search_cache.insert(spine as u32, rev, text);
+                    }
+                    Err(_) => {
+                        out.skipped = out.skipped.saturating_add(1);
+                        continue;
+                    }
+                }
+            }
+            let remaining = max_hits.saturating_sub(out.hits.len() as u32);
+            if remaining == 0 {
+                out.truncated = true;
+                break;
+            }
+            let options = SearchOptions {
+                max_hits: remaining,
+                ..SearchOptions::default()
+            };
+            let mut found = Vec::new();
+            let truncated = match self.search_cache.get(spine as u32, rev) {
+                Some(index) => index.find(query, &options, &mut found),
+                None => false,
+            };
+            for hit in found {
+                out.hits.push(SearchHit {
+                    range: LocatorRange {
+                        start: Locator {
+                            spine: spine as u32,
+                            node: hit.node,
+                            offset: hit.source_start,
+                        },
+                        end: Locator {
+                            spine: spine as u32,
+                            node: hit.node,
+                            offset: hit.source_end,
+                        },
+                    },
+                    spine,
+                    chapter: title.clone(),
+                    before: hit.before,
+                    text: hit.text,
+                    after: hit.after,
+                    ellipsis_before: hit.ellipsis_before,
+                    ellipsis_after: hit.ellipsis_after,
+                });
+            }
+            if truncated {
+                out.truncated = true;
+                break;
+            }
+        }
+        out
     }
 
     /// 在**当前章**上下文里解析书内链接。

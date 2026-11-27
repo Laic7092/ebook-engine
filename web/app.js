@@ -88,7 +88,7 @@ function showView(name) {
   if (document.body) {
     document.body.classList.toggle("reading", name === "reader");
     if (name === "library") {
-      document.body.classList.remove("toc-open", "settings-open", "chrome-hidden");
+      document.body.classList.remove("toc-open", "settings-open", "search-open", "chrome-hidden");
     }
   }
   if (document.title) {
@@ -325,6 +325,8 @@ function bindKeyboard() {
         body.classList.remove("toc-open");
       } else if (body && body.classList.contains("settings-open")) {
         body.classList.remove("settings-open");
+      } else if (body && body.classList.contains("search-open")) {
+        body.classList.remove("search-open");
       } else if ((globalThis.window.innerWidth || 1200) < 700 && body && !body.classList.contains("chrome-hidden")) {
         reader.toggleChrome();
       } else {
@@ -343,7 +345,18 @@ function bindKeyboard() {
     } else if (key === "t" || key === "T") {
       if (document.body) {
         document.body.classList.toggle("toc-open");
-        document.body.classList.remove("settings-open");
+        document.body.classList.remove("settings-open", "search-open");
+      }
+    } else if (key === "f" || key === "F" || key === "/") {
+      event.preventDefault();
+      const body = document.body;
+      if (body) {
+        body.classList.toggle("search-open");
+        body.classList.remove("toc-open", "settings-open");
+        const input = document.getElementById("search-input");
+        if (body.classList.contains("search-open") && input) {
+          input.focus();
+        }
       }
     }
   });

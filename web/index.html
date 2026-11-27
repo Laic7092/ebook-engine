@@ -589,11 +589,11 @@ body.chrome-hidden #reader-bottom { transform: translateY(100%); }
   -webkit-backdrop-filter: blur(2px);
   backdrop-filter: blur(2px);
 }
-body.toc-open #panel-backdrop, body.settings-open #panel-backdrop {
+body.toc-open #panel-backdrop, body.settings-open #panel-backdrop, body.search-open #panel-backdrop {
   opacity: 1;
   visibility: visible;
 }
-#toc-panel, #settings-panel {
+#toc-panel, #settings-panel, #search-panel {
   position: fixed;
   z-index: 20;
   left: 0;
@@ -614,11 +614,41 @@ body.toc-open #panel-backdrop, body.settings-open #panel-backdrop {
   transition: transform 220ms cubic-bezier(0.22, 0.85, 0.32, 1), visibility 0s linear 220ms;
   overflow: hidden;
 }
-body.toc-open #toc-panel, body.settings-open #settings-panel {
+body.toc-open #toc-panel, body.settings-open #settings-panel, body.search-open #search-panel {
   transform: translateY(0);
   visibility: visible;
   transition: transform 220ms cubic-bezier(0.22, 0.85, 0.32, 1), visibility 0s;
 }
+#search-panel .panel-body { padding-top: 12px; }
+.reader-search-box { margin-top: 0; }
+#search-input {
+  width: 100%;
+  height: 44px;
+  padding: 0 14px 0 39px;
+  border-color: transparent;
+  background: var(--surface-2);
+  font-size: 15px;
+}
+.search-results { display: flex; flex-direction: column; gap: 3px; margin-top: 12px; }
+.search-result {
+  display: block;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-soft);
+  text-align: left;
+  font-size: 13.5px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.search-result:hover, .search-result:focus-visible { background: var(--surface-2); }
+.search-result strong { display: block; margin-bottom: 2px; color: var(--text); font-size: 12px; font-weight: 650; }
+.search-result mark { padding: 0 1px; border-radius: 3px; background: var(--accent-soft); color: var(--accent); font-weight: 650; }
+.search-empty { margin: 18px 2px 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.search-empty.error { color: var(--danger); }
 .panel-grab {
   flex: none;
   width: 36px;
@@ -774,7 +804,8 @@ body.toc-open #toc-panel, body.settings-open #settings-panel {
   #reader-bottom { padding-left: 16px; padding-right: 16px; }
   #toc-panel { top: 0; right: auto; bottom: 0; width: min(380px, 86vw); height: auto; max-height: none; border-radius: 0 22px 22px 0; border: 0; border-right: 1px solid var(--line); transform: translateX(-104%); }
   #settings-panel { top: 0; left: auto; bottom: 0; width: min(380px, 86vw); height: auto; max-height: none; border-radius: 22px 0 0 22px; border: 0; border-left: 1px solid var(--line); transform: translateX(104%); }
-  body.toc-open #toc-panel, body.settings-open #settings-panel { transform: translateX(0); }
+  #search-panel { top: 0; left: auto; bottom: 0; width: min(420px, 90vw); height: auto; max-height: none; border-radius: 22px 0 0 22px; border: 0; border-left: 1px solid var(--line); transform: translateX(104%); }
+  body.toc-open #toc-panel, body.settings-open #settings-panel, body.search-open #search-panel { transform: translateX(0); }
   .panel-grab { display: none; }
   .panel-head { padding: 20px 18px 12px; }
   .panel-body { padding: 14px 18px 24px; }
@@ -855,6 +886,9 @@ body.toc-open #toc-panel, body.settings-open #settings-panel {
       <span id="book-meta"></span>
     </div>
     <div class="reader-actions">
+      <button id="search-toggle" class="icon-btn" type="button" aria-label="全文搜索" title="全文搜索 (F)">
+        <svg class="icon"><use href="#icon-search"/></svg>
+      </button>
       <button id="toc-toggle" class="icon-btn" type="button" aria-label="目录" title="目录 (T)">
         <svg class="icon"><use href="#icon-list"/></svg>
       </button>
@@ -900,6 +934,26 @@ body.toc-open #toc-panel, body.settings-open #settings-panel {
       </button>
     </div>
     <div class="panel-body"><nav id="toc" aria-label="目录内容"></nav></div>
+  </aside>
+
+  <aside id="search-panel">
+    <div class="panel-grab"></div>
+    <div class="panel-head">
+      <div>
+        <strong>全文搜索</strong>
+        <span class="panel-sub" id="search-summary">输入关键词，搜索整本书</span>
+      </div>
+      <button id="search-close" class="icon-btn" type="button" aria-label="关闭搜索">
+        <svg class="icon"><use href="#icon-close"/></svg>
+      </button>
+    </div>
+    <div class="panel-body">
+      <label class="search-box reader-search-box">
+        <svg class="icon"><use href="#icon-search"/></svg>
+        <input id="search-input" type="search" placeholder="搜索全文…" autocomplete="off" aria-label="全文搜索">
+      </label>
+      <div id="search-results" class="search-results" role="list"></div>
+    </div>
   </aside>
 
   <aside id="settings-panel">
@@ -960,7 +1014,7 @@ body.toc-open #toc-panel, body.settings-open #settings-panel {
     <label class="setting opt"><span>使用内置拉丁字体</span><input id="builtin-font" type="checkbox"></label>
     <label class="file-row"><span>加载本地字体</span><input id="font-file" type="file" accept=".ttf,.otf,.woff,.woff2,font/ttf,font/otf,font/woff,font/woff2,application/font-woff"></label>
     <button id="settings-reset" type="button">恢复默认设置</button>
-    <p class="hint">移动端工具栏会自动隐藏：轻点左右两侧或横向滑动翻页，轻点中间显示/隐藏工具栏；方向键或空格翻页，Esc 关闭面板/隐藏工具栏/返回书架。TXT 会按「第 N 章 / Chapter N」标题行自动分章。</p>
+    <p class="hint">移动端工具栏会自动隐藏：轻点左右两侧或横向滑动翻页，轻点中间显示/隐藏工具栏；方向键或空格翻页，F 或 / 打开全文搜索，Esc 关闭面板/隐藏工具栏/返回书架。TXT 会按「第 N 章 / Chapter N」标题行自动分章。</p>
     </div>
   </aside>
 </section>

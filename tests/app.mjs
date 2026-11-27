@@ -347,6 +347,26 @@ check(
   `paints ${paints.length}`,
 );
 check("txt upload joins the shelf", shelf.children.length === 2, `cards ${shelf.children.length}`);
+// 全文搜索：输入关键词 → 结果列表；结果项带章名与高亮上下文。
+const searchInput = globalThis.document.getElementById("search-input");
+const searchResults = globalThis.document.getElementById("search-results");
+searchInput.value = "雪";
+searchInput.dispatchEvent({ type: "input" });
+await settle();
+check(
+  "full-text search returns hits",
+  (searchResults.children || []).length > 0,
+  `results ${(searchResults.children || []).length}`,
+);
+check(
+  "search summary reports a count",
+  /条结果/.test(text("search-summary")),
+  text("search-summary"),
+);
+searchInput.value = "";
+searchInput.dispatchEvent({ type: "input" });
+await settle();
+
 
 paints.length = 0;
 const before = text("book-title");

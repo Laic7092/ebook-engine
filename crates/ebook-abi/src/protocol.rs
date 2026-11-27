@@ -151,6 +151,30 @@ pub struct Selection {
     pub text: String,
 }
 
+/// 全文搜索的一条命中。`node + offset` 可以直接喂给 `Locate` 的底层
+/// `Locator`；`chapter` 是目录里的章名。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SearchHit {
+    pub spine: u32,
+    pub node: u32,
+    pub offset: u32,
+    pub end: u32,
+    pub chapter: Option<String>,
+    pub before: String,
+    pub text: String,
+    pub after: String,
+    pub ellipsis_before: bool,
+    pub ellipsis_after: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SearchResults {
+    pub hits: Vec<SearchHit>,
+    pub truncated: bool,
+    pub scanned: u32,
+    pub skipped: u32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
     /// 一次调用里带全排版参数：ABI 层不保存 viewport/style。
@@ -305,6 +329,12 @@ pub enum Request {
     Spine,
     /// 书内嵌字体面。
     Fonts,
+    /// 全书全文搜索。索引按章缓存，重复查询只扫新增/变化的章。
+    /// 追加在末尾：不改变已有变体的 postcard tag。
+    Search {
+        query: String,
+        limit: u32,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -356,4 +386,6 @@ pub enum Response {
     Spine(Vec<SpineItem>),
     /// 内嵌字体面。
     Fonts(Vec<FontFace>),
+    /// 全文搜索。追加在末尾：不改变已有变体的 postcard tag。
+    Search(SearchResults),
 }

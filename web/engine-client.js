@@ -181,6 +181,14 @@ export function createEngine(options = {}) {
     toc() {
       return send("toc", {});
     },
+    /** 全书全文搜索。返回 `{hits, truncated, scanned, skipped}`。 */
+    search(query, limit = 100) {
+      return send("search", { query, limit });
+    },
+    /** 搜索命中（node + offset）→ 当前排版里的行号；定位不到时为 `null`。 */
+    searchLocate(node, offset) {
+      return send("searchLocate", { node, offset });
+    },
     /** 当前章的 `#fragment` → 行号，没有这个锚点时为 `null`。 */
     fragmentLine(fragment) {
       return send("fragmentLine", { fragment });
