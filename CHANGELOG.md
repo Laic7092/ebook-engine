@@ -5,6 +5,11 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-27
+
+全文搜索。`.version` 升到 0.5.0；C ABI 版本仍为 3，`Request::Search` /
+`Response::Search` 追加在枚举末尾，旧请求/响应的 postcard tag 不变。
+
 ### Added
 
 - **全文搜索**：新增 `ebook-search`（纯文本索引 + 命中上下文 + 有界章缓存），
