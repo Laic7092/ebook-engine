@@ -1,6 +1,6 @@
 //! 全文搜索：索引、命中上限、跳转定位、流式书失效。
 
-use ebook_reader::{Engine, Style, Viewport};
+use ebook_reader::{Engine, Location, Style, Viewport};
 
 fn demo() -> Engine {
     let bytes = std::fs::read(concat!(
@@ -24,7 +24,8 @@ fn finds_across_the_whole_book() {
     assert!(results.scanned > 0);
     assert_eq!(results.skipped, 0);
 
-    // 命中位置要能落到排版后的页/行。
+    // 命中位置要能落到排版后的页/行，而且就是命中那一行：段落会折行，
+    // 落进段落的最后一行不算定位到了。
     let hit = &results.hits[0];
     engine
         .layout(hit.spine, viewport(), Style::default())
@@ -33,6 +34,22 @@ fn finds_across_the_whole_book() {
     assert!(location.is_some(), "搜索命中必须能定位: {hit:?}");
     let location = location.unwrap();
     assert!(location.page < engine.page_count());
+    let line_start = Location {
+        page: location.page,
+        line: location.line,
+        byte: 0,
+    };
+    let line_end = Location {
+        page: location.page,
+        line: location.line,
+        byte: u32::MAX,
+    };
+    let text = engine.selection(line_start, line_end).unwrap().text;
+    assert!(
+        text.contains(hit.text.as_str()),
+        "命中应落在这一行: 行是 {text:?}，命中是 {:?}",
+        hit.text
+    );
 }
 
 #[test]

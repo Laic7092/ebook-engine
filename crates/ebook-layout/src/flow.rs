@@ -2370,12 +2370,16 @@ impl<'a> FlowCtx<'a> {
             cx += hyphen_advance;
         }
 
+        // 行锚点的字节偏移是原文的**绝对**偏移（和 `LineBox.src` 同一套），
+        // 不是节点内的偏移：`StyledDoc.text` 是整章的，`Locator.offset` 也是
+        // 绝对偏移（`locator_at` / 搜索结果都用它）。用 `first.off` 会让
+        // `location_of` 把命中定位到段落的最后一行。
         let anchor = self
             .doc
             .node(first_piece.node)
             .src
             .as_ref()
-            .map(|a| a.with_offset(first.off));
+            .map(|a| a.with_offset(src_start));
         let glyphs = Span::new(
             glyph_start_all,
             self.flow.glyphs.len() as u32 - glyph_start_all,
