@@ -1556,7 +1556,7 @@ fn write_image_raw(path: &str, width: u32, height: u32, rgba: &[u8]) -> i32 {
 
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = format!("{path}.{}.{seq}.part", std::process::id());
+    let tmp = format!("{path}.{}.{seq}.part", temp_tag());
     let write = || -> std::io::Result<()> {
         let mut file = File::create(&tmp)?;
         file.write_all(RAW_MAGIC)?;
@@ -1574,6 +1574,20 @@ fn write_image_raw(path: &str, width: u32, height: u32, rgba: &[u8]) -> i32 {
     0
 }
 
+/// 临时文件名里的那个号。有进程号就用它；wasm 上没有进程
+/// （`std::process::id()` 在那里 panic：“no pids on this platform”），
+/// 而一个页面本来也只有一个进程，给 0 就够区分同一路径的并发写了。
+fn temp_tag() -> u32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        0
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::process::id()
+    }
+}
+
 /// 把位图写成 `EQP1` 文件：先写同目录下的唯一临时文件，再 `rename` 成目标路径。
 ///
 /// 宿主用「文件存在」判断瓦片可用，直接 `File::create(path)` 会让它读到只写了
@@ -1584,7 +1598,7 @@ fn write_raw(path: &str, bitmap: &ebook_reader::Bitmap) -> i32 {
 
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = format!("{path}.{}.{seq}.part", std::process::id());
+    let tmp = format!("{path}.{}.{seq}.part", temp_tag());
 
     let write = || -> std::io::Result<()> {
         let mut file = File::create(&tmp)?;

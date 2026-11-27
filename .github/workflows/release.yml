@@ -8,7 +8,8 @@ name: Release
 #   SHA256SUMS                     (all of them)
 #
 # targets: ios-arm64, ios-simulator-arm64, macos-arm64, macos-x64,
-#          linux-x64, android-arm64, android-armv7, android-x64, windows-x64
+#          linux-x64, android-arm64, android-armv7, android-x64, windows-x64,
+#          windows-x64-gnu
 #
 # The header that goes with these is `crates/ebook-abi/include/ebook_abi.h`
 # (checked against the Rust exports by `cargo test -p ebook-abi`).
@@ -91,6 +92,13 @@ jobs:
           - target: windows-x64
             triple: x86_64-pc-windows-msvc
             os: windows-latest
+          # 同一个 Windows 的 mingw 版：asuka 在 Windows 上的产物是 zig 或
+          # mingw-w64 链接的（`x86_64-windows-gnu`），两套 CRT 混不进去，
+          # MSVC 的 .lib 在那儿是一堆 duplicate symbol。
+          - target: windows-x64-gnu
+            triple: x86_64-pc-windows-gnu
+            os: ubuntu-latest
+            mingw: x86_64-w64-mingw32
     runs-on: ${{ matrix.os }}
     env:
       # 产物名只写一处：打包与上传 artifact 都用它。
@@ -116,6 +124,14 @@ jobs:
             env_name="CARGO_TARGET_$(echo "${{ matrix.triple }}" | tr 'a-z-' 'A-Z_')_LINKER"
             export "$env_name=$toolchain/${{ matrix.linker }}"
             printf '%s -> %s\n' "$env_name" "${!env_name}"
+          fi
+          if [ -n "${{ matrix.mingw }}" ]; then
+            # 静态库只要归档器；binutils 的 mingw 版比整套 gcc 小得多。
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq "binutils-mingw-w64-x86-64"
+            upper="$(echo "${{ matrix.triple }}" | tr 'a-z-' 'A-Z_')"
+            export "CARGO_TARGET_${upper}_AR=${{ matrix.mingw }}-ar"
+            export "AR_$(echo "${{ matrix.triple }}" | tr '-' '_')=${{ matrix.mingw }}-ar"
           fi
           cargo build -p ebook-abi --profile native --target "${{ matrix.triple }}"
 

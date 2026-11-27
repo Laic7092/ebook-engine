@@ -5,6 +5,23 @@
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-27
+
+wasm 上落盘位图不再 panic，Windows 多一个 mingw 版。C ABI 不变（`EB_ABI_VERSION`
+仍是 3）。
+
+### Fixed
+
+- **wasm 上写位图的临时名用了 `std::process::id()`**，那里没有进程号，于是
+  `eb_plain_page_raw` 在 wasm 上直接 panic（`no pids on this platform`），整个
+  页面随之 trap。临时名现在走 `temp_tag()`：wasm 给 0，别的平台仍是进程号。
+
+### Added
+
+- **`windows-x64-gnu`**：给 mingw-w64 / zig 链接的宿主用的静态库
+  （`x86_64-pc-windows-gnu`）。asuka 在 Windows 上的产物走这一套 CRT，
+  MSVC 的 `.lib` 混进去是一堆 duplicate symbol。
+
 ## [0.5.1] - 2026-11-27
 
 搜索命中的定位修复。C ABI 不变（`EB_ABI_VERSION` 仍是 3），宿主不需要重编。
