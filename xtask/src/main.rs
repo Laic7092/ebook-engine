@@ -109,6 +109,151 @@ fn newest_source_time() -> SystemTime {
     newest.unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
+/// `render <书> <页号> <输出.bmp> [lang]`：把某一页真的画出来，用眼睛判断。
+///
+/// 数字说得清的只有几何；「这一页看着松不松」只能看。BMP 是因为它不用编解码器：
+/// 24 位、自底向上、行按 4 字节对齐，三十行就能写完，WSL 和 Windows 都能打开。
+fn render_page() {
+    let args: Vec<String> = std::env::args().skip(2).collect();
+    if args.len() < 3 {
+        panic!("用法：render <书> <页号> <输出.bmp> [lang]");
+    }
+    let (path, page, out) = (&args[0], &args[1], &args[2]);
+    let lang = args.get(3).cloned();
+    let bytes = std::fs::read(path).expect("读不到文件");
+    let name = std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut doc = report_doc_for(&name, bytes);
+    doc.meta.lang = lang;
+    let font = std::fs::read(std::env::var("PREVIEW_FONT").unwrap_or_else(|_| PIXEL_FONT.into()))
+        .expect("字体");
+    let mut fonts = FontBook::new();
+    fonts.add(font).expect("字体");
+    let env = LayoutEnv {
+        measurer: &fonts,
+        resources: &NoImageSizes,
+    };
+    let constraint = PageConstraint::new(600.0, 800.0).with_margin(EdgesF::all(36.0));
+    let ir = Layout::new().layout(&doc, &env, &constraint);
+    // `worst` = 段间距被撑得最开的那一页：翻页时最容易看出「这页松」的地方。
+    let index: u32 = if page == "worst" {
+        let mut worst = (0u32, 0.0f32);
+        for (i, p) in ir.pages.iter().enumerate() {
+            let span = p.lines.as_range();
+            let mut sum = 0.0;
+            let mut n = 0;
+            for k in span.start + 1..span.end {
+                let gap = ir.runs.lines[k].rect.y
+                    - (ir.runs.lines[k - 1].rect.y + ir.runs.lines[k - 1].rect.h);
+                if gap > 0.5 {
+                    sum += gap;
+                    n += 1;
+                }
+            }
+            if n > 0 && sum / n as f32 > worst.1 {
+                worst = (i as u32, sum / n as f32);
+            }
+        }
+        eprintln!("段间距最开的是第 {} 页（平均 {:.1}px）", worst.0, worst.1);
+        worst.0
+    } else {
+        page.parse().expect("页号")
+    };
+    let page = ir.page(index).expect("页号超范围");
+    let mut surface = RgbaSurface::from_page(page);
+    surface.render_page(&ir, index, &mut fonts).expect("render");
+    let (w, h) = (surface.width() as usize, surface.height() as usize);
+    let mut bmp = Vec::with_capacity(54 + w * h * 3);
+    let row = w * 3 + (4 - (w * 3) % 4) % 4;
+    bmp.extend_from_slice(b"BM");
+    bmp.extend_from_slice(&((54 + row * h) as u32).to_le_bytes());
+    bmp.extend_from_slice(&[0, 0, 0, 0]);
+    bmp.extend_from_slice(&54u32.to_le_bytes());
+    bmp.extend_from_slice(&40u32.to_le_bytes());
+    bmp.extend_from_slice(&(w as i32).to_le_bytes());
+    bmp.extend_from_slice(&(h as i32).to_le_bytes());
+    bmp.extend_from_slice(&1u16.to_le_bytes());
+    bmp.extend_from_slice(&24u16.to_le_bytes());
+    bmp.extend_from_slice(&[0; 24]);
+    for y in (0..h).rev() {
+        let line = &surface.pixels()[y * w..(y + 1) * w];
+        for px in line {
+            bmp.extend_from_slice(&[px.b, px.g, px.r]);
+        }
+        bmp.extend(core::iter::repeat_n(0u8, row - w * 3));
+    }
+    std::fs::create_dir_all(std::path::Path::new(out).parent().unwrap()).ok();
+    std::fs::write(out, &bmp).expect("写文件");
+    eprintln!("{out}: {}×{}，第 {index} 页", w, h);
+}
+
+/// `orphans <书> [lang]`：把量表上剩下的孤字一条条列出来，并说明为什么没修掉。
+///
+/// 报表上只有一个数，但要修它得知道「上一行退到哪儿、退完还放不放得下」。这个
+/// 命令就是为了回答那个问题，省得靠猜。顺带汇报越出版心的行——那是另一种毛病
+/// （挤压/悬挂/压缩没兜住），一起看才不会互相掩盖。
+fn orphan_probe() {
+    let args: Vec<String> = std::env::args().skip(2).collect();
+    let path = args.first().expect("用法：orphans <书> [lang]");
+    let mut doc = {
+        let bytes = std::fs::read(path).expect("读不到文件");
+        let name = std::path::Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        report_doc_for(&name, bytes)
+    };
+    doc.meta.lang = args.get(1).cloned();
+    let ir = layout_doc(&doc);
+    let text = &doc.text;
+    let edge = ir.pages.first().map(|page| page.size.w).unwrap_or(0.0);
+    let report = ebook_layout::quality::analyze(&ir, &StubMeasurer);
+    let mut over = 0;
+    for (index, line) in ir.runs.lines.iter().enumerate() {
+        if line.rect.right() <= edge + 1.0 {
+            continue;
+        }
+        over += 1;
+        if over <= 3 {
+            let src = &text[line.src.start as usize..line.src.end() as usize];
+            eprintln!(
+                "越界 {:.1}px 第{index}行 {:?}",
+                line.rect.right() - edge,
+                src
+            );
+        }
+    }
+    for &index in &report.orphan_lines {
+        let index = index as usize;
+        let line = &ir.runs.lines[index];
+        let src = &text[line.src.start as usize..line.src.end() as usize];
+        let prev_tail: String = if index == 0 {
+            String::new()
+        } else {
+            let prev = &ir.runs.lines[index - 1];
+            text[prev.src.start as usize..prev.src.end() as usize]
+                .chars()
+                .rev()
+                .take(10)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect()
+        };
+        let prev_w = index
+            .checked_sub(1)
+            .map(|prev| ir.runs.lines[prev].rect.w)
+            .unwrap_or(0.0);
+        eprintln!(
+            "第{index}行 末行={src:?} 宽{:.1}  上一行宽{prev_w:.1} 结尾…{prev_tail}",
+            line.rect.w
+        );
+    }
+    eprintln!("共 {} 个孤字，{over} 行越界", report.orphans);
+}
+
 const BENCH_WARMUP: usize = 3;
 const BENCH_ITERS: usize = 31;
 const PIXEL_GOLDEN: &str = "tests/golden/pixels.txt";
@@ -121,6 +266,7 @@ fn main() -> ExitCode {
         .unwrap_or_else(|| String::from("all"));
     match cmd.as_str() {
         "golden" => golden(false),
+        "report" => quality_report(&std::env::args().skip(2).collect::<Vec<_>>()),
         "bless" => golden(true),
         "size" => size(),
         "parity" => parity(),
@@ -129,6 +275,14 @@ fn main() -> ExitCode {
         "contract" => contract(),
         "app" => app(),
         "bench" => bench(),
+        "orphans" => {
+            orphan_probe();
+            ExitCode::SUCCESS
+        }
+        "render" => {
+            render_page();
+            ExitCode::SUCCESS
+        }
         "all" => {
             let ok = [
                 golden(false),
@@ -148,25 +302,70 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: xtask [all|golden|bless|contract|app|pixel|pixel-bless|size|parity|bench]"
+                "usage: xtask [all|golden|bless|report|orphans|render|contract|app|pixel|pixel-bless|size|parity]"
             );
             ExitCode::from(2)
         }
     }
 }
 
-fn ir_for(name: &str, bytes: Vec<u8>) -> Vec<u8> {
+/// 打开一本 fixture 的第一章。`ir_for` 和 `report` 共用它，保证两边排的是
+/// 同一个文档。
+fn doc_for(name: &str, bytes: Vec<u8>) -> ebook_ir::StyledDoc {
     let mut src = ebook_format::MemorySource::new();
     src.insert(name, bytes);
     let opened = ebook_format::open(&src).expect("format");
-    let doc = opened.chapter(&src, 0).expect("chapter");
+    opened.chapter(&src, 0).expect("chapter")
+}
+
+/// 排版报告用的一章：取**文本最长**的那章。
+///
+/// 真书的第 0 章常常是封面、版权页或者只放一张图，排出来 0 行；而报告要的是
+/// 有代表性的正文。`ir_for`（golden）仍然固定第 0 章，不受影响。
+fn report_doc_for(name: &str, bytes: Vec<u8>) -> ebook_ir::StyledDoc {
+    // TXT 入口只认 UTF-8，别的编码会被替换成 U+FFFD 而不报错。报告里如果满屏
+    // 乱码，那些数字一个都不能信，所以这里至少喊一声。
+    if name.ends_with(".txt") || name.ends_with(".text") {
+        let text = String::from_utf8_lossy(&bytes);
+        let broken = text.chars().filter(|ch| *ch == '\u{fffd}').count();
+        let total = text.chars().count().max(1);
+        if broken * 50 > total {
+            eprintln!(
+                "警告：{name} 有 {:.0}% 的字符解不出来（TXT 入口只认 UTF-8）。\
+                 先用 iconv -f GB18030 -t UTF-8 转一份再看报告。",
+                100.0 * broken as f64 / total as f64
+            );
+        }
+    }
+    let mut src = ebook_format::MemorySource::new();
+    src.insert(name, bytes);
+    let opened = ebook_format::open(&src).expect("format");
+    let mut best: Option<ebook_ir::StyledDoc> = None;
+    for index in 0..opened.book.spine.len() {
+        let Ok(doc) = opened.chapter(&src, index) else {
+            continue;
+        };
+        if best
+            .as_ref()
+            .is_none_or(|best| best.text.len() < doc.text.len())
+        {
+            best = Some(doc);
+        }
+    }
+    best.expect("empty book")
+}
+
+fn layout_doc(doc: &ebook_ir::StyledDoc) -> LayoutResult {
     let env = LayoutEnv {
         measurer: &StubMeasurer,
         resources: &NoImageSizes,
     };
     let constraint = PageConstraint::new(600.0, 800.0).with_margin(EdgesF::all(24.0));
-    let ir = Layout::new().layout(&doc, &env, &constraint);
-    codec::to_bytes(&ir).expect("encode")
+    Layout::new().layout(doc, &env, &constraint)
+}
+
+fn ir_for(name: &str, bytes: Vec<u8>) -> Vec<u8> {
+    codec::to_bytes(&layout_doc(&doc_for(name, bytes))).expect("encode")
 }
 
 fn demo_ir() -> Vec<u8> {
@@ -279,6 +478,112 @@ fn pixel_digest() -> Vec<String> {
     }
     lines.push(format!("pages {}", ir.pages.len()));
     lines
+}
+
+/// 版面质量报告：同一本书换档案排两遍，把「尺子」的数字并排印出来。
+///
+/// 这是判断一次改动是不是「变好了」的地方——golden 只说明「变了」。
+/// 一把尺子需要一块有足够信号的样张：现有 fixture 都只有十几行，页底空洞、
+/// 行数抖动这些列全是 0。
+///
+/// 这里造一本 300 段的中文书稿（约 3.7 万字、67 页）：段落长度和标点位置都由
+/// 固定种子的 LCG 决定，所以每次运行逐字节相同；用千字文的字凑，避免和真书
+/// 内容撞车。
+fn synthetic_book() -> Vec<u8> {
+    const CHARS: &str = "天地玄黄宇宙洪荒日月盈昃辰宿列张寒来暑往秋收冬藏闰余成岁律吕调阳\
+                         云腾致雨露结为霜金生丽水玉出昆冈剑号巨阙珠称夜光果珍李柰菜重芥姜";
+    const PUNCT: &[char] = &['，', '。', '；', '：', '、', '？', '！'];
+    const LENGTHS: &[usize] = &[12, 25, 40, 60, 90, 140, 220, 320];
+    let mut seed = 0x2024_0101u64;
+    let mut next = move || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) as usize
+    };
+    let chars: Vec<char> = CHARS.chars().filter(|ch| !ch.is_whitespace()).collect();
+    let mut text = String::new();
+    for paragraph in 0..300 {
+        if paragraph > 0 {
+            text.push_str("\n\n");
+        }
+        let length = LENGTHS[next() % LENGTHS.len()];
+        for index in 0..length {
+            text.push(chars[next() % chars.len()]);
+            if index % (9 + next() % 11) == 0 && index + 1 < length {
+                text.push(PUNCT[next() % PUNCT.len()]);
+            }
+        }
+    }
+    text.into_bytes()
+}
+
+fn quality_report(paths: &[String]) -> ExitCode {
+    let default: Vec<String> = [
+        "fixtures/demo.txt",
+        "fixtures/demo.epub",
+        "fixtures/typography.epub",
+    ]
+    .iter()
+    .map(|path| path.to_string())
+    .collect();
+    let books: Vec<String> = if paths.is_empty() {
+        default
+    } else {
+        paths.to_vec()
+    };
+    let synthetic = paths.is_empty();
+    println!(
+        "{:<22} {:<9} {}  版心",
+        "书",
+        "档案",
+        ebook_layout::quality::HEADER
+    );
+    let mut books = books;
+    if synthetic {
+        books.push(String::from("<合成长书>"));
+    }
+    for path in &books {
+        let Ok(bytes) = std::fs::read(path).or_else(|_| {
+            if path == "<合成长书>" {
+                Ok(synthetic_book())
+            } else {
+                Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+            }
+        }) else {
+            println!("{path}: 读不到");
+            continue;
+        };
+        // 合成长书没有文件名，直接给它一个。
+        let name = if path.starts_with('<') {
+            String::from("zh-long.txt")
+        } else {
+            Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(path)
+                .to_string()
+        };
+        let mut doc = report_doc_for(&name, bytes);
+        let zh = doc
+            .meta
+            .lang
+            .as_deref()
+            .is_some_and(|lang| lang.to_ascii_lowercase().starts_with("zh"));
+        // 同一本书、同一版面，只换档案：这才是可比的两行。
+        let profiles: &[(&str, Option<&str>)] = if zh {
+            &[("generic", None), ("zh-hans", Some("zh"))]
+        } else {
+            &[("generic", None)]
+        };
+        for (label, lang) in profiles {
+            doc.meta.lang = lang.map(str::to_string);
+            let ir = layout_doc(&doc);
+            let measured = ebook_layout::quality::analyze(&ir, &StubMeasurer);
+            println!("{path:<22} {label:<9} {measured}  {}", measured.measure);
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 fn pixel(bless: bool) -> ExitCode {

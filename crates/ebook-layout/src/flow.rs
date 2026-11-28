@@ -40,8 +40,8 @@ pub(crate) struct LaidLine {
     pub(crate) node: NodeId,
     pub(crate) link: Option<String>,
     pub(crate) runs: Vec<LaidRun>,
-    /// 两端对齐可以在哪些字形之后加余量（全局字形下标）。
-    pub(crate) stretch: Vec<u32>,
+    /// 两端对齐可以在哪些字形之后加余量，以及那个位置属于哪一档。
+    pub(crate) stretch: Vec<StretchSlot>,
     pub(crate) unresolved: Vec<Op>,
     pub(crate) block: u32,
     pub(crate) order: u16,
@@ -51,6 +51,16 @@ pub(crate) struct LaidLine {
     pub(crate) force: bool,
     pub(crate) avoid_before: bool,
     pub(crate) avoid_after: bool,
+}
+
+/// 两端对齐的一个可加宽位置。
+///
+/// 分档是 CLREQ §6.2.2.4 的顺序：西文词距排第一档、但每处最多半个字宽；
+/// 其余（字间隙、中西间距）是兜底的均排档，不限量。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StretchSlot {
+    pub(crate) glyph: u32,
+    pub(crate) space: bool,
 }
 
 #[derive(Clone)]
@@ -93,7 +103,7 @@ impl Flow {
             bytes += size_of::<Item>();
             if let Item::Line(line) = item {
                 bytes += line.runs.len() * size_of::<LaidRun>()
-                    + line.stretch.len() * size_of::<u32>()
+                    + line.stretch.len() * size_of::<StretchSlot>()
                     + line.link.as_ref().map_or(0, String::len)
                     + line
                         .anchor
@@ -286,6 +296,8 @@ struct LineBoxEntry {
 struct FlowCtx<'a> {
     doc: &'a ebook_ir::StyledDoc,
     env: &'a LayoutEnv<'a>,
+    /// 版式档案：断行与标点几何只查这张表，不在这里写任何具体语言。
+    typo: &'static crate::typography::Typography,
     content_w: f32,
     flow: Flow,
     depth: u32,
@@ -306,12 +318,14 @@ pub(crate) fn flow(
     env: &LayoutEnv<'_>,
     c: &PageConstraint,
     max_lines: u32,
+    typo: &'static crate::typography::Typography,
     window: Option<crate::BlockWindow>,
 ) -> Flow {
     let content = c.content_size();
     let mut ctx = FlowCtx {
         doc,
         env,
+        typo,
         content_w: content.w.max(1.0),
         flow: Flow::default(),
         depth: 0,
@@ -462,6 +476,26 @@ fn fit_width(size: ebook_ir::SizeF, max_w: f32) -> ebook_ir::SizeF {
     } else {
         size
     }
+}
+
+/// 段落末行是不是「孤字」（CLREQ §7.1.2）：只有一个字，或一个字加标点。
+///
+/// 只看首簇（`head`），台面文字不算；第二个及之后的簇必须是标点。
+fn is_single_char_orphan(line: &[Ch], table: &crate::typography::PunctTable) -> bool {
+    let mut heads = 0usize;
+    for ch in line {
+        if !ch.head || ch.c == ' ' {
+            continue;
+        }
+        heads += 1;
+        if heads == 1 {
+            continue;
+        }
+        if heads > 2 || crate::punct::class_of(table, ch.c) == crate::punct::PunctClass::None {
+            return false;
+        }
+    }
+    heads == 1 || heads == 2
 }
 
 impl<'a> FlowCtx<'a> {
@@ -1283,13 +1317,14 @@ impl<'a> FlowCtx<'a> {
     /// 只压拥有空白半边的那一个（开标点压左、闭标点压右），所以一对最多少
     /// 半宽；这里不挪字形墨迹，`Glyph.dx` 只表达前进宽度。
     fn apply_trim(&self, chars: &[Ch], shaped: &mut Shaped, em: f32) {
+        let table = &self.typo.punct;
         let half = em * 0.5;
         for pair in chars.windows(2) {
             let (left, right) = (pair[0], pair[1]);
             if !left.head || !right.head || left.c == '\n' || right.c == '\n' {
                 continue;
             }
-            let Some(target) = crate::punct::trim_target(left.c, right.c) else {
+            let Some(target) = crate::punct::trim_target(table, left.c, right.c) else {
                 continue;
             };
             let trimmed = match target {
@@ -1305,7 +1340,10 @@ impl<'a> FlowCtx<'a> {
     /// 空隙挂在**左**字符的簇上，所以行首永远不会有空隙；行末的空隙在
     /// `emit_line` 里收回，保证"不插在行首行尾"。
     fn apply_autospacing(&self, chars: &[Ch], shaped: &mut Shaped, em: f32) {
-        let gap = em * 0.25;
+        let gap = em * self.typo.punct.autospace;
+        if gap <= 0.0 {
+            return;
+        }
         for pair in chars.windows(2) {
             let (left, right) = (pair[0], pair[1]);
             if !left.head || !right.head || left.c == '\n' || right.c == '\n' {
@@ -1456,7 +1494,13 @@ impl<'a> FlowCtx<'a> {
         let item_start = self.flow.items.len();
         let mut order: u16 = 0;
 
-        let base_style = container;
+        // 块上没有显式对齐方式时用档案给的初始值（中文正文 = 两端对齐）。
+        let mut base_style = container;
+        if let Some(align) = self.typo.initial_align {
+            if base_style.text.align == TextAlign::Start {
+                base_style.text.align = align;
+            }
+        }
         let em = base_style.font.size;
 
         // 中文排版政策是段落级的：块上没有就取任意一个内联片段上打开的开关
@@ -1525,6 +1569,45 @@ impl<'a> FlowCtx<'a> {
         let mut used = indent;
         let mut i = 0usize;
         let mut first = true;
+        // 上一条被产出的行（起始字符下标、是否段首行）：孤字处理要回头重排它。
+        let mut prev_line: Option<(usize, bool)> = None;
+        // 被拉回来重排的那一行，末尾强制均排。
+        let mut pulled: Option<usize> = None;
+
+        // 整段一起挑断点（Knuth–Plass）。`\n` 是硬换行，出现在段落里就退回
+        // 贪心：那种段落是「几段硬拆开的文字」，每段自己才是断行单位。
+        //
+        // 只排到倒数第二行，末行仍走下面那套（孤字修复、均排、`break-after`）。
+        if let Some((prev_start, prev_first, last)) = {
+            let optimal = self.typo.line.plan == crate::typography::LinePlan::Optimal
+                && !nowrap
+                && !chars.iter().any(|ch| ch.c == '\n');
+            if optimal {
+                self.emit_optimal(
+                    pieces,
+                    &chars,
+                    &mut shaped,
+                    &hyphen_points,
+                    &hyphen_reserve,
+                    rules.hanging_punctuation,
+                    x0,
+                    y,
+                    w,
+                    indent,
+                    base_style,
+                    block,
+                    &mut order,
+                )
+            } else {
+                None
+            }
+        } {
+            prev_line = Some((prev_start, prev_first));
+            line_start = last;
+            first = false;
+            // 循环条件立刻为假：下面的贪心循环整段跳过，一行都不产。
+            i = chars.len();
+        }
 
         while i < chars.len() {
             // `emit_line` 用尽行数预算后会置位；在这里收手，
@@ -1533,10 +1616,36 @@ impl<'a> FlowCtx<'a> {
                 break;
             }
             if chars[i].c == '\n' {
+                // 这一段就是段落末行（换行是段落的终点，不是断行的结果），
+                // 所以孤字要在产行**之前**修——否则等循环转到下一段，末行已经
+                // 定稿了。全书的段落几乎都以换行结尾，漏了这里等于漏了全书。
+                let mut start = line_start;
+                if let Some((prev_start, prev_first)) = prev_line {
+                    if let Some((at, pulled_index)) = self.fix_orphan(
+                        pieces,
+                        &chars,
+                        &shaped,
+                        x0,
+                        y,
+                        w,
+                        indent,
+                        nowrap,
+                        base_style,
+                        block,
+                        &mut order,
+                        (prev_start, prev_first),
+                        (line_start, i),
+                    ) {
+                        if let Some(index) = pulled_index {
+                            pulled = Some(index);
+                        }
+                        start = at;
+                    }
+                }
                 let pad = if first { indent } else { 0.0 };
                 self.emit_line(
                     pieces,
-                    &chars[line_start..i],
+                    &chars[start..i],
                     &shaped,
                     x0,
                     y,
@@ -1548,6 +1657,7 @@ impl<'a> FlowCtx<'a> {
                     &mut order,
                 );
                 first = false;
+                prev_line = None;
                 line_start = i + 1;
                 used = 0.0;
                 last_break = None;
@@ -1562,12 +1672,63 @@ impl<'a> FlowCtx<'a> {
             // 行末悬挂：闭标点最多探出右边界半宽，只影响"放没放下"，
             // 字形坐标不动，所以这里只放宽 fit 判定。
             let mut fits = used + adv <= w + 0.001;
-            if !fits && rules.hanging_punctuation && i > line_start && chars[i].head {
-                if let Some(hang) = crate::punct::hang_amount(chars[i].c, adv) {
-                    if used + adv - hang <= w + 0.001 {
+            // 行末标点挤压（CLREQ §6.3.2.3 / GB/T 15834—2011 5.1.10）：
+            // 全角标点落行末时压到半宽。比悬挂优先：压在版心里比探出版心更像纸书。
+            let mut squeeze = 0.0f32;
+            if !fits && !nowrap && i > line_start && chars[i].head {
+                if let Some(room) = crate::punct::line_end_fit(&self.typo.punct, chars[i].c, adv) {
+                    if used + room <= w + 0.001 {
                         fits = true;
+                        squeeze = adv - room;
                     }
                 }
+            }
+            if !fits && rules.hanging_punctuation && i > line_start && chars[i].head {
+                // 连续两个标点不悬挂：CLREQ §6.1.3 末句。挂一串会让行尾看起来
+                // 像漏字，比不挂更糟。
+                let consecutive = chars.get(i + 1).is_some_and(|next| {
+                    crate::punct::class_of(&self.typo.punct, next.c)
+                        != crate::punct::PunctClass::None
+                });
+                if !(consecutive && self.typo.punct.hang_single_only) {
+                    if let Some(hang) = crate::punct::hang_amount(&self.typo.punct, chars[i].c, adv)
+                    {
+                        if used + adv - hang <= w + 0.001 {
+                            fits = true;
+                        }
+                    }
+                }
+            }
+            if squeeze > 0.0 {
+                // 压完之后这个标点一定是本行最后一个字（再往后的字符更放不下），
+                // 所以直接在这里断行，不让压缩过的字留在行中间。
+                Self::trim_cluster(&mut shaped, chars[i].cluster, squeeze);
+                let pad = if first { indent } else { 0.0 };
+                prev_line = Some((line_start, first));
+                self.emit_line(
+                    pieces,
+                    &chars[line_start..i + 1],
+                    &shaped,
+                    x0,
+                    y,
+                    w,
+                    pad,
+                    false,
+                    base_style,
+                    block,
+                    &mut order,
+                );
+                first = false;
+                line_start = i + 1;
+                if !preserve_spaces {
+                    while line_start < chars.len() && chars[line_start].c == ' ' {
+                        line_start += 1;
+                    }
+                }
+                i = line_start;
+                used = 0.0;
+                last_break = None;
+                continue;
             }
             if !nowrap && !fits && i > line_start {
                 let normal = last_break.filter(|&b| b > line_start && b <= i);
@@ -1609,6 +1770,7 @@ impl<'a> FlowCtx<'a> {
                     (None, None) => (i, false),
                 };
                 let pad = if first { indent } else { 0.0 };
+                prev_line = Some((line_start, first));
                 self.emit_line(
                     pieces,
                     &chars[line_start..brk],
@@ -1646,6 +1808,32 @@ impl<'a> FlowCtx<'a> {
                 last_break = Some(i + 1);
             }
             i += 1;
+        }
+
+        // 孤字处理（CLREQ §7.1.2）：段落末行只剩一个字（或一个字加标点）。
+        // 段落以换行结尾的情形在循环里就地处理（见 `fix_orphan`），这里管的是
+        // 文件末尾没有换行的那一段。
+        if let Some((prev_start, prev_first)) = prev_line {
+            if let Some((at, pulled_index)) = self.fix_orphan(
+                pieces,
+                &chars,
+                &shaped,
+                x0,
+                y,
+                w,
+                indent,
+                nowrap,
+                base_style,
+                block,
+                &mut order,
+                (prev_start, prev_first),
+                (line_start, chars.len()),
+            ) {
+                if let Some(index) = pulled_index {
+                    pulled = Some(index);
+                }
+                line_start = at;
+            }
         }
 
         if line_start < chars.len() {
@@ -1701,36 +1889,482 @@ impl<'a> FlowCtx<'a> {
             };
             for index in lines {
                 if Some(index) != last {
-                    self.justify_line(index, x0, w);
+                    self.justify_line(index, x0, w, em);
                 }
+            }
+        } else if let Some(index) = pulled {
+            // 孤字拉回来之后，上一行必须均排（CLREQ §7.1.2）：少一个字却左对齐，
+            // 行尾会多出一个很显眼的缺口。这个局部均排不受整篇对齐方式影响。
+            if !self.flow.truncated {
+                self.justify_line(index, x0, w, em);
             }
         }
     }
 
-    fn justify_line(&mut self, index: usize, x0: f32, w: f32) {
-        let (runs, line_x, line_w, stretch) = match &self.flow.items[index] {
-            Item::Line(line) => (line.runs.clone(), line.x, line.w, line.stretch.clone()),
+    /// 行末标点能少吃掉多少宽度：先挤压、后悬挂。（行级 DP 判定"放不放得下"用。）
+    fn end_slack(&self, chars: &[Ch], shaped: &Shaped, b: usize, hanging: bool) -> (f32, f32) {
+        let Some(last) = b.checked_sub(1).map(|at| &chars[at]) else {
+            return (0.0, 0.0);
+        };
+        if !last.head {
+            return (0.0, 0.0);
+        }
+        let advance = shaped.clusters[last.cluster as usize].advance;
+        let squeeze = crate::punct::line_end_fit(&self.typo.punct, last.c, advance)
+            .map(|room| advance - room)
+            .unwrap_or(0.0);
+        let hang = if hanging {
+            crate::punct::hang_amount(&self.typo.punct, last.c, advance).unwrap_or(0.0)
+        } else {
+            0.0
+        };
+        (squeeze, hang)
+    }
+
+    /// 行级动态规划（Knuth–Plass）：一段的所有断点一起挑。
+    ///
+    /// 贪心只看眼前一行：放不下就断。可是一段文字好不好看是整体的——把某一行
+    /// 收紧一点，后面几行就都不留大缺口；末行只剩一个字，往回退一行就能救。
+    /// 代价函数把「这一行被拉开/收紧多少」「断字」「孤字」放在同一把尺子上，
+    /// 让整段最差的那一行尽量好，而不是每行各管各的。
+    ///
+    /// 只排到**倒数第二行**：最后一行交回调用方，那里的孤字修复、均排和
+    /// `break-after` 收尾都还是老路子。返回 `(上一行起点, 上一行是否段首,
+    /// 末行起点)`，`None` 表示交给贪心。
+    #[allow(clippy::too_many_arguments)]
+    fn emit_optimal(
+        &mut self,
+        pieces: &[Piece],
+        chars: &[Ch],
+        shaped: &mut Shaped,
+        hyphen_points: &[usize],
+        hyphen_reserve: &[f32],
+        hanging: bool,
+        x0: f32,
+        y: &mut f32,
+        w: f32,
+        indent: f32,
+        base_style: ComputedStyle,
+        block: u32,
+        order: &mut u16,
+    ) -> Option<(usize, bool, usize)> {
+        let em = base_style.font.size;
+        let n = chars.len();
+        let preserve_spaces = matches!(
+            base_style.text.white_space,
+            WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::BreakSpaces
+        ) || pieces.iter().any(|p| {
+            matches!(
+                p.style.text.white_space,
+                WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::BreakSpaces
+            )
+        });
+
+        // 前缀和：行宽 = `cum[b] - cum[a] + indent`（段首行加缩进）。
+        let mut cum = alloc::vec![0.0f32; n + 1];
+        let mut heads = alloc::vec![0u32; n + 1];
+        let mut spaces = alloc::vec![0u32; n + 1];
+        for (at, ch) in chars.iter().enumerate() {
+            let advance = if ch.head {
+                shaped.clusters[ch.cluster as usize].advance
+            } else {
+                0.0
+            };
+            cum[at + 1] = cum[at] + advance;
+            heads[at + 1] = heads[at] + u32::from(ch.head && ch.c != ' ');
+            spaces[at + 1] = spaces[at] + u32::from(ch.head && ch.c == ' ');
+        }
+
+        // 候选行首：每个合法断点（软换行后跳过行首空白）。
+        let mut starts: Vec<usize> = Vec::with_capacity(n / 8 + 2);
+        starts.push(0);
+        for b in 1..=n {
+            if b < n
+                && (chars[b - 1].cluster == chars[b].cluster
+                    || !crate::linebreak::can_break(
+                        chars[b - 1].c,
+                        chars[b].c,
+                        pieces[chars[b].piece as usize].style.text.word_break,
+                    ))
+            {
+                continue;
+            }
+            let mut next = b;
+            if !preserve_spaces {
+                while next < n && chars[next].c == ' ' {
+                    next += 1;
+                }
+            }
+            if next > *starts.last().unwrap() {
+                starts.push(next);
+            }
+        }
+
+        // 最短路：`best[j]` = 排到 `starts[j]` 为止的最小代价。
+        let m = starts.len();
+        let cost = self.typo.line.cost;
+        let mut best = alloc::vec![f32::INFINITY; m];
+        let mut from = alloc::vec![usize::MAX; m];
+        let mut broken = alloc::vec![false; m];
+        best[0] = 0.0;
+        for i in 0..m {
+            if !best[i].is_finite() {
+                continue;
+            }
+            let pad = if i == 0 { indent } else { 0.0 };
+            for j in i + 1..m {
+                let (a, b) = (starts[i], starts[j]);
+                // 窗口：自然宽度超过版心一半左右就不可能收得下，后面的只会更宽。
+                if cum[b] - cum[a] + pad > w * 1.5 + em {
+                    break;
+                }
+                let gap = f32::from((heads[b] - heads[a]).saturating_sub(1) as u16);
+                let space = f32::from((spaces[b] - spaces[a]) as u16);
+                let (squeeze, hang) = self.end_slack(chars, shaped, b, hanging);
+                let mut width = cum[b] - cum[a] + pad;
+                let hyphen = b < n && hyphen_points.binary_search(&b).is_ok();
+                let mut penalty = 0.0;
+                if hyphen {
+                    width += hyphen_reserve[b];
+                    penalty = cost.hyphen;
+                }
+                let last = j == m - 1;
+                if width > w + 0.001 {
+                    // 挤压优先于悬挂：压进版心比探出版心像纸书。
+                    if squeeze > 0.0 && width - squeeze <= w + 0.001 {
+                        width -= squeeze;
+                    } else if !last && hang > 0.0 && width - hang <= w + 0.001 {
+                        // 段末行不悬挂：它是散行，探出半格比留一格难看。
+                        width -= hang;
+                    } else {
+                        continue;
+                    }
+                }
+                let delta = w - width;
+                let stretch_cap = (gap + space) * em * 0.5;
+                let shrink_cap =
+                    gap * em * self.typo.line.gap_shrink + space * em * self.typo.line.space_shrink;
+                // 比例 = 这一行要把留下的空（或超出）摊到每处缝隙上的份额。
+                // 收不下就不可行；拉不开（只有一个字，没有缝）也不可行——
+                // 否则「一行只放一个字」会因为「没有缝可摊」而被算成零代价。
+                let ratio = if delta < 0.0 {
+                    if shrink_cap <= 0.0001 {
+                        continue;
+                    }
+                    -delta / shrink_cap
+                } else if last {
+                    // 段末行允许短，不摊也不罚（孤字另算）。
+                    0.0
+                } else if stretch_cap <= 0.0001 {
+                    continue;
+                } else {
+                    delta / stretch_cap
+                };
+                if ratio > 1.0 {
+                    continue;
+                }
+                let badness = 100.0 * ratio * ratio * ratio;
+                let mut total = (10.0 + badness) * (10.0 + badness) + penalty * penalty;
+                if last
+                    && self.typo.page.orphan_char
+                    && is_single_char_orphan(&chars[a..b], &self.typo.punct)
+                {
+                    total += cost.orphan;
+                }
+                let candidate = best[i] + total;
+                if candidate < best[j] {
+                    best[j] = candidate;
+                    from[j] = i;
+                    broken[j] = hyphen;
+                }
+            }
+        }
+        if !best[m - 1].is_finite() {
+            return None;
+        }
+        let mut plan: Vec<usize> = Vec::new();
+        let mut at = m - 1;
+        while at != 0 {
+            if from[at] == usize::MAX {
+                return None;
+            }
+            plan.push(at);
+            at = from[at];
+        }
+        plan.reverse();
+        if plan.len() < 2 {
+            return None;
+        }
+
+        // 段末行如果靠挤压才放得下，就把那个标点先压了——调用方产末行时用的
+        // 是同一份 `shaped`，压完它自然就放得下了。
+        if let Some(a) = from[m - 1].checked_sub(0).map(|_| starts[from[m - 1]]) {
+            let (squeeze, _) = self.end_slack(chars, shaped, n, hanging);
+            if cum[n] - cum[a] + squeeze > w + 0.001 && squeeze > 0.0 {
+                if let Some(last) = chars[n - 1].head.then_some(&chars[n - 1]) {
+                    Self::trim_cluster(shaped, last.cluster, squeeze);
+                }
+            }
+        }
+
+        // 按计划产行；最后一行留给调用方。
+        let mut a_at = 0usize;
+        let mut prev = (0usize, true);
+        for (k, &b_at) in plan.iter().enumerate() {
+            let (a, b) = (starts[a_at], starts[b_at]);
+            if k + 1 == plan.len() {
+                return Some((prev.0, prev.1, a));
+            }
+            let pad = if a_at == 0 { indent } else { 0.0 };
+            let hyphen = broken[b_at];
+            let mut width = cum[b] - cum[a] + pad;
+            if hyphen {
+                width += hyphen_reserve[b];
+            }
+            if width > w + 0.001 {
+                let (squeeze, _) = self.end_slack(chars, shaped, b, hanging);
+                if squeeze > 0.0 && width - squeeze <= w + 0.001 {
+                    Self::trim_cluster(shaped, chars[b - 1].cluster, squeeze);
+                }
+            }
+            self.emit_line(
+                pieces,
+                &chars[a..b],
+                shaped,
+                x0,
+                y,
+                w,
+                pad,
+                hyphen,
+                base_style,
+                block,
+                order,
+            );
+            // 计划里允许「收一点才放得下」的行（CLREQ §6.2.2.3 的压缩侧）：
+            // 断行时算过容量，这里真把它收进去。收不动就留着（极少）。
+            let index = self.flow.items.len() - 1;
+            self.shrink_line(index, x0, w, em);
+            prev = (a, a_at == 0);
+            a_at = b_at;
+        }
+        None
+    }
+
+    /// 段落末行只剩一个字时的修复（CLREQ §7.1.2）。
+    ///
+    /// 两条路，先便宜后贵：
+    ///
+    /// 1. **往下挪**：从上一行取「一个字 + 紧跟的标点」下来。只挪一个字不够——
+    ///    上一行末尾是标点时（中文里一半的段落都这样），挪下来的那个字是标点，
+    ///    末行就以标点开头了。所以挪的是从某个合法断点开始的一整块。
+    /// 2. **压行**：往回挪不动（上一行退一步末行就超宽）时，把整个末行收进
+    ///    上一行——CLREQ §6.2.2.3 允许字缝收紧，收得下就收。
+    ///
+    /// 返回 `(新的末行起点, 该重新均排的行)`；`None` 表示救不了，什么都没改。
+    #[allow(clippy::too_many_arguments)]
+    fn fix_orphan(
+        &mut self,
+        pieces: &[Piece],
+        chars: &[Ch],
+        shaped: &Shaped,
+        x0: f32,
+        y: &mut f32,
+        w: f32,
+        indent: f32,
+        nowrap: bool,
+        base_style: ComputedStyle,
+        block: u32,
+        order: &mut u16,
+        prev: (usize, bool),
+        tail: (usize, usize),
+    ) -> Option<(usize, Option<usize>)> {
+        let (prev_start, prev_first) = prev;
+        let (tail_start, tail_end) = tail;
+        if !self.typo.page.orphan_char
+            || nowrap
+            || self.flow.truncated
+            || tail_start < prev_start + 2
+            || !is_single_char_orphan(&chars[tail_start..tail_end], &self.typo.punct)
+        {
+            return None;
+        }
+        let width = |from: usize| -> f32 {
+            chars[from..tail_end]
+                .iter()
+                .filter(|ch| ch.head)
+                .map(|ch| shaped.clusters[ch.cluster as usize].advance)
+                .sum()
+        };
+        let last_bounds = match self.flow.items.last() {
+            // 回滚到这一行字形的**起点**：它现在是字形数组的最后一段（行末连字符
+            // 还会再往后一两个），所以 `end` 是数组末尾，截到那里等于什么都没删。
+            Some(Item::Line(line)) => Some((line.glyphs.start, line.y, line.w)),
+            _ => None,
+        };
+        let (glyph_start, back_y, prev_w) = last_bounds?;
+
+        // 1. 往下挪：从最靠近末行的断点往回找，第一个「挪完末行不再孤」的。
+        for at in (prev_start + 1..tail_start).rev() {
+            if !chars[at].head
+                || !crate::linebreak::can_break(
+                    chars[at - 1].c,
+                    chars[at].c,
+                    pieces[chars[at].piece as usize].style.text.word_break,
+                )
+                || width(at) > w + 0.001
+                || is_single_char_orphan(&chars[at..tail_end], &self.typo.punct)
+            {
+                continue;
+            }
+            // 回滚上一行（行、字形、计数、顺序号、y）再按新的断点重排。
+            self.flow.items.pop();
+            self.flow.glyphs.truncate(glyph_start as usize);
+            self.flow.lines = self.flow.lines.saturating_sub(1);
+            *order = order.saturating_sub(1);
+            *y = back_y;
+            let pad = if prev_first { indent } else { 0.0 };
+            self.emit_line(
+                pieces,
+                &chars[prev_start..at],
+                shaped,
+                x0,
+                y,
+                w,
+                pad,
+                false,
+                base_style,
+                block,
+                order,
+            );
+            return Some((at, Some(self.flow.items.len() - 1)));
+        }
+
+        // 2. 压行：整个末行收进上一行。先算够不够，够才动。
+        let merged = prev_w + width(tail_start);
+        let need = merged - w;
+        let heads = chars[prev_start..tail_end]
+            .iter()
+            .filter(|ch| ch.head)
+            .count();
+        let capacity =
+            (heads.saturating_sub(1)) as f32 * self.typo.line.gap_shrink * base_style.font.size;
+        if need <= 0.0 || need > capacity {
+            return None;
+        }
+        self.flow.items.pop();
+        self.flow.glyphs.truncate(glyph_start as usize);
+        self.flow.lines = self.flow.lines.saturating_sub(1);
+        *order = order.saturating_sub(1);
+        let pad = if prev_first { indent } else { 0.0 };
+        self.emit_line(
+            pieces,
+            &chars[prev_start..tail_end],
+            shaped,
+            x0,
+            y,
+            w,
+            pad,
+            false,
+            base_style,
+            block,
+            order,
+        );
+        // emit_line 会把 y 推到下一行，可这里行数没变（一行换一行），推回去。
+        *y = back_y;
+        let merged_index = self.flow.items.len() - 1;
+        self.shrink_line(merged_index, x0, w, base_style.font.size);
+        Some((tail_end, None))
+    }
+
+    /// 两端对齐：按 CLREQ §6.2.2.4 的档位分配余量。
+    ///
+    /// 第一档是西文词距，但每处最多拉半个字宽（再大就成了「天坑」）；
+    /// 剩下的余量给字间隙均摊（均排）。只有西文、且词距已经封顶时，才把
+    /// 余量全部压到最后一处词距上——宁可拉开，也不在行尾留缺口。
+    fn justify_line(&mut self, index: usize, x0: f32, w: f32, em: f32) {
+        let (line_x, line_w, slots) = match &self.flow.items[index] {
+            Item::Line(line) => (line.x, line.w, line.stretch.clone()),
             _ => return,
         };
         let target = (w - (line_x - x0)).max(0.0);
         let extra = target - line_w;
-        if extra <= 0.001 || stretch.is_empty() {
+        if extra <= 0.001 || slots.is_empty() {
             return;
         }
-        let n = stretch.len() as f32;
-        let each = extra / n;
+        let mut deltas: Vec<f32> = alloc::vec![0.0; slots.len()];
+        let spaces = slots.iter().filter(|slot| slot.space).count();
+        let gaps = slots.len() - spaces;
+        if self.typo.line.justify == crate::typography::Justify::Flat || gaps == 0 {
+            // 一档：把余量平摊在词距上（没有词距就摊字缝）。这是引入 profile
+            // 之前的行为，`generic` 要逐字节保持它。
+            let each = extra / if spaces > 0 { spaces } else { gaps } as f32;
+            let mut seen = 0usize;
+            for (delta, slot) in deltas.iter_mut().zip(&slots) {
+                if spaces > 0 && !slot.space {
+                    continue;
+                }
+                seen += 1;
+                // 最后一格吃掉浮点余数，保证行宽精确等于版心。
+                let last = seen == if spaces > 0 { spaces } else { gaps };
+                *delta = if last {
+                    extra - each * (seen - 1) as f32
+                } else {
+                    each
+                };
+            }
+            self.shift_line(index, &deltas, target);
+            return;
+        }
+
+        // 分档（CLREQ §6.2.2.4）：词距先吃，每处最多半个字宽；剩下的给字缝。
+        let mut left = extra;
+        let each = (left / spaces as f32).min(em * 0.5);
+        for (delta, slot) in deltas.iter_mut().zip(&slots) {
+            if slot.space {
+                *delta = each;
+                left -= each;
+            }
+        }
+        if left > 0.0005 && gaps > 0 {
+            let each = left / gaps as f32;
+            let mut seen = 0usize;
+            for (delta, slot) in deltas.iter_mut().zip(&slots) {
+                if slot.space {
+                    continue;
+                }
+                seen += 1;
+                *delta = if seen == gaps {
+                    left - each * (gaps - 1) as f32
+                } else {
+                    each
+                };
+            }
+            left = 0.0;
+        }
+        if left > 0.0005 {
+            if let Some(last) = slots.iter().rposition(|slot| slot.space) {
+                deltas[last] += left;
+            }
+        }
+        self.shift_line(index, &deltas, target);
+    }
+
+    /// 把每处伸缩量写到字形上：`deltas[i]` 对应 `line.stretch[i]`。
+    ///
+    /// 一个字形的位移会带动它后面所有字形（行是连续的），所以要累加。
+    fn shift_line(&mut self, index: usize, deltas: &[f32], width: f32) {
+        let (runs, slots) = match &self.flow.items[index] {
+            Item::Line(line) => (line.runs.clone(), line.stretch.clone()),
+            _ => return,
+        };
         let mut origins = Vec::with_capacity(runs.len());
         let mut shift = 0.0f32;
         let mut next = 0usize;
         for run in &runs {
             origins.push(run.origin.x + shift);
             for glyph in run.glyphs.as_range() {
-                if next < stretch.len() && stretch[next] as usize == glyph {
-                    let delta = if next + 1 == stretch.len() {
-                        extra - each * (n - 1.0)
-                    } else {
-                        each
-                    };
+                if next < slots.len() && slots[next].glyph == glyph as u32 {
+                    let delta = deltas[next];
                     self.flow.glyphs[glyph].dx += delta;
                     shift += delta;
                     next += 1;
@@ -1741,8 +2375,49 @@ impl<'a> FlowCtx<'a> {
             for (run, origin) in line.runs.iter_mut().zip(origins) {
                 run.origin.x = origin;
             }
-            line.w = target;
+            line.w = width;
         }
+    }
+
+    /// 压行：把这一行收紧到版心宽（CLREQ §6.2.2.3 的压缩侧）。
+    ///
+    /// 收得下返回 `true`，收不下返回 `false` 且**什么都不改**——调用方据此决定
+    /// 要不要走这条方案。容量按档案给的字缝/词距上限算，所以能收多少是数据
+    /// 说了算，不是这里拍的。
+    fn shrink_line(&mut self, index: usize, x0: f32, w: f32, em: f32) -> bool {
+        let (line_x, line_w, slots) = match &self.flow.items[index] {
+            Item::Line(line) => (line.x, line.w, line.stretch.clone()),
+            _ => return false,
+        };
+        let target = (w - (line_x - x0)).max(0.0);
+        let over = line_w - target;
+        if over <= 0.001 {
+            return true;
+        }
+        if slots.is_empty() {
+            return false;
+        }
+        let rules = self.typo.line;
+        let cap: Vec<f32> = slots
+            .iter()
+            .map(|slot| {
+                let per = if slot.space {
+                    rules.space_shrink
+                } else {
+                    rules.gap_shrink
+                };
+                per * em
+            })
+            .collect();
+        let total: f32 = cap.iter().sum();
+        if total + 0.0001 < over {
+            return false;
+        }
+        // 每格按自己的容量等比例收：容量大的多收，收完之后各行看起来一样紧。
+        let k = over / total;
+        let deltas: Vec<f32> = cap.iter().map(|cap| -cap * k).collect();
+        self.shift_line(index, &deltas, target);
+        true
     }
 
     fn metrics(&self, style: &ComputedStyle) -> (f32, f32, f32, f32) {
@@ -2400,20 +3075,19 @@ impl<'a> FlowCtx<'a> {
             });
         }
 
-        // 两端对齐的余量：有空格就分给空格，没有空格就把字间隙拉开（末字形除外）。
-        let has_space = ends.iter().any(|(_, space)| *space);
-        let stretch: Vec<u32> = if has_space {
-            ends.iter()
-                .filter(|(_, space)| *space)
-                .map(|(glyph, _)| *glyph)
-                .collect()
-        } else {
-            let last = ends.last().map(|(glyph, _)| *glyph);
-            ends.iter()
-                .map(|(glyph, _)| *glyph)
-                .filter(|glyph| Some(*glyph) != last)
-                .collect()
-        };
+        // 可伸缩的位置：全部词距 + 全部字缝（末字形之后没有缝，不算）。
+        //
+        // 一张表服务两件事：均排按 [`Justify`] 往里摊余量，压行按档案给的
+        // 收紧上限往回缩。分成两张表就等于把同一份几何记两遍。
+        let last = ends.last().map(|(glyph, _)| *glyph);
+        let stretch: Vec<StretchSlot> = ends
+            .iter()
+            .filter(|(glyph, space)| *space || Some(*glyph) != last)
+            .map(|(glyph, space)| StretchSlot {
+                glyph: *glyph,
+                space: *space,
+            })
+            .collect();
 
         self.flow.items.push(Item::Line(LaidLine {
             y: top,

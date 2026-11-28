@@ -21,9 +21,14 @@ mod linebreak_table;
 mod measure;
 mod paginate;
 mod punct;
+// 测试里总是编进来（`cargo test -p ebook-layout` 不开 feature 也能测到）；
+// wasm 宿主不需要，所以发布构建仍然由 feature 挡住。
+#[cfg(any(test, feature = "quality"))]
+pub mod quality;
 mod resolve;
 pub mod select;
 mod shape;
+mod typography;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -257,11 +262,13 @@ impl Layout {
         }
 
         let content = c.content_size();
+        // 版式档案由 `meta.lang` 选：机制不认识具体语言，只查这张表。
+        let typo = typography::of_lang(doc.meta.lang.as_deref());
         // 键只含「断行真正依赖的东西」：调用方版本号、可用宽度、行数预算。
         // 页高与 `Mode` 刻意不进键——它们只影响分页。
         // 窗口结果是独立坐标（已归一化到 0 附近），不能写进整章 FlowCache。
         let mut built = if let Some(window) = opts.window {
-            flow::flow(doc, env, c, limits.max_lines, Some(window))
+            flow::flow(doc, env, c, limits.max_lines, typo, Some(window))
         } else {
             match cache {
                 Some((cache, rev)) => {
@@ -269,13 +276,13 @@ impl Layout {
                     match cache.get(key) {
                         Some(flow) => flow,
                         None => {
-                            let flow = flow::flow(doc, env, c, limits.max_lines, None);
+                            let flow = flow::flow(doc, env, c, limits.max_lines, typo, None);
                             cache.put(key, &flow);
                             flow
                         }
                     }
                 }
-                None => flow::flow(doc, env, c, limits.max_lines, None),
+                None => flow::flow(doc, env, c, limits.max_lines, typo, None),
             }
         };
         let flow_truncated = built.truncated;
@@ -294,8 +301,25 @@ impl Layout {
             let (y, h) = paginate::op_bounds(op);
             flow_height = flow_height.max(y + h);
         }
+        // 版心高度：分页模式下若档案要求纵横对齐，就取正文行高的整数倍，
+        // 余数沉到页脚。`Page.size.h` 仍然是宿主给的版心高度，只是最后那点
+        // 不足一行的空间不再放行——页盒、位图、坐标都不变。
+        let line_h = paginate::body_line(&units).unwrap_or(content.h);
+        let fit_h = match opts.mode {
+            Mode::Paged if typo.page.align_lines => {
+                paginate::grid_height(&units, content.h).unwrap_or(content.h)
+            }
+            _ => content.h,
+        };
         let plan = match opts.mode {
-            Mode::Paged => paginate::plan(&units, content.h, limits.max_pages as usize),
+            Mode::Paged => paginate::plan(
+                &units,
+                fit_h,
+                content.h,
+                line_h,
+                limits.max_pages as usize,
+                &typo.page,
+            ),
             Mode::Scroll => paginate::plan_scroll(),
         };
 
@@ -336,6 +360,23 @@ impl Layout {
             split_decoration(op, &plan.starts, content.h, opts.mode, &mut decorations);
         }
 
+        // 页底齐平：每页的拉伸比例，组装时按「空隙 × 比例」把后面的内容往下推。
+        // 档案没开时是空表，走原来的路径，一个字节都不变。
+        let mut flush = if opts.mode == Mode::Paged && typo.page.flush_bottom {
+            paginate::flush_scale(&units, &plan.starts, fit_h, line_h)
+        } else {
+            Vec::new()
+        };
+        // 有背景/边框的页不拉伸：装饰 op 是按块算的，跟着字一起挪就得知道
+        // 它挂在哪一段上；不挪则边框和里面的字错位。宁可这一页不齐。
+        for (page, list) in decorations.iter().enumerate() {
+            if !list.is_empty() && page < flush.len() {
+                flush[page] = 0.0;
+            }
+        }
+        let mut shift = 0.0f32;
+        let mut shift_page = u32::MAX;
+
         let mut open_page: Option<u32> = None;
         for (index, item) in built.items.drain(..).enumerate() {
             if plan.cut.is_some_and(|cut| index >= cut) {
@@ -356,16 +397,38 @@ impl Layout {
                 break;
             }
             let page = paginate::page_of(&plan.starts, index);
+            if page != shift_page {
+                shift_page = page;
+                shift = 0.0;
+            } else if let Some(scale) = flush.get(page as usize).copied() {
+                if scale > 0.0 {
+                    let gap = units[index].y - (units[index - 1].y + units[index - 1].h);
+                    if gap > 0.5 {
+                        shift += gap * scale;
+                    }
+                }
+            }
             if open_page != Some(page) {
                 let top = plan.starts[page as usize].y;
-                builder.sync(page, top, ops.len() as u32, lines.len() as u32);
+                let extra = plan.starts[page as usize].extra;
+                builder.sync(page, top, extra, ops.len() as u32, lines.len() as u32);
                 if let Some(list) = decorations.get_mut(page as usize) {
                     ops.append(list);
                 }
                 open_page = Some(page);
             }
             match item {
-                flow::Item::Line(line) => {
+                flow::Item::Line(mut line) => {
+                    if shift != 0.0 {
+                        line.y += shift;
+                        line.baseline += shift;
+                        for run in &mut line.runs {
+                            run.origin.y += shift;
+                        }
+                        for op in &mut line.unresolved {
+                            shift_op(op, shift);
+                        }
+                    }
                     builder.set_anchor(line.anchor.as_ref());
                     // `item` 已经是 owned（`drain` 出来的），run 文本直接 move，
                     // 不再 `clone` 一份；大章节上少一半字符串分配。
@@ -407,6 +470,7 @@ impl Layout {
                     });
                 }
                 flow::Item::Op(Op::Image { id, rect, fit }) => {
+                    let rect = RectF::new(rect.x, rect.y + shift, rect.w, rect.h);
                     // 图片像素预算：按资源给出的固有尺寸累加，超限的图降级成
                     // `SizeFromContent`，交给宿主决定怎么办，而不是让排版去猜。
                     let size = env
@@ -435,7 +499,10 @@ impl Layout {
                         });
                     }
                 }
-                flow::Item::Op(op) => {
+                flow::Item::Op(mut op) => {
+                    if shift != 0.0 {
+                        shift_op(&mut op, shift);
+                    }
                     if let Op::Unresolved(unresolved) = &op {
                         issues.push(issue_of(unresolved));
                     }
@@ -631,9 +698,9 @@ fn split_decoration(
         .unwrap_or(0);
     while page < starts.len() {
         let top = starts[page].y;
-        // 分页为了孤行/寡行会把“下一页起点”拉回到上一页页高以内；
-        // 此时两页在流坐标上有重叠区，后一页不画上一页已经画过的部分。
-        let page_bottom = top + page_h;
+        // 突出版心的页（`PageStart::extra`）比版心高一点，切段要跟着长高，
+        // 否则页底那一条边框会被切掉。
+        let page_bottom = top + page_h + starts[page].extra;
         let bottom = starts
             .get(page + 1)
             .map_or(page_bottom, |next| next.y.min(page_bottom).max(top));
@@ -759,4 +826,22 @@ fn units_of_parallel(items: &[flow::Item], _workers: usize) -> Vec<paginate::Uni
 
 pub fn layout(doc: &StyledDoc, env: &LayoutEnv<'_>, c: &PageConstraint) -> LayoutResult {
     Layout::new().layout(doc, env, c)
+}
+
+/// 把一个 op 整体下移 `dy`（页底齐平把行往下推时，图和它的热区要一起走）。
+fn shift_op(op: &mut Op, dy: f32) {
+    match op {
+        Op::GlyphRun(run) => run.origin.y += dy,
+        Op::Rect { rect, .. } => rect.y += dy,
+        Op::Border(border) => border.rect.y += dy,
+        Op::Image { rect, .. } => rect.y += dy,
+        Op::Unresolved(unresolved) => unresolved.rect.y += dy,
+        Op::Clip { rect, ops } => {
+            rect.y += dy;
+            for inner in ops.iter_mut() {
+                shift_op(inner, dy);
+            }
+        }
+        Op::Link { rect, .. } => rect.y += dy,
+    }
 }

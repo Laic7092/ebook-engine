@@ -12,9 +12,16 @@ pub struct TextRules {
 }
 ```
 
-字段是 `#[serde(default)]`，零值 = 全关。实现位于
-`crates/ebook-layout/src/punct.rs`，逐个开关的测试在
-`crates/ebook-layout/tests/punct.rs`。
+字段是 `#[serde(default)]`，零值 = 全关。实现分层如下：
+
+- **机制** 在 `crates/ebook-layout/src/punct.rs`：分类、成对挤压、悬挂、自动间距。
+  这个文件里**没有任何具体文字**，每个函数都要传入一张 `&PunctTable`。
+- **数据** 在 `crates/ebook-layout/src/typography.rs`：字符类表、可压/可悬集合、
+  比例、以及分页的孤寡修复优先级。按 `meta.lang` / `lang` 属性选档案。
+- 逐个开关的测试在 `crates/ebook-layout/tests/punct.rs`。
+
+新增一门语言只加一个 `static`，不动机制层；详见
+[design.md §11.5](design.md#115-版式档案机制不认识语言)。
 
 ---
 
@@ -22,9 +29,9 @@ pub struct TextRules {
 
 | 开关 | 对应规范 | 本引擎实际实现的可判定部分 |
 |---|---|---|
-| `spacing_trim` | CSS Text Module Level 4 §8 `text-spacing-trim`；CLREQ §3.2「标点符号的宽度」；JLREQ §3.1「句読点・括弧類」 | 相邻标点对只压**拥有空白半边**的那一个；只压 `~/layx` 实测会被浏览器压掉的引号类（`trimmableOpening` / `trimmableClosing`） |
-| `hanging_punctuation` | CSS Text L4 §9 `hanging-punctuation: allow-end`；JLREQ §3.2「行末の句読点」 | 行末闭标点最多探出半宽；只放宽 fit 判定，不移动字形坐标 |
-| `autospacing` | CLREQ §3.3「中西文混排」建议的 1/4 em 空隙（**不是** CSS 初始值） | 表意字符 ↔ 拉丁字母/数字之间加 1/4 em；挂在左簇上，行末收回，不插行首行尾 |
+| `spacing_trim` | CSS Text Module Level 4 §8 `text-spacing-trim`；CLREQ §6.3.2「标点符号的宽度调整」；JLREQ §3.1「句読点・括弧類」 | 相邻标点对只压**拥有空白半边**的那一个；只压实测会被浏览器压掉的引号类（`trimmableOpening` / `trimmableClosing`） |
+| `hanging_punctuation` | CSS Text L4 §9 `hanging-punctuation: allow-end`；CLREQ §6.1.3「行尾点号悬挂」；JLREQ §3.2「行末の句読点」 | 行末标点最多探出半宽；只放宽 fit 判定，不移动字形坐标。**悬挂集合按档案分**：通用档案含闭括号/闭引号，简体中文档案只含点号类，且连续标点不悬挂 |
+| `autospacing` | CLREQ §6.3.3「横排的中西文混排配置」建议的 1/4 em 空隙（**不是** CSS 初始值） | 表意字符 ↔ 拉丁字母/数字之间加 1/4 em；挂在左簇上，行末收回，不插行首行尾 |
 
 规则表照抄规范里**成对可判定**的部分；需要上下文（前后若干字、段落语言、
 字体是否有半宽字形）的规则明确不装，见第 4 节。
@@ -97,3 +104,10 @@ pub struct TextRules {
   仍逐字节相同。
 - `TextRules` 不进 IR：改政策只改变 `LayoutResult` 的几何，不改变字节布局，
   major/minor 都不需要动。
+- **分类表要包含悬挂表里的所有点号**。孤字判定查的是分类表（`class_of`），悬挂查的
+  是悬挂表（`hang`）——两张表各写各的，`！`/`？` 一度只在后者里，于是「……呢！」
+  这种末行永远不算孤字。现在 `punct.rs` 的测试直接钉住这一条。
+- **行末标点的挤压优先于悬挂**：压进版心比探出版心更像纸书。只有挤压也救不了才挂。
+- 孤字修复有两条路（`fix_orphan`）：往下挪**一整块**（从最近的合法断点开始，常常是
+  「字 + 标点」两个字），或者把整个末行压进上一行（`shrink_line`，靠字缝的收紧
+  容量）。只挪一个字在标点结尾的段落上会被行首避头尾挡住，结果是什么都不做。

@@ -6,7 +6,7 @@ publish.workspace = true
 
 [dependencies]
 ebook-ir.workspace = true
-ebook-layout.workspace = true
+ebook-layout = { workspace = true, features = ["quality"] }
 ebook-format.workspace = true
 ebook-font = { workspace = true, features = ["hyphen-en"] }
 ebook-raster.workspace = true

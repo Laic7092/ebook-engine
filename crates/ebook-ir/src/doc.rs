@@ -324,15 +324,17 @@ impl FontSpec {
 
 /// 中文/日文排版政策。零值 = 规范默认：可选政策一律关闭。
 ///
-/// 出处见 `crates/ebook-layout/src/punct.rs`：CSS Text Module Level 4
-/// (`text-spacing-trim` / `hanging-punctuation`)、CLREQ §3.2/§3.3、JLREQ §3.1/§3.2。
+/// 开关只表达“要不要”，具体字符集合与比例在排版层的版式档案里
+/// （`crates/ebook-layout/src/typography.rs`，按 `meta.lang` 选）。
+/// 出处：CSS Text Module Level 4 (`text-spacing-trim` / `hanging-punctuation`)、
+/// CLREQ §6.3.2/§6.3.3/§6.1.3、JLREQ §3.1/§3.2。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextRules {
     /// 成对标点各收半宽（`text-spacing-trim: normal` 的可判定部分）。
     pub spacing_trim: bool,
     /// 行末标点悬挂（`hanging-punctuation: allow-end`）。
     pub hanging_punctuation: bool,
-    /// 中西文/中数字之间加 1/4 em 空隙（CLREQ §3.3 建议项，不是 CSS 初始值）。
+    /// 中西文/中数字之间加 1/4 em 空隙（CLREQ §6.3.3 建议项，不是 CSS 初始值）。
     pub autospacing: bool,
 }
 

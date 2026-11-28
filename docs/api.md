@@ -332,8 +332,15 @@ fn image_size(&self, id: ImageId) -> Option<SizeF>;
 分页在排版层结算，因为断点反过来影响孤行寡行与段落切分：
 
 1. 先找当前页最满的断点。
-2. 按 `break-before` / `break-after` / `orphans` / `widows` 往回退。
-3. 退不动就退回最满断点；约束冲突时宁可难看，也不产生空页。
+2. 按 `break-before` / `break-after` 往回退。
+3. 页尾出现孤行/寡行时，按**版式档案**给的优先级依次尝试修复手段
+   （`PageRules::fixes`）。零语言假设的 `generic` 是
+   `PullUp → MoveWhole`；简体中文（`meta.lang` 以 `zh` 开头）按 CLREQ §7.1.2
+   是 `PushOut → PullUp → MoveWhole`，即先把孤行挪到上一页、让页底线越出版心。
+4. 所有手段都不可行时保持最满断点；约束冲突时宁可难看，也不产生空页。
+
+“突出版心”的页会把自己的 `Page.size.h` 加高被推出的行数（≤ `push_lines` 行），
+所以“每一行都在页盒内”这条不变量仍然成立。
 
 输出保证见 [design.md 的不变量清单](design.md#2-不变量清单)。
 
