@@ -15,9 +15,10 @@ use ebook_raster::RgbaSurface;
 // WOFF/WOFF2 的 Brotli 解码器约 +105 KB（WOFF1 复用 ebook-format 已有的
 // miniz_oxide，不再额外链 flate2）；read-fonts 替换 ttf-parser 约 -11 KB。
 //
-// Rust 1.100.0 实测：core 320,319 B，core+epub 699,595 B。全文搜索
+// Rust 1.100.0 实测：core 326,698 B，core+epub 706,186 B。全文搜索
 // （ebook-search + wasm 搜索面板 + ABI 变体）让 core+epub 比 0.4.1 的
-// 679,015 B 增加约 21 KB；预算从 680 KiB 抬到 700 KiB。
+// 679,015 B 增加约 21 KB；0.6.0 的版式档案、页级/行级 DP 与孤字修复再加约
+// 6.5 KB（量表在 `quality` feature 后面，不进 wasm）。预算从 680 KiB 抬到 700 KiB。
 // 构成上 code 占 gzip 的 73%、data 占 25%；其中 epub 适配器独占约 450 KB
 // （zune-jpeg ~30 KB、wuff+brotli ~25 KB、roxmltree ~12 KB）。这些零件都在
 // Web 上真干活（引擎自己解 JPEG、自己解 woff2），做条件编译会掉功能，换不来
