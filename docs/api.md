@@ -348,7 +348,17 @@ fn image_size(&self, id: ImageId) -> Option<SizeF>;
 
 ```rust
 pub enum Mode { Paged, Scroll }
-pub struct LayoutOptions { pub limits: Limits, pub mode: Mode }
+
+/// 版式档案：语言知识的那张表，见 text-rules.md。
+pub enum Profile { Generic, ZhHans }
+
+pub struct LayoutOptions {
+    pub limits: Limits,
+    pub mode: Mode,
+    pub window: Option<BlockWindow>,
+    /// `Some` 时用这张档案，否则按 `StyledDoc.meta.lang` 选。
+    pub profile: Option<Profile>,
+}
 impl LayoutOptions {
     pub fn with_limits(limits: Limits) -> Self;
     pub fn scroll() -> Self;
@@ -363,6 +373,11 @@ pub struct Limits {
     pub max_image_pixels: u32,
 }
 ```
+
+`profile` 只换档案，不动 `StyledDoc.meta.lang`：`locl` 之类的字形选择仍随书。
+`Some(Profile::ZhHans)` 与 `meta.lang = "zh"` 对排版是同一件事
+（`crates/ebook-layout/tests/profiles.rs` 用逐字节比较钉住），差别只在那本书
+的 `lang` 有没有被改。
 
 `Limits` 的字段为 0 时由 `Limits::resolved()` 换成默认值；`LayoutOptions::default()`
 就是“全部用默认”。默认值：

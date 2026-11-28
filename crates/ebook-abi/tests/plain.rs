@@ -83,6 +83,8 @@ fn layout_options(
         letter_px,
         word_px,
         align,
+        text_rules: 0,
+        profile: 0,
     }
 }
 

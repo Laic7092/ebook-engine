@@ -354,6 +354,8 @@ pub(crate) fn index_key(book: u64, viewport: Viewport, style: Style, font_rev: u
     eat(&style.letter_px.to_bits().to_le_bytes());
     eat(&style.word_px.to_bits().to_le_bytes());
     eat(&style.align.to_le_bytes());
+    eat(&style.text_rules.to_le_bytes());
+    eat(&style.profile.to_le_bytes());
     eat(&font_rev.to_le_bytes());
     hash
 }
@@ -394,6 +396,33 @@ mod tests {
         index.set_measured(0, 0.0);
         assert_eq!(index.locate(0.0), Some(1));
         assert_eq!(index.locate(5.0), Some(1));
+    }
+
+    #[test]
+    fn the_key_follows_the_style_the_reader_can_change() {
+        let viewport = Viewport::new(400.0, 800.0);
+        let base = index_key(7, viewport, Style::default(), 1);
+        let rules = index_key(
+            7,
+            viewport,
+            Style {
+                text_rules: 1,
+                ..Style::default()
+            },
+            1,
+        );
+        let profile = index_key(
+            7,
+            viewport,
+            Style {
+                profile: 2,
+                ..Style::default()
+            },
+            1,
+        );
+        assert_ne!(base, rules, "文本政策改了，量过的高度就不算了");
+        assert_ne!(base, profile, "版式档案改了也一样");
+        assert_ne!(rules, profile);
     }
 
     #[test]

@@ -181,6 +181,11 @@ pub struct EbLayoutOptions {
     pub letter_px: f32,
     pub word_px: f32,
     pub align: u32,
+    /// 三个文本政策的三态位，每个两位：0 跟随原书、1 开、2 关。
+    /// 位 0-1 标点挤压，2-3 行末标点悬挂，4-5 中西文自动间距。
+    pub text_rules: u32,
+    /// 版式档案：0 跟随本书、1 通用、2 简体中文。
+    pub profile: u32,
 }
 
 pub const EB_LAYOUT_OPTIONS_VERSION: u32 = 1;
@@ -932,6 +937,18 @@ fn layout_options<'a>(options: *const EbLayoutOptions) -> Option<&'a EbLayoutOpt
     Some(options)
 }
 
+fn style_of(options: &EbLayoutOptions) -> Style {
+    Style {
+        font_scale: options.font_scale,
+        line_scale: options.line_scale,
+        letter_px: options.letter_px,
+        word_px: options.word_px,
+        align: options.align,
+        text_rules: options.text_rules,
+        profile: options.profile,
+    }
+}
+
 fn apply_layout(engine: *mut EbEngine, options: &EbLayoutOptions) -> i32 {
     let mut viewport = Viewport::new(options.width, options.height);
     viewport.insets = EdgesF {
@@ -940,13 +957,7 @@ fn apply_layout(engine: *mut EbEngine, options: &EbLayoutOptions) -> i32 {
         bottom: options.bottom,
         left: options.left,
     };
-    let style = Style {
-        font_scale: options.font_scale,
-        line_scale: options.line_scale,
-        letter_px: options.letter_px,
-        word_px: options.word_px,
-        align: options.align,
-    };
+    let style = style_of(options);
     let result = with_engine(engine, |core| {
         if options.scroll != 0 {
             core.layout_scroll(options.spine as usize, viewport, style)
@@ -1118,13 +1129,7 @@ pub unsafe extern "C" fn eb_plain_scroll_slice_raw(
             bottom: options.layout.bottom,
             left: options.layout.left,
         };
-        let style = Style {
-            font_scale: options.layout.font_scale,
-            line_scale: options.layout.line_scale,
-            letter_px: options.layout.letter_px,
-            word_px: options.layout.word_px,
-            align: options.layout.align,
-        };
+        let style = style_of(&options.layout);
         let result = with_engine(engine, |core| {
             core.layout_scroll(options.layout.spine as usize, viewport, style)?;
             core.bitmap_window(
@@ -1173,13 +1178,7 @@ pub unsafe extern "C" fn eb_plain_scroll_begin(
             bottom: options.bottom,
             left: options.left,
         };
-        let style = Style {
-            font_scale: options.font_scale,
-            line_scale: options.line_scale,
-            letter_px: options.letter_px,
-            word_px: options.word_px,
-            align: options.align,
-        };
+        let style = style_of(options);
         match with_engine(engine, |core| core.scroll_begin(viewport, style)) {
             Some(Ok(count)) => count as i32,
             Some(Err(error)) => {

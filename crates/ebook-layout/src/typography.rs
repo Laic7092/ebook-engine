@@ -366,6 +366,14 @@ pub(crate) static ZH_HANS: Typography = Typography {
     },
 };
 
+/// 宿主指定的档案：设置里选「通用 / 中文」时走这里，不按书的 `lang`。
+pub(crate) fn of_profile(profile: crate::Profile) -> &'static Typography {
+    match profile {
+        crate::Profile::Generic => &GENERIC,
+        crate::Profile::ZhHans => &ZH_HANS,
+    }
+}
+
 /// 按 `meta.lang` / `lang` 属性选档案。
 ///
 /// 认 `zh`、`zh-Hans`、`zh-CN`、`zh-SG` 及其大小写变体；`zh-Hant` / `zh-TW` /

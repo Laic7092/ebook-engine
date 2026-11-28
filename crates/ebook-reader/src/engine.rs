@@ -785,6 +785,7 @@ impl Engine {
         let options = LayoutOptions {
             mode,
             window,
+            profile: style.profile(),
             ..LayoutOptions::default()
         };
         let ir =

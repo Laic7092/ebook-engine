@@ -5,6 +5,33 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-29
+
+把中文排版政策交给宿主：三个开关和版式档案都能由读者选，不再只能听书里
+CSS 的。`EB_ABI_VERSION` 3 → 4（`EbLayoutOptions` 尾部加了两个字段，
+`EB_LAYOUT_OPTIONS_VERSION` 仍是 1）；IR 结构不变（1.5），默认输出逐字节不变。
+
+### Added
+
+- **`EbLayoutOptions.text_rules`**：标点挤压 / 行末标点悬挂 / 中西文自动间距
+  三个开关，每个两位——**跟随原书 / 开 / 关**。「跟随」是默认：`Style::apply`
+  在这些位上一个字节都不写，书里 CSS（`text-spacing-trim` 等）原样生效。
+  宿主把一个读者设置接到这里，就能让 TXT 书也吃到纸书的标点政策。
+- **`EbLayoutOptions.profile`**（0 跟随本书 / 1 通用 / 2 简体中文）与
+  **`ebook_layout::Profile` / `LayoutOptions.profile`**：选定版式档案，而不是
+  按 `meta.lang` 选。选「中文」与书上写 `lang="zh"` 逐字节等价
+  （`crates/ebook-layout/tests/profiles.rs`）；它不改书的 `lang`，`locl` 仍随书，
+  所以把一本 `lang="zh"` 的书按「通用」排不会顺手改掉它的字形选择。
+- **`Style.text_rules` / `Style.profile`**：阅读器侧的两个入参，`Style::apply`
+  负责把三态写进每个节点的 `ComputedStyle.text.rules`。
+
+### Changed
+
+- 滚动章高索引的键加入 `text_rules` 与 `profile`：改了政策或档案，上次量过的
+  章高就作废，滚动条不会沿用另一个排版的长度。
+- `ebook-layout` 的 `LayoutOptions` 多一个 `profile` 字段（`Default` 是 `None`，
+  老的调用点用 `..Default::default()` 不受影响）。
+
 ## [0.6.0] - 2026-11-28
 
 中文排版：版式档案、页级/行级动态规划、孤字修复、版面质量报告。`.version` 升到

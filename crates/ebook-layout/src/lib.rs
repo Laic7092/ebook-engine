@@ -134,12 +134,27 @@ pub struct BlockWindow {
     pub to: NodeId,
 }
 
+/// 版式档案：语言知识的那张表（`typography.rs`）。
+///
+/// 默认（`None`）由 `StyledDoc.meta.lang` 选：简中走 `ZhHans`，其余走
+/// `Generic`。宿主把它写成设置，就是替读者决定「按哪门语言的规矩排」——
+/// 不动 `meta.lang` 本身，所以 `locl` 之类的字形选择仍随书。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Profile {
+    /// 零语言假设：断行贪心、分页贪心、不对齐。
+    Generic,
+    /// 简体中文（CLREQ）：行/页动态规划、两端对齐、孤字与孤行修复、页底齐平。
+    ZhHans,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LayoutOptions {
     pub limits: Limits,
     pub mode: Mode,
     /// `Some` 时只排这个块窗口；`FlowCache` 不会被使用（窗口是独立结果）。
     pub window: Option<BlockWindow>,
+    /// `Some` 时用这张表，而不是按 `meta.lang` 选。
+    pub profile: Option<Profile>,
 }
 
 impl LayoutOptions {
@@ -148,6 +163,7 @@ impl LayoutOptions {
             limits,
             mode: Mode::Paged,
             window: None,
+            profile: None,
         }
     }
 
@@ -159,6 +175,7 @@ impl LayoutOptions {
             limits: Limits::default(),
             mode: Mode::Scroll,
             window: None,
+            profile: None,
         }
     }
 
@@ -262,8 +279,12 @@ impl Layout {
         }
 
         let content = c.content_size();
-        // 版式档案由 `meta.lang` 选：机制不认识具体语言，只查这张表。
-        let typo = typography::of_lang(doc.meta.lang.as_deref());
+        // 版式档案：宿主指了就用它，否则由 `meta.lang` 选。机制不认识具体
+        // 语言，只查这张表。
+        let typo = match opts.profile {
+            Some(profile) => typography::of_profile(profile),
+            None => typography::of_lang(doc.meta.lang.as_deref()),
+        };
         // 键只含「断行真正依赖的东西」：调用方版本号、可用宽度、行数预算。
         // 页高与 `Mode` 刻意不进键——它们只影响分页。
         // 窗口结果是独立坐标（已归一化到 0 附近），不能写进整章 FlowCache。

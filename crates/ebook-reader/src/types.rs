@@ -49,6 +49,13 @@ pub struct Style {
     pub word_px: f32,
     /// 0=保留原书，1=起始，2=居中，3=末尾，4=两端。
     pub align: u32,
+    /// 三个文本政策的三态位：0 跟随原书，1 开，2 关。
+    ///
+    /// 位 0-1 标点挤压，2-3 行末标点悬挂，4-5 中西文自动间距。跟随原书是
+    /// 默认：书里的 CSS（`text-spacing-trim` 等）说的算，没写就是关。
+    pub text_rules: u32,
+    /// 版式档案：0 跟随本书，1 通用，2 简体中文。
+    pub profile: u32,
 }
 
 impl Default for Style {
@@ -59,11 +66,31 @@ impl Default for Style {
             letter_px: 0.0,
             word_px: 0.0,
             align: 0,
+            text_rules: 0,
+            profile: 0,
         }
     }
 }
 
+/// 一个三态位：`None` 跟随原书，`Some(true)` 开，`Some(false)` 关。
+fn tri(mask: u32, shift: u32) -> Option<bool> {
+    match (mask >> shift) & 0b11 {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
+}
+
 impl Style {
+    /// 设置里选的版式档案；`None` 是「跟随本书」，由书的 `lang` 决定。
+    pub fn profile(&self) -> Option<ebook_layout::Profile> {
+        match self.profile {
+            1 => Some(ebook_layout::Profile::Generic),
+            2 => Some(ebook_layout::Profile::ZhHans),
+            _ => None,
+        }
+    }
+
     /// 把设置写进 `StyledDoc`。排版层仍然拿到一份普通的文档，不知道有"阅读器设置"。
     pub fn apply(&self, doc: &mut ebook_ir::StyledDoc) {
         scale_fonts(doc, self.font_scale);
@@ -89,8 +116,22 @@ impl Style {
             4 => Some(ebook_ir::TextAlign::Justify),
             _ => None,
         };
+        let trim = tri(self.text_rules, 0);
+        let hang = tri(self.text_rules, 2);
+        let autospace = tri(self.text_rules, 4);
         for node in &mut doc.nodes {
             node.style.line_height = ebook_ir::LineHeight::Mul(line_scale);
+            // 跟随原书时一个字节都不写：书里的 CSS 原样生效，默认输出不变。
+            let rules = &mut node.style.text.rules;
+            if let Some(on) = trim {
+                rules.spacing_trim = on;
+            }
+            if let Some(on) = hang {
+                rules.hanging_punctuation = on;
+            }
+            if let Some(on) = autospace {
+                rules.autospacing = on;
+            }
             if letter_px.abs() > 1.0e-4 {
                 node.style.text.letter_spacing += letter_px;
             }
@@ -317,3 +358,116 @@ impl std::fmt::Display for EngineError {
 }
 
 impl std::error::Error for EngineError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ebook_ir::{ComputedStyle, Node, NodeKind, StyledDoc};
+
+    /// 一本书：一个块，里面一行字，文字政策由「书里的 CSS」定。
+    fn doc(rules: ebook_ir::TextRules) -> StyledDoc {
+        let mut doc = StyledDoc::default();
+        let block = doc.push_node(Node {
+            kind: NodeKind::Element(ebook_ir::Tag::P),
+            style: ComputedStyle::default(),
+            parent: None,
+            first_child: 0,
+            child_len: 0,
+            src: None,
+            link: None,
+        });
+        let mut style = ComputedStyle::default();
+        style.text.rules = rules;
+        doc.push_node(Node {
+            kind: NodeKind::Text(ebook_ir::Span::new(0, 0)),
+            style,
+            parent: Some(block),
+            first_child: 0,
+            child_len: 0,
+            src: None,
+            link: None,
+        });
+        doc.set_kids(block, &[1]);
+        doc.root = block;
+        doc
+    }
+
+    fn rules_after(mask: u32) -> ebook_ir::TextRules {
+        let mut doc = doc(ebook_ir::TextRules::default());
+        Style {
+            text_rules: mask,
+            ..Style::default()
+        }
+        .apply(&mut doc);
+        doc.node(1).style.text.rules
+    }
+
+    #[test]
+    fn following_the_book_writes_nothing() {
+        let book = ebook_ir::TextRules {
+            spacing_trim: true,
+            hanging_punctuation: true,
+            autospacing: true,
+        };
+        let mut doc = doc(book);
+        Style::default().apply(&mut doc);
+        assert_eq!(doc.node(1).style.text.rules, book);
+    }
+
+    #[test]
+    fn each_switch_takes_its_two_bits() {
+        // 位 0-1 挤压、2-3 悬挂、4-5 间距：1 开、2 关。
+        let all_on = rules_after(0b01 | 0b01 << 2 | 0b01 << 4);
+        assert!(all_on.spacing_trim && all_on.hanging_punctuation && all_on.autospacing);
+
+        let trim_off = rules_after(0b10);
+        assert!(!trim_off.spacing_trim);
+        assert!(!trim_off.hanging_punctuation);
+        assert!(!trim_off.autospacing);
+    }
+
+    #[test]
+    fn a_switch_offwins_the_books_own_on() {
+        let mut doc = doc(ebook_ir::TextRules {
+            spacing_trim: true,
+            ..ebook_ir::TextRules::default()
+        });
+        // 只关挤压（2 = 关），其余跟随。
+        Style {
+            text_rules: 0b10,
+            ..Style::default()
+        }
+        .apply(&mut doc);
+        assert!(!doc.node(1).style.text.rules.spacing_trim);
+    }
+
+    #[test]
+    fn the_profile_is_three_choices() {
+        assert_eq!(Style::default().profile(), None);
+        assert_eq!(
+            Style {
+                profile: 1,
+                ..Style::default()
+            }
+            .profile(),
+            Some(ebook_layout::Profile::Generic)
+        );
+        assert_eq!(
+            Style {
+                profile: 2,
+                ..Style::default()
+            }
+            .profile(),
+            Some(ebook_layout::Profile::ZhHans)
+        );
+        assert_eq!(
+            Style {
+                profile: 9,
+                ..Style::default()
+            }
+            .profile(),
+            None,
+            "认不出的数字退回跟随本书"
+        );
+    }
+}

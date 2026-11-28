@@ -36,7 +36,7 @@ use protocol::{
 ///
 /// 只加新函数、新枚举变体不算破坏（句柄、缓冲区契约不变），但结构体加字段
 /// 一定算：C 是按偏移读的。
-pub const ABI_VERSION: u32 = 3;
+pub const ABI_VERSION: u32 = 4;
 
 /// 不透明句柄。所有状态都挂在书上：书、返回字符串、封面缓存。
 ///
@@ -599,6 +599,9 @@ fn style_core(style: protocol::Style) -> Style {
         letter_px: style.letter_px,
         word_px: style.word_px,
         align: style.align,
+        // postcard 面还没有这两个字段：那是另一条线格式，加字段要升它的版本。
+        text_rules: 0,
+        profile: 0,
     }
 }
 
